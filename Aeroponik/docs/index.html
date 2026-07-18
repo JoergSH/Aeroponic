@@ -1,0 +1,1142 @@
+<title>Aeroponik Steuerung – Systemdokumentation</title>
+<style>
+/* ========= Design Tokens ========= */
+:root {
+  --bg:         #edf0f7;
+  --surface:    #ffffff;
+  --surface-up: #f4f6fc;
+  --border:     #c5cedf;
+  --text:       #111827;
+  --muted:      #566483;
+  --accent:     #1b5fe0;
+  --green:      #148a52;
+  --amber:      #a06b08;
+  --accent-bg:  #dce8ff;
+  --green-bg:   #d4f1e4;
+  --amber-bg:   #fdf3d9;
+  --sidebar-bg: #e2e7f3;
+  --r: 6px;
+  --font-body: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:         #0e1117;
+    --surface:    #161c2d;
+    --surface-up: #1e2742;
+    --border:     #2b3456;
+    --text:       #d8e0f0;
+    --muted:      #6e7d9e;
+    --accent:     #4b91f7;
+    --green:      #37c87a;
+    --amber:      #e4a525;
+    --accent-bg:  #162142;
+    --green-bg:   #0d2e1e;
+    --amber-bg:   #2b2200;
+    --sidebar-bg: #121729;
+  }
+}
+:root[data-theme="dark"]  {
+  --bg:         #0e1117; --surface:    #161c2d; --surface-up: #1e2742;
+  --border:     #2b3456; --text:       #d8e0f0; --muted:      #6e7d9e;
+  --accent:     #4b91f7; --green:      #37c87a; --amber:      #e4a525;
+  --accent-bg:  #162142; --green-bg:   #0d2e1e; --amber-bg:   #2b2200;
+  --sidebar-bg: #121729;
+}
+:root[data-theme="light"] {
+  --bg:         #edf0f7; --surface:    #ffffff; --surface-up: #f4f6fc;
+  --border:     #c5cedf; --text:       #111827; --muted:      #566483;
+  --accent:     #1b5fe0; --green:      #148a52; --amber:      #a06b08;
+  --accent-bg:  #dce8ff; --green-bg:   #d4f1e4; --amber-bg:   #fdf3d9;
+  --sidebar-bg: #e2e7f3;
+}
+
+/* ========= Base ========= */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14.5px;
+  line-height: 1.7;
+  display: flex;
+  min-height: 100vh;
+}
+
+/* ========= Sidebar ========= */
+#sidebar {
+  position: fixed;
+  top: 0; left: 0;
+  width: 220px;
+  height: 100vh;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 22px 0 32px;
+  z-index: 100;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.sidebar-brand {
+  padding: 0 18px 18px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+.sidebar-brand .brand-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.sidebar-brand .brand-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.toc-section { margin-bottom: 6px; }
+.toc-group-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 6px 18px 2px;
+}
+.toc-link {
+  display: block;
+  padding: 4px 18px;
+  font-size: 12.5px;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: color 0.12s, border-color 0.12s;
+}
+.toc-link:hover { color: var(--text); }
+.toc-link.active { color: var(--accent); border-left-color: var(--accent); font-weight: 500; }
+
+/* ========= Content ========= */
+#content {
+  margin-left: 220px;
+  padding: 48px 60px 80px;
+  width: 100%;
+  max-width: calc(220px + 860px);
+}
+
+/* ========= Typography ========= */
+.page-eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+h1 {
+  font-size: 30px;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  text-wrap: balance;
+  margin-bottom: 6px;
+}
+.page-sub { font-size: 14.5px; color: var(--muted); margin-bottom: 48px; max-width: 60ch; }
+
+h2 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 52px 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  text-wrap: balance;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+h2 .h2-icon {
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; flex-shrink: 0;
+}
+h3 {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 28px 0 10px;
+  text-wrap: balance;
+}
+p { margin-bottom: 12px; max-width: 68ch; }
+ul, ol { margin: 0 0 12px 20px; max-width: 66ch; }
+li { margin-bottom: 3px; }
+strong { font-weight: 650; }
+
+/* ========= Section accent bars ========= */
+.s-master h2 { border-bottom-color: var(--accent); }
+.s-sensor  h2 { border-bottom-color: var(--green); }
+.s-socket  h2 { border-bottom-color: var(--amber); }
+
+/* ========= Code ========= */
+code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-up);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--accent);
+}
+pre {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 16px 20px;
+  overflow-x: auto;
+  line-height: 1.6;
+  margin-bottom: 16px;
+  color: var(--text);
+}
+pre code { background: none; border: none; padding: 0; font-size: inherit; color: inherit; }
+
+/* ========= Tables ========= */
+.table-wrap { overflow-x: auto; margin-bottom: 20px; border-radius: var(--r); border: 1px solid var(--border); }
+table { border-collapse: collapse; width: 100%; min-width: 440px; background: var(--surface); }
+th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 9px 14px;
+  background: var(--surface-up);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13.5px;
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
+}
+tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--surface-up); }
+td code { font-size: 11.5px; }
+
+/* ========= Chips ========= */
+.chip {
+  display: inline-flex; align-items: center;
+  font-size: 11.5px; font-weight: 600;
+  font-family: var(--font-mono);
+  border-radius: 4px; padding: 2px 8px;
+  white-space: nowrap;
+}
+.chip-blue   { background: var(--accent-bg); color: var(--accent); }
+.chip-green  { background: var(--green-bg);  color: var(--green);  }
+.chip-amber  { background: var(--amber-bg);  color: var(--amber);  }
+.chip-plain  { background: var(--surface-up); color: var(--muted); border: 1px solid var(--border); }
+
+/* ========= Note / Warning box ========= */
+.note {
+  border-left: 3px solid var(--amber);
+  background: var(--amber-bg);
+  border-radius: 0 var(--r) var(--r) 0;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 16px;
+  max-width: 68ch;
+}
+.note strong { color: var(--amber); }
+
+.info {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-bg);
+  border-radius: 0 var(--r) var(--r) 0;
+  padding: 10px 14px;
+  font-size: 13px;
+  margin-bottom: 16px;
+  max-width: 68ch;
+}
+
+/* ========= Topology Diagram ========= */
+.topo {
+  display: flex;
+  gap: 0;
+  align-items: flex-start;
+  margin: 24px 0 32px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.topo-master {
+  background: var(--accent-bg);
+  border: 2px solid var(--accent);
+  border-radius: var(--r);
+  padding: 18px 20px;
+  min-width: 196px;
+}
+.topo-master .t-name { font-weight: 700; font-size: 14px; color: var(--accent); margin-bottom: 2px; }
+.topo-master .t-mcu  { font-size: 11px; font-family: var(--font-mono); color: var(--muted); margin-bottom: 12px; }
+.topo-hw { list-style: none; margin: 0; }
+.topo-hw li {
+  font-size: 12px; color: var(--text); padding: 2px 0;
+  display: flex; align-items: baseline; gap: 6px;
+}
+.topo-hw li::before { content: "·"; color: var(--accent); flex-shrink: 0; }
+
+.topo-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding-top: 24px;
+  color: var(--muted);
+  font-size: 20px;
+  min-width: 40px;
+  align-self: center;
+}
+.topo-col .esp-label {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted); white-space: nowrap;
+}
+
+.topo-nodes { display: flex; flex-direction: column; gap: 10px; }
+.topo-node {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 12px 16px;
+  min-width: 226px;
+}
+.topo-node.ssr-node { border-left: 3px solid var(--amber); }
+.topo-node.sock-node { border-left: 3px solid var(--muted); }
+.topo-node.sens-node { border-left: 3px solid var(--green); }
+.topo-node.fan-node { border-left: 3px solid var(--accent); }
+.t-node-name { font-weight: 650; font-size: 13px; margin-bottom: 3px; }
+.t-node-desc { font-size: 11.5px; color: var(--muted); }
+
+/* ========= Sprachumschaltung ========= */
+html:not([data-lang="en"]) .en { display: none; }
+html[data-lang="en"] .de { display: none; }
+.lang-toggle {
+  display: flex; gap: 2px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px; margin-top: 10px; width: fit-content;
+}
+.lang-btn {
+  font: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+  border: none; background: none; color: var(--muted);
+  padding: 3px 9px; border-radius: 3px; cursor: pointer;
+}
+.lang-btn.active { background: var(--accent); color: #fff; }
+
+/* ========= Divider ========= */
+hr { border: none; border-top: 1px solid var(--border); margin: 44px 0; }
+
+/* ========= Responsive ========= */
+@media (max-width: 860px) {
+  #sidebar { position: relative; width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); }
+  #content { margin-left: 0; padding: 24px 20px 60px; }
+  body { flex-direction: column; }
+}
+</style>
+
+<script>
+function setLang(lang) {
+  document.documentElement.setAttribute('data-lang', lang);
+  document.querySelectorAll('.lang-btn').forEach(b => b.classList.toggle('active', b.dataset.langBtn === lang));
+  document.title = lang === 'en' ? 'Aeroponics Controller – System Documentation' : 'Aeroponik Steuerung – Systemdokumentation';
+  localStorage.setItem('aeroponik-doc-lang', lang);
+}
+setLang(localStorage.getItem('aeroponik-doc-lang') || 'de');
+</script>
+
+<!-- SIDEBAR -->
+<aside id="sidebar">
+  <div class="sidebar-brand">
+    <div class="brand-name">Aeroponik</div>
+    <div class="brand-sub"><span class="de">Systemdokumentation</span><span class="en">System Documentation</span></div>
+    <div class="lang-toggle">
+      <button class="lang-btn" data-lang-btn="de" onclick="setLang('de')">DE</button>
+      <button class="lang-btn" data-lang-btn="en" onclick="setLang('en')">EN</button>
+    </div>
+  </div>
+  <nav>
+    <div class="toc-section">
+      <div class="toc-group-label"><span class="de">System</span><span class="en">System</span></div>
+      <a href="#uebersicht" class="toc-link"><span class="de">Übersicht</span><span class="en">Overview</span></a>
+      <a href="#protokoll" class="toc-link"><span class="de">ESP-NOW Protokoll</span><span class="en">ESP-NOW Protocol</span></a>
+    </div>
+    <div class="toc-section">
+      <div class="toc-group-label"><span class="de">Hauptsteuerung</span><span class="en">Main Controller</span></div>
+      <a href="#master-hw" class="toc-link"><span class="de">Hardware & Pinout</span><span class="en">Hardware & Pinout</span></a>
+      <a href="#master-ventile" class="toc-link"><span class="de">Ventile (PCF8574AP)</span><span class="en">Valves (PCF8574AP)</span></a>
+      <a href="#master-features" class="toc-link"><span class="de">Funktionen</span><span class="en">Features</span></a>
+      <a href="#scheduler" class="toc-link"><span class="de">Beleuchtungs-Scheduler</span><span class="en">Lighting Scheduler</span></a>
+      <a href="#rs485" class="toc-link"><span class="de">RS485-Bus</span><span class="en">RS485 Bus</span></a>
+      <a href="#rs485-multisensor" class="toc-link"><span class="de">RS485-Multisensor (Zelt)</span><span class="en">RS485 Multisensor (Tent)</span></a>
+      <a href="#lichtx4" class="toc-link">Lichtx4</a>
+      <a href="#luefter" class="toc-link"><span class="de">Abluftlüfter</span><span class="en">Exhaust Fan</span></a>
+      <a href="#co2" class="toc-link"><span class="de">CO2-Steuerung</span><span class="en">CO2 Control</span></a>
+      <a href="#raumklima" class="toc-link"><span class="de">Raumklima & VPD</span><span class="en">Room Climate & VPD</span></a>
+      <a href="#datenlog" class="toc-link"><span class="de">Daten-Log & Download</span><span class="en">Data Log & Download</span></a>
+    </div>
+    <div class="toc-section">
+      <div class="toc-group-label"><span class="de">Nodes (ESP-NOW)</span><span class="en">Nodes (ESP-NOW)</span></div>
+      <a href="#multisensor" class="toc-link">Multisensor</a>
+      <a href="#steckdosen" class="toc-link"><span class="de">Steckdosen</span><span class="en">Sockets</span></a>
+      <a href="#erststart" class="toc-link"><span class="de">Erststart & Setup</span><span class="en">First Boot & Setup</span></a>
+    </div>
+    <div class="toc-section">
+      <div class="toc-group-label"><span class="de">Referenz</span><span class="en">Reference</span></div>
+      <a href="#serial" class="toc-link"><span class="de">Serial-Kommandos</span><span class="en">Serial Commands</span></a>
+    </div>
+  </nav>
+</aside>
+
+<!-- CONTENT -->
+<main id="content">
+
+  <div class="page-eyebrow">ESP32 · ESP-NOW · RS485 · pioarduino</div>
+  <h1><span class="de">Aeroponik Steuerung</span><span class="en">Aeroponics Controller</span></h1>
+  <p class="page-sub">
+    <span class="de">Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sensor-/Aktor-Nodes via ESP-NOW</span>
+    <span class="en">System documentation — Master (ESP32-S3) with RS485 devices and wireless sensor/actuator nodes via ESP-NOW</span>
+  </p>
+
+  <!-- ===== ÜBERSICHT ===== -->
+  <section id="uebersicht">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">▣</span><span class="de">Systemübersicht</span><span class="en">System Overview</span></h2>
+
+    <div class="topo">
+      <div class="topo-master">
+        <div class="t-name">Aeroponik Master</div>
+        <div class="t-mcu">ESP32-S3 N16R8</div>
+        <ul class="topo-hw">
+          <li><span class="de">W5500 Ethernet (LAN + WiFi parallel)</span><span class="en">W5500 Ethernet (LAN + WiFi in parallel)</span></li>
+          <li><span class="de">PCF8574AP — Magnetventile MV1–MV4</span><span class="en">PCF8574AP — solenoid valves MV1–MV4</span></li>
+          <li><span class="de">DS3231 RTC (I2C)</span><span class="en">DS3231 RTC (I2C)</span></li>
+          <li><span class="de">MicroSD — Datenlogging</span><span class="en">MicroSD — data logging</span></li>
+          <li><span class="de">RS485 UART1 (MAX13487)</span><span class="en">RS485 UART1 (MAX13487)</span></li>
+          <li><span class="de">2× DS18B20 Temperatursensor</span><span class="en">2× DS18B20 temperature sensor</span></li>
+          <li><span class="de">Drucksensor 0,5–4,5 V analog</span><span class="en">Pressure sensor 0.5–4.5 V analog</span></li>
+          <li><span class="de">Ultraschall HC-SR04 Füllstand</span><span class="en">HC-SR04 ultrasonic fill level</span></li>
+          <li><span class="de">Webinterface Port 80</span><span class="en">Web interface, port 80</span></li>
+        </ul>
+      </div>
+
+      <div class="topo-col">
+        <span>⇄</span>
+        <span class="esp-label">RS485</span>
+        <span class="esp-label">9600 <span class="de">Baud</span><span class="en">baud</span></span>
+      </div>
+
+      <div class="topo-nodes">
+        <div class="topo-node sens-node">
+          <div class="t-node-name" style="color:var(--green)">Multisensor</div>
+          <div style="margin:3px 0"><span class="chip chip-green">Adr. 0x20 · FC03</span></div>
+          <div class="t-node-desc"><span class="de">Zelt-Klima (SCD41: Temp · Feuchte · CO₂) · PPFD · Spektrum (AS7341)</span><span class="en">Tent climate (SCD41: temp · humidity · CO₂) · PPFD · spectrum (AS7341)</span></div>
+        </div>
+        <div class="topo-node ssr-node">
+          <div class="t-node-name" style="color:var(--amber)">Lichtx4</div>
+          <div style="margin:3px 0"><span class="chip chip-amber">Adr. 0x40 · FC03/FC06</span></div>
+          <div class="t-node-desc"><span class="de">4× Relais · Beleuchtungs-Scheduler</span><span class="en">4× relay · lighting scheduler</span></div>
+        </div>
+        <div class="topo-node fan-node">
+          <div class="t-node-name" style="color:var(--accent)"><span class="de">Abluftlüfter</span><span class="en">Exhaust fan</span> (MARS Hydro)</div>
+          <div style="margin:3px 0"><span class="chip chip-blue"><span class="de">Adr.</span><span class="en">Addr.</span> 6 · FC03/FC06</span></div>
+          <div class="t-node-desc"><span class="de">Drehzahl/Leistung · manuell oder automatisch</span><span class="en">RPM/power · manual or automatic</span></div>
+        </div>
+      </div>
+
+      <div class="topo-col">
+        <span>⇄</span>
+        <span class="esp-label">ESP-NOW</span>
+        <span class="esp-label"><span class="de">Kanal</span><span class="en">Channel</span> 6</span>
+      </div>
+
+      <div class="topo-nodes">
+        <div class="topo-node sock-node">
+          <div class="t-node-name"><span class="de">Steckdosen</span><span class="en">Sockets</span></div>
+          <div style="margin:3px 0"><span class="chip chip-plain">NODE_TYPE_SOCKET · 0x03</span></div>
+          <div class="t-node-desc"><span class="de">4× Relais · manuelle / API-Steuerung (u. a. CO2-Ausgang)</span><span class="en">4× relay · manual / API control (incl. CO2 output)</span></div>
+        </div>
+      </div>
+    </div>
+
+    <p>
+      <span class="de">Die drei RS485-Geräte (Multisensor, Lichtx4, Abluftlüfter) sind fest verdrahtet und werden zyklisch abgefragt — siehe <a href="#rs485">RS485-Bus</a>. ESP-NOW-Nodes registrieren sich dagegen beim Start beim Master und senden periodische Heartbeats; der Master erkennt ihren Online-/Offline-Status automatisch.</span>
+      <span class="en">The three RS485 devices (Multisensor, Lichtx4, exhaust fan) are hard-wired and polled cyclically — see <a href="#rs485">RS485 Bus</a>. ESP-NOW nodes, by contrast, register with the master on startup and send periodic heartbeats; the master detects their online/offline status automatically.</span>
+    </p>
+    <p>
+      <span class="de">LAN (W5500 via SPI2) und WiFi laufen gleichzeitig. Das Webinterface auf Port 80 ist auf beiden Interfaces ohne Codeänderungen erreichbar.</span>
+      <span class="en">LAN (W5500 via SPI2) and WiFi run simultaneously. The web interface on port 80 is reachable on both interfaces with no code changes.</span>
+    </p>
+  </section>
+
+  <!-- ===== PROTOKOLL ===== -->
+  <section id="protokoll">
+    <h2><span class="h2-icon" style="background:var(--surface-up);color:var(--muted)">⇄</span><span class="de">ESP-NOW Protokoll</span><span class="en">ESP-NOW Protocol</span></h2>
+
+    <h3><span class="de">Paketformat</span><span class="en">Packet Format</span></h3>
+    <pre><code>typedef struct {
+    uint8_t  node_id;      // <span class="de">1–254  |  0 = Master  |  255 = Broadcast</span><span class="en">1–254  |  0 = master  |  255 = broadcast</span>
+    uint8_t  msg_type;     // <span class="de">Nachrichtentyp</span><span class="en">message type</span>
+    uint8_t  seq;          // <span class="de">Sequenznummer</span><span class="en">sequence number</span>
+    uint8_t  payload_len;  // 0–16
+    uint8_t  payload[16];
+    uint8_t  crc8;         // <span class="de">Polynom</span><span class="en">polynomial</span> 0x07
+} espnow_packet_t;         // <span class="de">21 Byte</span><span class="en">21 bytes</span></code></pre>
+
+    <h3><span class="de">Node-Typen</span><span class="en">Node Types</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Konstante</span><span class="en">Constant</span></th><th><span class="de">Wert</span><span class="en">Value</span></th><th><span class="de">Beschreibung</span><span class="en">Description</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>NODE_TYPE_LIGHT</code></td><td><code>0x01</code></td><td><span class="de">LED-Lichtsteuerung (PWM, Licht-Meter)</span><span class="en">LED light control (PWM, light meter)</span></td></tr>
+          <tr><td><code>NODE_TYPE_SENSOR</code></td><td><code>0x02</code></td><td><span class="de">Multisensor — Luft + Spektrum</span><span class="en">Multisensor — air + spectrum</span></td></tr>
+          <tr><td><code>NODE_TYPE_SOCKET</code></td><td><code>0x03</code></td><td><span class="de">Steckdose — allgemeine manuelle Steuerung</span><span class="en">Socket — general manual control</span></td></tr>
+          <tr><td><code>NODE_TYPE_SPEKTRUM</code></td><td><code>0x04</code></td><td><span class="de">AS7341 Spektrum-Lichtsensor</span><span class="en">AS7341 spectral light sensor</span></td></tr>
+          <tr><td><code>NODE_TYPE_LIGHT_SSR</code></td><td><code>0x05</code></td><td><span class="de">Licht-SSR — automatisch per Beleuchtungs-Scheduler (Legacy, siehe <a href="#steckdosen">Steckdosen</a>)</span><span class="en">Light SSR — automatic via lighting scheduler (legacy, see <a href="#steckdosen">Sockets</a>)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">Nachrichtentypen</span><span class="en">Message Types</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Typ</span><span class="en">Type</span></th><th><span class="de">Wert</span><span class="en">Value</span></th><th><span class="de">Richtung</span><span class="en">Direction</span></th><th><span class="de">Bedeutung</span><span class="en">Meaning</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>MSG_REGISTER</code></td><td><code>0x01</code></td><td>Node → Master</td><td><span class="de">Node meldet sich an</span><span class="en">Node registers</span></td></tr>
+          <tr><td><code>MSG_REGISTER_ACK</code></td><td><code>0x02</code></td><td>Master → Node</td><td><span class="de">Anmeldung bestätigt</span><span class="en">Registration confirmed</span></td></tr>
+          <tr><td><code>MSG_HEARTBEAT</code></td><td><code>0x03</code></td><td>Node → Master</td><td><span class="de">Keep-Alive / Online-Check</span><span class="en">Keep-alive / online check</span></td></tr>
+          <tr><td><code>MSG_HEARTBEAT_ACK</code></td><td><code>0x04</code></td><td>Master → Node</td><td><span class="de">Heartbeat bestätigt</span><span class="en">Heartbeat confirmed</span></td></tr>
+          <tr><td><code>MSG_SENSOR_DATA</code></td><td><code>0x10</code></td><td>Node → Master</td><td><span class="de">Messdaten (Subtyp in payload[0])</span><span class="en">Measurement data (subtype in payload[0])</span></td></tr>
+          <tr><td><code>MSG_COMMAND</code></td><td><code>0x20</code></td><td>Master → Node</td><td><span class="de">Steuerbefehl</span><span class="en">Control command</span></td></tr>
+          <tr><td><code>MSG_OTA_START</code></td><td><code>0x40</code></td><td>Master → Node</td><td><span class="de">OTA-Update (AP-Passwort in payload[0..7])</span><span class="en">OTA update (AP password in payload[0..7])</span></td></tr>
+          <tr><td><code>MSG_OTA_ACK</code></td><td><code>0x41</code></td><td>Node → Master</td><td><span class="de">OTA wird gestartet</span><span class="en">OTA is starting</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">Befehls-Subtypen</span><span class="en">Command Subtypes</span> (MSG_COMMAND · payload[0])</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Subtyp</span><span class="en">Subtype</span></th><th><span class="de">Wert</span><span class="en">Value</span></th><th>payload[1+]</th></tr></thead>
+        <tbody>
+          <tr><td><code>CMD_SET_PWM</code></td><td><code>0x01</code></td><td><span class="de">uint16 BE — PWM-Wert 0–1000 (= 0–100,0 %)</span><span class="en">uint16 BE — PWM value 0–1000 (= 0–100.0 %)</span></td></tr>
+          <tr><td><code>CMD_SET_ONOFF</code></td><td><code>0x02</code></td><td><span class="de">Bitmaske</span><span class="en">Bitmask</span>: Bit0=R1 Bit1=R2 Bit2=R3 Bit3=R4</td></tr>
+          <tr><td><code>CMD_SET_INTERVAL</code></td><td><code>0x10</code></td><td><span class="de">uint16 — Messintervall in Sekunden</span><span class="en">uint16 — measurement interval in seconds</span></td></tr>
+          <tr><td><code>CMD_REQUEST_DATA</code></td><td><code>0x11</code></td><td><span class="de">– (löst sofortige Messung aus)</span><span class="en">– (triggers an immediate measurement)</span></td></tr>
+          <tr><td><code>CMD_REQUEST_RAWSPEC</code></td><td><code>0x12</code></td><td><span class="de">– (nächste Messung sendet Rohkanäle)</span><span class="en">– (next measurement sends raw channels)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">Sensor-Daten-Subtypen</span><span class="en">Sensor Data Subtypes</span> (MSG_SENSOR_DATA · payload[0])</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Subtyp</span><span class="en">Subtype</span></th><th><span class="de">Wert</span><span class="en">Value</span></th><th><span class="de">payload-Inhalt</span><span class="en">payload content</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>SUBTYPE_AIR</code></td><td><code>0x01</code></td><td>[1..2] Temp×100 int16BE · [3..4] RH×100 uint16BE · [5..6] eCO₂ ppm · [7..8] TVOC ppb</td></tr>
+          <tr><td><code>SUBTYPE_LIGHT</code></td><td><code>0x02</code></td><td>[1..2] PPFD×10 uint16BE · [3..16] <span class="de">Spektralkanäle</span><span class="en">spectral channels</span> 415–680 nm</td></tr>
+          <tr><td><code>SUBTYPE_RELAY_STATUS</code></td><td><code>0x10</code></td><td>[1] <span class="de">Relais-Bitmaske</span><span class="en">Relay bitmask</span> (Bit0–3 = R1–R4)</td></tr>
+          <tr><td><code>SUBTYPE_LICHT_SUMMARY</code></td><td><code>0x20</code></td><td>[1..2] PPFD×10 · [3..4] RB-Ratio×100 · [5] blue% · [6] red% · [7] <span class="de">sättigung</span><span class="en">saturation</span> · [8..15] F1–F8 <span class="de">normiert</span><span class="en">normalized</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr>
+
+  <!-- ===== MASTER PINOUT ===== -->
+  <section id="master-hw" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">◈</span><span class="de">Hauptsteuerung — Hardware & Pinout</span><span class="en">Main Controller — Hardware & Pinout</span></h2>
+    <p><strong>MCU:</strong> ESP32-S3 N16R8 (16 MB Flash, 8 MB OPI-PSRAM)</p>
+    <div class="note">
+      <strong><span class="de">Gesperrte GPIOs:</span><span class="en">Reserved GPIOs:</span></strong> 0, 3, 45, 46 (<span class="de">Strapping</span><span class="en">strapping</span>) · 19, 20 (USB-OTG) · 26–32 (Flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0)
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>GPIO</th><th><span class="de">Konstante</span><span class="en">Constant</span></th><th><span class="de">Peripherie</span><span class="en">Peripheral</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>1</code></td><td><code>RS485_DI</code></td><td>UART1 TX → MAX13487 Data In</td></tr>
+          <tr><td><code>2</code></td><td><code>RS485_RO</code></td><td>UART1 RX ← MAX13487 Receive Out</td></tr>
+          <tr><td><code>3</code></td><td><code>I2C2_SDA</code></td><td><span class="de">I2C-Bus 2: AHT21B (Raumklima)</span><span class="en">I2C bus 2: AHT21B (room climate)</span></td></tr>
+          <tr><td><code>4</code></td><td><code>DS18B20_PIN</code></td><td><span class="de">OneWire — 2× DS18B20 (Vorrat + Pflanze)</span><span class="en">OneWire — 2× DS18B20 (reservoir + plant)</span></td></tr>
+          <tr><td><code>5</code></td><td><code>PRESSURE_PIN</code></td><td><span class="de">Analog — Drucksensor 0,5–4,5 V ratiometrisch</span><span class="en">Analog — pressure sensor 0.5–4.5 V ratiometric</span></td></tr>
+          <tr><td><code>10</code></td><td><code>WSRST</code></td><td>W5500 Reset (<span class="de">aktiv LOW</span><span class="en">active LOW</span>)</td></tr>
+          <tr><td><code>11</code></td><td><code>SPI_MOSI</code></td><td>SPI2 MOSI — W5500 + MicroSD</td></tr>
+          <tr><td><code>12</code></td><td><code>SPI_SCK</code></td><td>SPI2 SCK</td></tr>
+          <tr><td><code>13</code></td><td><code>SPI_MISO</code></td><td>SPI2 MISO</td></tr>
+          <tr><td><code>14</code></td><td><code>SPI_CS_W5500</code></td><td>W5500 Chip Select</td></tr>
+          <tr><td><code>15</code></td><td><code>ULTRASONIC_TRIG</code></td><td>HC-SR04 <span class="de">Trigger</span><span class="en">trigger</span></td></tr>
+          <tr><td><code>16</code></td><td><code>ULTRASONIC_ECHO</code></td><td>HC-SR04 Echo (<span class="de">3,3 V direkt anschließbar</span><span class="en">3.3 V, direct connection</span>)</td></tr>
+          <tr><td><code>17</code></td><td><code>I2C_SCL</code></td><td><span class="de">I2C-Bus: DS3231 + PCF8574AP</span><span class="en">I2C bus: DS3231 + PCF8574AP</span></td></tr>
+          <tr><td><code>18</code></td><td><code>I2C_SDA</code></td><td><span class="de">I2C-Bus: DS3231 + PCF8574AP</span><span class="en">I2C bus: DS3231 + PCF8574AP</span></td></tr>
+          <tr><td><code>21</code></td><td><code>WSINT</code></td><td>W5500 <span class="de">Interrupt</span><span class="en">interrupt</span></td></tr>
+          <tr><td><code>39</code></td><td><code>SPI_CS_SD</code></td><td>MicroSD Chip Select</td></tr>
+          <tr><td><code>46</code></td><td><code>I2C2_SCL</code></td><td><span class="de">I2C-Bus 2: AHT21B (Raumklima) — bidirektional, kein ADC, Strapping nur im USB-Auto-Flash-Reset-Fenster relevant</span><span class="en">I2C bus 2: AHT21B (room climate) — bidirectional, no ADC, strapping role only matters during the USB auto-flash reset window</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== VENTILE ===== -->
+  <section id="master-ventile" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">⊕</span><span class="de">Magnetventile — PCF8574AP</span><span class="en">Solenoid Valves — PCF8574AP</span></h2>
+    <p>
+      <span class="de">I2C-Adresse <code>0x38</code> (alle A-Pins auf GND). Jedes Bit steuert ein Ventil: <strong>1 = AN, 0 = AUS</strong>. Der aktuelle Zustand aller 8 Outputs wird als ein Byte geschrieben.</span>
+      <span class="en">I2C address <code>0x38</code> (all A pins tied to GND). Each bit drives one valve: <strong>1 = ON, 0 = OFF</strong>. The current state of all 8 outputs is written as a single byte.</span>
+    </p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Bit / Pin</th><th><span class="de">Konstante</span><span class="en">Constant</span></th><th><span class="de">Ventil</span><span class="en">Valve</span></th><th><span class="de">Funktion</span><span class="en">Function</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>Bit 0 · P0</code></td><td><code>MV_BEHAELTER_1</code></td><td>MV1</td><td><span class="de">Zulauf Behälter 1</span><span class="en">Inlet reservoir 1</span></td></tr>
+          <tr><td><code>Bit 1 · P1</code></td><td><code>MV_BEHAELTER_2</code></td><td>MV2</td><td><span class="de">Zulauf Behälter 2</span><span class="en">Inlet reservoir 2</span></td></tr>
+          <tr><td><code>Bit 2 · P2</code></td><td><code>MV_BEHAELTER_3</code></td><td>MV3</td><td><span class="de">Zulauf Behälter 3</span><span class="en">Inlet reservoir 3</span></td></tr>
+          <tr><td><code>Bit 3 · P3</code></td><td><code>MV_RUECKLAUF</code></td><td>MV4</td><td><span class="de">Rücklauf / Ablauf</span><span class="en">Return / drain</span></td></tr>
+          <tr><td><code>Bit 4–7 · P4–P7</code></td><td>—</td><td><span class="de">Reserve</span><span class="en">Spare</span></td><td><span class="de">Ungenutzt (5 weiterer Reserve-Outputs)</span><span class="en">Unused (5 spare outputs)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">I2C-Geräte</span><span class="en">I2C Devices</span> (SDA=18, SCL=17)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Adresse</span><span class="en">Address</span></th><th><span class="de">Baustein</span><span class="en">Chip</span></th><th><span class="de">Funktion</span><span class="en">Function</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>0x38</code></td><td>PCF8574AP</td><td><span class="de">GPIO-Expander für Magnetventile MV1–MV4</span><span class="en">GPIO expander for solenoid valves MV1–MV4</span></td></tr>
+          <tr><td><code>0x68</code></td><td>DS3231</td><td><span class="de">Echtzeituhr + integriertes EEPROM (AT24C32)</span><span class="en">Real-time clock + onboard EEPROM (AT24C32)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== FUNKTIONEN ===== -->
+  <section id="master-features" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">≡</span><span class="de">Hauptsteuerung — Funktionen</span><span class="en">Main Controller — Features</span></h2>
+
+    <h3><span class="de">Netzwerk</span><span class="en">Network</span></h3>
+    <p>
+      <span class="de">W5500 (Ethernet) und WiFi laufen gleichzeitig über das lwIP-Stack. Bei Ethernet-Verbindungsaufbau wird automatisch <strong>NTP</strong> abgerufen und die RTC gestellt (Schwellwert: ±60 s Abweichung, sync alle 60 min). Das Webinterface ist auf beiden IPs ohne Codeänderungen verfügbar.</span>
+      <span class="en">W5500 (Ethernet) and WiFi run simultaneously via the lwIP stack. On Ethernet link-up, <strong>NTP</strong> is fetched automatically and the RTC is set (threshold: ±60 s deviation, resynced every 60 min). The web interface is available on both IPs with no code changes.</span>
+    </p>
+    <p>
+      <span class="de">Ohne Router: Master startet als <strong>AP auf Kanal&nbsp;6</strong> (<code>ESPNOW_DEFAULT_CHANNEL</code>). Nodes im "Kein-WLAN"-Modus nutzen denselben Kanal.</span>
+      <span class="en">Without a router: the master starts as an <strong>AP on channel&nbsp;6</strong> (<code>ESPNOW_DEFAULT_CHANNEL</code>). Nodes in "no WiFi" mode use the same channel.</span>
+    </p>
+
+    <h3><span class="de">Ventilsteuerung</span><span class="en">Valve Control</span></h3>
+    <p>
+      <span class="de">Drei unabhängige Bewässerungskreise mit konfigurierbarer Öffnungszeit (Sek.) und Pausenintervall (Min.). Optional vorgeschalteter Rücklauf-Vorlauf via MV4 (konfigurierbare Vorlaufzeit).</span>
+      <span class="en">Three independent irrigation circuits with configurable open time (sec.) and pause interval (min.). Optional return pre-flush via MV4 (configurable pre-flush time).</span>
+    </p>
+
+    <h3><span class="de">Tanküberwachung (Kegelstumpf)</span><span class="en">Tank Monitoring (Truncated Cone)</span></h3>
+    <p>
+      <span class="de">Füllstand per Ultraschall (HC-SR04). Umrechnung Distanz → Wasserhöhe → Volumen unter Berücksichtigung der konischen Tankgeometrie (einstellbare Radien oben/unten und Höhe).</span>
+      <span class="en">Fill level via ultrasonic sensor (HC-SR04). Conversion distance → water height → volume, accounting for the conical tank geometry (configurable top/bottom radii and height).</span>
+    </p>
+
+    <h3><span class="de">SD-Logging</span><span class="en">SD Logging</span></h3>
+    <p>
+      <span class="de">Alle 5 Minuten werden sämtliche Mess- und Steuerwerte in CSV-Dateien nach dem Schema <code>/JJJJ-MM-TT.csv</code> geschrieben, inkl. Raum-/Zeltklima, Lüfter- und Lichtstatus. Details, vollständige Spaltenliste sowie Download/Löschen über das Webinterface: siehe <a href="#datenlog">Daten-Log & Download</a>.</span>
+      <span class="en">Every 5 minutes, all measurement and control values are written to CSV files following the scheme <code>/YYYY-MM-DD.csv</code>, including room/tent climate, fan and light status. Details, full column list, and download/delete via the web interface: see <a href="#datenlog">Data Log & Download</a>.</span>
+    </p>
+
+    <h3>Node-OTA</h3>
+    <p>
+      <span class="de">Über die API kann für jeden registrierten Node ein OTA-Update ausgelöst werden. Der Master öffnet kurzzeitig einen Hilfs-AP (<code>Aeroponik-OTA</code>, zeitlich begrenztes Zufalls-Passwort); der Node verbindet sich und lädt die Firmware per HTTP.</span>
+      <span class="en">An OTA update can be triggered for any registered node via the API. The master briefly opens a helper AP (<code>Aeroponik-OTA</code>, time-limited random password); the node connects and downloads the firmware over HTTP.</span>
+    </p>
+  </section>
+
+  <!-- ===== SCHEDULER ===== -->
+  <section id="scheduler" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">☀</span><span class="de">Beleuchtungs-Scheduler</span><span class="en">Lighting Scheduler</span></h2>
+    <p>
+      <span class="de">Simuliert Sonnenauf- und -untergang über bis zu 4 SSRs. Sendet alle 30 Sekunden — bei Maskenänderung — <code>CMD_SET_ONOFF</code> an alle online gemeldeten Nodes mit Typ <span class="chip chip-amber">NODE_TYPE_LIGHT_SSR</span>. Erfordert funktionierende RTC.</span>
+      <span class="en">Simulates sunrise and sunset over up to 4 SSRs. Sends <code>CMD_SET_ONOFF</code> every 30 seconds — on mask change — to all online nodes of type <span class="chip chip-amber">NODE_TYPE_LIGHT_SSR</span>. Requires a working RTC.</span>
+    </p>
+
+    <h3><span class="de">Parameter</span><span class="en">Parameters</span> (EEPROM, Magic 0xD5)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Feld</span><span class="en">Field</span></th><th><span class="de">Standard</span><span class="en">Default</span></th><th><span class="de">Einheit</span><span class="en">Unit</span></th><th><span class="de">Beschreibung</span><span class="en">Description</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>enabled</code></td><td>false</td><td>bool</td><td><span class="de">Scheduler aktiv</span><span class="en">Scheduler active</span></td></tr>
+          <tr><td><code>dawn_start</code></td><td>360</td><td><span class="de">min seit 0:00</span><span class="en">min since 0:00</span></td><td><span class="de">Beginn Sonnenaufgang (6:00)</span><span class="en">Sunrise start (6:00)</span></td></tr>
+          <tr><td><code>dawn_end</code></td><td>480</td><td><span class="de">min seit 0:00</span><span class="en">min since 0:00</span></td><td><span class="de">Ende Aufgang / volle Helligkeit (8:00)</span><span class="en">Sunrise end / full brightness (8:00)</span></td></tr>
+          <tr><td><code>dusk_start</code></td><td>1080</td><td><span class="de">min seit 0:00</span><span class="en">min since 0:00</span></td><td><span class="de">Beginn Sonnenuntergang (18:00)</span><span class="en">Sunset start (18:00)</span></td></tr>
+          <tr><td><code>dusk_end</code></td><td>1200</td><td><span class="de">min seit 0:00</span><span class="en">min since 0:00</span></td><td><span class="de">Ende Untergang / Dunkel (20:00)</span><span class="en">Sunset end / dark (20:00)</span></td></tr>
+          <tr><td><code>num_ssr</code></td><td>4</td><td>1–4</td><td><span class="de">Anzahl genutzter SSRs</span><span class="en">Number of SSRs used</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">Relay-Maske — Berechnungslogik</span><span class="en">Relay Mask — Calculation Logic</span></h3>
+    <pre><code>// <span class="de">t = linearer Fortschritt 0.0→1.0 im Auf-/Untergang</span><span class="en">t = linear progress 0.0→1.0 through sunrise/sunset</span>
+active = ceilf(t × num_ssr);        // <span class="de">gleichmäßige Stufen, erste/letzte Stufe exakt am Fensterrand</span><span class="en">even steps, first/last step exactly at the window edge</span>
+mask   = (active == 0) ? 0x00 : (uint8_t)((1 << active) - 1);</code></pre>
+    <div class="note">
+      <strong><span class="de">Hinweis:</span><span class="en">Note:</span></strong>
+      <span class="de"><code>round()</code> wurde durch <code>ceil()</code> ersetzt: Mit <code>round()</code> waren die erste und letzte Stufe nur halb so breit wie die mittleren (Bin-Ränder bei 0 und n decken nur <code>[0, 0.5/n)</code> bzw. <code>[1−0.5/n, 1]</code> ab) — dadurch schaltete die erste SSR zu spät ein und die letzte zu früh aus.</span>
+      <span class="en"><code>round()</code> was replaced with <code>ceil()</code>: with <code>round()</code>, the first and last step were only half as wide as the middle ones (the bin edges at 0 and n only cover <code>[0, 0.5/n)</code> and <code>[1−0.5/n, 1]</code>) — causing the first SSR to switch on too late and the last one to switch off too early.</span>
+    </div>
+
+    <p><span class="de">Beispiel</span><span class="en">Example</span> <code>num_ssr=4</code>, <span class="de">Aufgang 6:00–8:00 (120 min)</span><span class="en">sunrise 6:00–8:00 (120 min)</span>:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Zeitraum</span><span class="en">Time Range</span></th><th>t</th><th><span class="de">Aktive SSRs</span><span class="en">Active SSRs</span></th><th><span class="de">Maske</span><span class="en">Mask</span></th></tr></thead>
+        <tbody>
+          <tr><td><span class="de">vor 6:00</span><span class="en">before 6:00</span></td><td>—</td><td>0</td><td><code>0x00</code></td></tr>
+          <tr><td>6:00 – 6:30</td><td>0,0 – 0,25</td><td>1</td><td><code>0x01</code> (SSR1)</td></tr>
+          <tr><td>6:30 – 7:00</td><td>0,25 – 0,5</td><td>2</td><td><code>0x03</code> (SSR1+2)</td></tr>
+          <tr><td>7:00 – 7:30</td><td>0,5 – 0,75</td><td>3</td><td><code>0x07</code> (SSR1+2+3)</td></tr>
+          <tr><td>7:30 – 8:00 → 18:00</td><td>0,75–1,0 / <span class="de">voll</span><span class="en">full</span></td><td>4</td><td><code>0x0F</code> (<span class="de">alle</span><span class="en">all</span>)</td></tr>
+          <tr><td>18:00 – 20:00</td><td>1,0 → 0,0</td><td>4 → 0</td><td><span class="de">spiegelverkehrt</span><span class="en">mirrored</span></td></tr>
+          <tr><td><span class="de">nach 20:00</span><span class="en">after 20:00</span></td><td>—</td><td>0</td><td><code>0x00</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ===== RS485-BUS ===== -->
+  <section id="rs485" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">⎌</span><span class="de">RS485-Bus</span><span class="en">RS485 Bus</span></h2>
+    <p>
+      <span class="de">Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete Geräte im Zelt. Physikalisch ein gemeinsam genutzter Zweidraht-Bus über einen <strong>MAX13487</strong> (automatische Sende-/Empfangsrichtung, kein manuelles DE/RE-Umschalten nötig) an <code>RS485_DI</code> (GPIO1) / <code>RS485_RO</code> (GPIO2), <strong>9600 Baud, 8N1</strong>.</span>
+      <span class="en">A second communication path, independent of the ESP-NOW network, for hard-wired devices in the tent. Physically a shared two-wire bus via a <strong>MAX13487</strong> (automatic transmit/receive direction, no manual DE/RE switching needed) on <code>RS485_DI</code> (GPIO1) / <code>RS485_RO</code> (GPIO2), <strong>9600 baud, 8N1</strong>.</span>
+    </p>
+
+    <div class="note">
+      <strong><span class="de">Historisch:</span><span class="en">Historical note:</span></strong>
+      <span class="de">Auf demselben Bus lief bis vor Kurzem zusätzlich ein MARS-Hydro-<em>iControl</em>-Hub als weiterer Modbus-Master (Fremdsteuerung des Abluftlüfters per Werks-App). Dieses Gerät wurde vollständig entfernt — der Aeroponik-Master ist jetzt alleiniger Bus-Master.</span>
+      <span class="en">Until recently, a MARS Hydro <em>iControl</em> hub also ran on the same bus as a second Modbus master (third-party control of the exhaust fan via the vendor app). This device has been fully removed — the Aeroponik master is now the sole bus master.</span>
+    </div>
+
+    <h3><span class="de">Protokoll</span><span class="en">Protocol</span></h3>
+    <p>
+      <span class="de">Vereinfachtes Modbus-RTU: <strong>FC03</strong> (Read Holding Registers) zum Auslesen, <strong>FC06</strong> (Write Single Register) zum Schreiben. CRC16 nach Modbus-Standard (Polynom <code>0xA001</code>). Ein schlankes Zustandsautomat-Modell (<code>mb_state_t</code>) fragt die drei Busteilnehmer nacheinander ab; nur eine Anfrage gleichzeitig offen, Antwort-Timeout <strong>2000 ms</strong>.</span>
+      <span class="en">Simplified Modbus RTU: <strong>FC03</strong> (Read Holding Registers) for reading, <strong>FC06</strong> (Write Single Register) for writing. CRC16 per the Modbus standard (polynomial <code>0xA001</code>). A lean state-machine model (<code>mb_state_t</code>) polls the three bus participants in turn; only one request outstanding at a time, response timeout <strong>2000 ms</strong>.</span>
+    </p>
+
+    <h3><span class="de">Bus-Teilnehmer</span><span class="en">Bus Participants</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Adresse</span><span class="en">Address</span></th><th><span class="de">Gerät</span><span class="en">Device</span></th><th><span class="de">Zugriff</span><span class="en">Access</span></th><th><span class="de">Poll-Intervall</span><span class="en">Poll Interval</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>0x20</code></td><td><span class="de">RS485-Multisensor (Zelt-Klima + PPFD)</span><span class="en">RS485 multisensor (tent climate + PPFD)</span></td><td>FC03 read</td><td>15 s</td></tr>
+          <tr><td><code>0x40</code></td><td><span class="de">Lichtx4 (4× Relais-Lichtsteuerung)</span><span class="en">Lichtx4 (4× relay light control)</span></td><td>FC03 read + FC06 write</td><td>15 s (<span class="de">+ sofort bei Maskenänderung</span><span class="en">+ immediately on mask change</span>)</td></tr>
+          <tr><td><code>6</code></td><td><span class="de">Abluftlüfter — MARS Hydro</span><span class="en">Exhaust fan — MARS Hydro</span></td><td>FC03 read + FC06 write</td><td>3 s</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">Priorität bei gleichzeitigem Bedarf</span><span class="en">Priority on Concurrent Demand</span></h3>
+    <p>
+      <span class="de">Ausstehende Schreibbefehle (Licht-Maske, Lüfter-Prozent) gehen vor den zyklischen Lesevorgängen. Reihenfolge: Licht-Write → Lüfter-Write → Multisensor-Read → Licht-Read → Lüfter-Read.</span>
+      <span class="en">Pending write commands (light mask, fan percent) take priority over cyclic reads. Order: light write → fan write → multisensor read → light read → fan read.</span>
+    </p>
+  </section>
+
+  <!-- ===== RS485-MULTISENSOR ===== -->
+  <section id="rs485-multisensor" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">◈</span><span class="de">RS485-Multisensor (Zelt-Klima)</span><span class="en">RS485 Multisensor (Tent Climate)</span></h2>
+    <p>
+      <span class="de">Fest im Zelt verbautes Sensormodul an RS485-Adresse <code>0x20</code>, liefert Klimadaten und den <strong>PPFD-Lichtsensor inkl. 8-Kanal-Spektrum in einem Gerät</strong> — daher entfällt für dieses Deployment der separate ESP-NOW-Spektrum-Node.</span>
+      <span class="en">Sensor module hard-mounted in the tent at RS485 address <code>0x20</code>, providing climate data and the <strong>PPFD light sensor plus 8-channel spectrum in a single device</strong> — so this deployment has no need for a separate ESP-NOW spectrum node.</span>
+    </p>
+
+    <h3><span class="de">Gelesene Register</span><span class="en">Registers Read</span> (FC03, <span class="de">14 Register ab Register 0</span><span class="en">14 registers starting at register 0</span>)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Feld</span><span class="en">Field</span></th><th><span class="de">Einheit</span><span class="en">Unit</span></th><th><span class="de">Beschreibung</span><span class="en">Description</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>co2_ppm</code></td><td>ppm</td><td><span class="de">CO₂-Konzentration im Zelt</span><span class="en">CO₂ concentration in the tent</span></td></tr>
+          <tr><td><code>temp_c</code></td><td>°C</td><td><span class="de">Zelt-Lufttemperatur</span><span class="en">Tent air temperature</span></td></tr>
+          <tr><td><code>hum_pct</code></td><td>%rH</td><td><span class="de">Zelt-Luftfeuchte</span><span class="en">Tent air humidity</span></td></tr>
+          <tr><td><code>ppfd</code></td><td>µmol/m²/s</td><td><span class="de">Photonenflussdichte</span><span class="en">Photon flux density</span></td></tr>
+          <tr><td><code>channels[8]</code></td><td>—</td><td><span class="de">Spektralkanäle</span><span class="en">Spectral channels</span></td></tr>
+          <tr><td><code>gain</code>, <code>status</code></td><td>—</td><td><span class="de">Sensor-Diagnose</span><span class="en">Sensor diagnostics</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="de">Zelt-Temperatur, -Feuchte und -CO₂ dieses Sensors sind die Grundlage für <a href="#luefter">Abluftlüfter-Automodi</a>, <a href="#co2">CO2-Steuerung</a> und die <a href="#raumklima">VPD-Berechnung</a>.</span>
+      <span class="en">This sensor's tent temperature, humidity, and CO₂ readings are the basis for the <a href="#luefter">exhaust fan auto modes</a>, <a href="#co2">CO2 control</a>, and the <a href="#raumklima">VPD calculation</a>.</span>
+    </p>
+  </section>
+
+  <!-- ===== LICHTX4 ===== -->
+  <section id="lichtx4" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">☀</span>Lichtx4 (<span class="de">RS485-Lichtsteuerung</span><span class="en">RS485 Light Control</span>)</h2>
+    <p>
+      <span class="de">Eigenständige Firmware (<code>Lichtx4</code>) mit 4 Relais-/SSR-Ausgängen, ausschließlich über RS485 angebunden — <strong>kein ESP-NOW</strong>. Hat den früher vorgesehenen ESP-NOW-Licht-SSR-<a href="#steckdosen">Steckdosen-Node</a> als Lichtsteuerung vollständig abgelöst.</span>
+      <span class="en">Standalone firmware (<code>Lichtx4</code>) with 4 relay/SSR outputs, connected exclusively via RS485 — <strong>no ESP-NOW</strong>. Has fully replaced the previously planned ESP-NOW light-SSR <a href="#steckdosen">socket node</a> for light control.</span>
+    </p>
+
+    <h3><span class="de">Register</span><span class="en">Registers</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Adresse</span><span class="en">Address</span></th><th><span class="de">Register</span><span class="en">Register</span></th><th><span class="de">Zugriff</span><span class="en">Access</span></th><th><span class="de">Inhalt</span><span class="en">Content</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>0x40</code></td><td>0</td><td>FC03 read</td><td><span class="de">Aktuelle Relais-Bitmaske (Bit0–3 = Ausgang 1–4)</span><span class="en">Current relay bitmask (bit0–3 = output 1–4)</span></td></tr>
+          <tr><td><code>0x40</code></td><td>0</td><td>FC06 write</td><td><span class="de">Neue Relais-Bitmaske setzen</span><span class="en">Set new relay bitmask</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="de">Wird vom bestehenden <a href="#scheduler">Beleuchtungs-Scheduler</a> angesteuert — statt eines ESP-NOW <code>CMD_SET_ONOFF</code>-Pakets schreibt der Master bei Maskenänderung direkt per FC06 auf Register 0.</span>
+      <span class="en">Driven by the existing <a href="#scheduler">lighting scheduler</a> — instead of an ESP-NOW <code>CMD_SET_ONOFF</code> packet, the master writes directly via FC06 to register 0 on mask change.</span>
+    </p>
+  </section>
+
+  <!-- ===== ABLUFTLUEFTER ===== -->
+  <section id="luefter" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">🌀</span><span class="de">Abluftlüfter</span><span class="en">Exhaust Fan</span> — MARS Hydro (RS485)</h2>
+    <p>
+      <span class="de">Werksseitig fertige Lüfterplatine, RS485-Adresse <code>6</code>, ursprünglich per MARS-Hydro-<em>iControl</em>-App gesteuert. Der Master kann die Steuerung optional vollständig übernehmen.</span>
+      <span class="en">Factory-built fan controller board, RS485 address <code>6</code>, originally controlled via the MARS Hydro <em>iControl</em> app. The master can optionally take over control entirely.</span>
+    </p>
+
+    <div class="note">
+      <strong><span class="de">Sicherheits-Default:</span><span class="en">Safety default:</span></strong>
+      <span class="de"><code>enabled=false</code> — ohne explizite Aktivierung sendet der Master keine Schreibbefehle, der Lüfter bleibt unangetastet. Erst nach Aktivierung in der Konfiguration übernimmt der Master die Regelung. (Die iControl-Hardware wurde inzwischen vollständig entfernt.)</span>
+      <span class="en"><code>enabled=false</code> — without explicit activation the master sends no write commands, the fan is left untouched. Only after activation in the configuration does the master take over control. (The iControl hardware has since been fully removed.)</span>
+    </div>
+
+    <h3><span class="de">Register</span><span class="en">Registers</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Register</span><span class="en">Register</span></th><th><span class="de">Zugriff</span><span class="en">Access</span></th><th><span class="de">Inhalt</span><span class="en">Content</span></th></tr></thead>
+        <tbody>
+          <tr><td>11</td><td>FC03 read (<span class="de">Teil von 6 Registern ab 11</span><span class="en">part of 6 registers starting at 11</span>)</td><td><span class="de">Drehzahl (RPM)</span><span class="en">Speed (RPM)</span></td></tr>
+          <tr><td>16</td><td>FC03 read (<span class="de">letztes der 6 Register</span><span class="en">last of the 6 registers</span>)</td><td><span class="de">Aktuelle Leistung (%)</span><span class="en">Current power (%)</span></td></tr>
+          <tr><td>0x0010 (16)</td><td>FC06 write</td><td><span class="de">Ziel-Leistung 0–100 %</span><span class="en">Target power 0–100 %</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3><span class="de">Steuerungsmodi</span><span class="en">Control Modes</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Modus</span><span class="en">Mode</span></th><th><span class="de">Quelle</span><span class="en">Source</span></th><th><span class="de">Verhalten</span><span class="en">Behavior</span></th></tr></thead>
+        <tbody>
+          <tr><td><span class="de">Manuell</span><span class="en">Manual</span></td><td>—</td><td><span class="de">Feste Leistung (%)</span><span class="en">Fixed power (%)</span></td></tr>
+          <tr><td><span class="de">Auto — Luftfeuchte</span><span class="en">Auto — humidity</span></td><td><span class="de">Zelt-Feuchte (RS485-Multisensor)</span><span class="en">Tent humidity (RS485 multisensor)</span></td><td><span class="de">Linearer Ramp zwischen <code>hum_min</code> (Mindestdrehzahl) und <code>hum_max</code> (100 %)</span><span class="en">Linear ramp between <code>hum_min</code> (minimum speed) and <code>hum_max</code> (100 %)</span></td></tr>
+          <tr><td><span class="de">Auto — Temperatur, absolut</span><span class="en">Auto — temperature, absolute</span></td><td><span class="de">Zelt-Temperatur</span><span class="en">Tent temperature</span></td><td><span class="de">Ramp zwischen <code>temp_min</code>/<code>temp_max</code>; optionale <strong>Differenz-Bremse</strong>: liegt Zelt−Raum-Differenz unter <code>temp_cap_diff</code>, wird trotz Rampe nur die Mindestdrehzahl gefahren (verhindert Volllast, wenn der Raum fast so warm wie das Zelt ist)</span><span class="en">Ramp between <code>temp_min</code>/<code>temp_max</code>; optional <strong>differential cap</strong>: if the tent−room difference is below <code>temp_cap_diff</code>, only the minimum speed is driven regardless of the ramp (prevents full blast when the room is nearly as warm as the tent)</span></td></tr>
+          <tr><td><span class="de">Auto — Temperatur, Differenz</span><span class="en">Auto — temperature, differential</span></td><td><span class="de">Zelt-Temperatur − Raumtemperatur</span><span class="en">Tent temperature − room temperature</span></td><td><span class="de">Ramp direkt über die Temperaturdifferenz zwischen <code>temp_min</code>/<code>temp_max</code></span><span class="en">Ramp directly over the temperature differential between <code>temp_min</code>/<code>temp_max</code></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="de">Eine gemeinsame Mindestdrehzahl (<code>min_speed</code>) gilt für beide Automodi. Die Differenz-Modi benötigen den <a href="#raumklima">Raumklimasensor</a>; ist dieser nicht verfügbar, bleibt die letzte Zielleistung unverändert.</span>
+      <span class="en">A shared minimum speed (<code>min_speed</code>) applies to both auto modes. The differential modes require the <a href="#raumklima">room climate sensor</a>; if it is unavailable, the last target power remains unchanged.</span>
+    </p>
+
+    <h3><span class="de">Konfiguration</span><span class="en">Configuration</span> (EEPROM, Magic 0x92)</h3>
+    <p><code>mode</code> · <code>manual_percent</code> · <code>min_speed</code> · <code>hum_min/max</code> · <code>temp_min/max</code> · <code>temp_mode</code> (<span class="de">absolut/Differenz</span><span class="en">absolute/differential</span>) · <code>temp_cap_diff</code> · <code>enabled</code></p>
+  </section>
+
+  <!-- ===== CO2-STEUERUNG ===== -->
+  <section id="co2" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">🌫️</span>CO2-<span class="de">Steuerung</span><span class="en">Control</span></h2>
+    <p>
+      <span class="de">Hysterese-Regelung eines CO₂-Ausgangs auf einem beliebigen <strong>ESP-NOW-Steckdosen-Node</strong>, gesteuert über die CO₂-Messung des <a href="#rs485-multisensor">RS485-Multisensors</a>.</span>
+      <span class="en">Hysteresis control of a CO₂ output on any <strong>ESP-NOW socket node</strong>, driven by the CO₂ reading from the <a href="#rs485-multisensor">RS485 multisensor</a>.</span>
+    </p>
+
+    <h3><span class="de">Logik</span><span class="en">Logic</span></h3>
+    <ul>
+      <li>CO₂ ≤ <code>co2_min</code> → <span class="de">Ziel-Relais</span><span class="en">Target relay</span> <strong><span class="de">EIN</span><span class="en">ON</span></strong></li>
+      <li>CO₂ ≥ <code>co2_max</code> → <span class="de">Ziel-Relais</span><span class="en">Target relay</span> <strong><span class="de">AUS</span><span class="en">OFF</span></strong></li>
+      <li><span class="de">dazwischen: letzter Zustand bleibt erhalten (klassische Hysterese, kein Takten)</span><span class="en">in between: last state is held (classic hysteresis, no chattering)</span></li>
+    </ul>
+    <p>
+      <span class="de">Nur das konfigurierte Relais-Bit (<code>target_relay_bit</code>, 0–3) des gewählten Nodes (<code>target_node_id</code>) wird geschaltet — die übrigen Bits der Relaismaske dieses Nodes bleiben unangetastet.</span>
+      <span class="en">Only the configured relay bit (<code>target_relay_bit</code>, 0–3) of the selected node (<code>target_node_id</code>) is switched — the other bits of that node's relay mask remain untouched.</span>
+    </p>
+
+    <h3><span class="de">Konfiguration</span><span class="en">Configuration</span> (EEPROM, Magic 0x7C)</h3>
+    <p><code>enabled</code> · <code>target_node_id</code> · <code>target_relay_bit</code> · <code>co2_min</code> (<span class="de">Standard</span><span class="en">default</span> 800 ppm) · <code>co2_max</code> (<span class="de">Standard</span><span class="en">default</span> 1200 ppm)</p>
+    <p>
+      <span class="de">Auf der Startseite erscheint eine Status-Karte nur, wenn die Funktion aktiviert ist.</span>
+      <span class="en">A status card appears on the home page only when the feature is enabled.</span>
+    </p>
+  </section>
+
+  <!-- ===== RAUMKLIMA & VPD ===== -->
+  <section id="raumklima" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">🌡️</span><span class="de">Raumklima (AHT21B) & VPD</span><span class="en">Room Climate (AHT21B) & VPD</span></h2>
+
+    <h3>AHT21B — <span class="de">I2C-Bus 2</span><span class="en">I2C Bus 2</span></h3>
+    <p>
+      <span class="de">Zweiter, unabhängiger I2C-Bus (ESP32-Hardwarecontroller #1) an <code>I2C2_SDA</code> (GPIO3) / <code>I2C2_SCL</code> (GPIO46) — ursprünglich als analoge Reserve-Eingänge auf der Platine vorgesehen, digital als I2C nutzbar. Der Sensor misst die <strong>Raumluft außerhalb des Zelts</strong> als Referenz.</span>
+      <span class="en">A second, independent I2C bus (ESP32 hardware controller #1) on <code>I2C2_SDA</code> (GPIO3) / <code>I2C2_SCL</code> (GPIO46) — originally intended as spare analog inputs on the board, usable digitally as I2C. The sensor measures <strong>room air outside the tent</strong> as a reference.</span>
+    </p>
+
+    <div class="note">
+      <strong><span class="de">Bekannter Library-Bug:</span><span class="en">Known library bug:</span></strong>
+      <span class="de">Adafruit_AHTX0 sendet standardmäßig den AHT10-Kalibrierbefehl <code>0xE1</code>. AHT20/AHT21(B)-Chips erwarten stattdessen <code>0xBE</code> — sonst liefert der Feuchtekanal dauerhaft ~100 %, während die Temperatur bereits korrekt ist. Die Firmware sendet den korrekten Befehl (<code>0xBE, 0x08, 0x00</code>) direkt nach <code>aht21.begin()</code> manuell nach.</span>
+      <span class="en">Adafruit_AHTX0 sends the AHT10 calibration command <code>0xE1</code> by default. AHT20/AHT21(B) chips instead expect <code>0xBE</code> — otherwise the humidity channel reports a constant ~100 % while temperature is already correct. The firmware manually re-sends the correct command (<code>0xBE, 0x08, 0x00</code>) right after <code>aht21.begin()</code>.</span>
+    </div>
+
+    <h3>VPD (Vapor Pressure Deficit)</h3>
+    <p>
+      <span class="de">Berechnet aus <strong>Zelt</strong>-Temperatur und -Feuchte (RS485-Multisensor) nach der Tetens-Formel, serverseitig identisch zur UI-Berechnung:</span>
+      <span class="en">Calculated from <strong>tent</strong> temperature and humidity (RS485 multisensor) using the Tetens formula, identical server-side to the UI calculation:</span>
+    </p>
+    <pre><code>SVP = 0.6108 × exp(17.27 × T / (T + 237.3))   // kPa
+VPD = SVP × (1 − RH / 100)</code></pre>
+    <p>
+      <span class="de">Anzeige zwischen Luftfeuchte und CO₂ in der Messwerte-Karte; Raum- und Zelttemperatur zusammen sind zusätzlich Grundlage der <a href="#luefter">Lüfter-Differenzmodi</a>.</span>
+      <span class="en">Displayed between humidity and CO₂ in the measurements card; room and tent temperature together are also the basis for the <a href="#luefter">fan differential modes</a>.</span>
+    </p>
+  </section>
+
+  <!-- ===== DATEN-LOG ===== -->
+  <section id="datenlog" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">📥</span><span class="de">Daten-Log & Download</span><span class="en">Data Log & Download</span></h2>
+    <p>
+      <span class="de">Eine CSV-Datei pro Tag (<code>/JJJJ-MM-TT.csv</code>) auf der MicroSD-Karte, Schreibintervall <strong>5 Minuten</strong>. Werte einer gerade nicht erreichbaren Quelle (Raumsensor, RS485-Multisensor, Lüfter offline) werden als <strong>leere Zelle</strong> statt eines irreführenden Nullwerts geschrieben.</span>
+      <span class="en">One CSV file per day (<code>/YYYY-MM-DD.csv</code>) on the MicroSD card, write interval <strong>5 minutes</strong>. Values from a currently unreachable source (room sensor, RS485 multisensor, fan offline) are written as an <strong>empty cell</strong> instead of a misleading zero.</span>
+    </p>
+
+    <h3><span class="de">Spalten</span><span class="en">Columns</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Spalte</span><span class="en">Column</span></th><th><span class="de">Quelle</span><span class="en">Source</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>Zeit</code></td><td>RTC</td></tr>
+          <tr><td><code>TempVorrat_C</code>, <code>TempPflanze_C</code></td><td>2× DS18B20</td></tr>
+          <tr><td><code>Druck_bar</code></td><td><span class="de">Drucksensor</span><span class="en">Pressure sensor</span></td></tr>
+          <tr><td><code>Fuellstand_%</code>, <code>Volumen_L</code></td><td><span class="de">Ultraschall + Tankgeometrie</span><span class="en">Ultrasonic + tank geometry</span></td></tr>
+          <tr><td><code>RaumTemp_C</code>, <code>RaumFeuchte_%</code></td><td>AHT21B (<span class="de">Raumklima</span><span class="en">room climate</span>)</td></tr>
+          <tr><td><code>ZeltTemp_C</code>, <code>ZeltFeuchte_%</code>, <code>ZeltCO2_ppm</code></td><td><span class="de">RS485-Multisensor</span><span class="en">RS485 multisensor</span></td></tr>
+          <tr><td><code>ZeltVPD_kPa</code></td><td><span class="de">berechnet</span><span class="en">calculated</span></td></tr>
+          <tr><td><code>LichtMaske</code></td><td>Lichtx4 <span class="de">Relais-Bitmaske</span><span class="en">relay bitmask</span></td></tr>
+          <tr><td><code>LuefterLeistung_%</code>, <code>LuefterRPM</code></td><td><span class="de">Abluftlüfter</span><span class="en">Exhaust fan</span></td></tr>
+          <tr><td><code>CO2Ausgang</code></td><td>CO2-<span class="de">Steuerung Relaiszustand</span><span class="en">control relay state</span> (0/1)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="info">
+      <strong><span class="de">Automatische Migration:</span><span class="en">Automatic migration:</span></strong>
+      <span class="de">Trifft die Firmware beim Schreiben auf eine bereits vorhandene Tagesdatei mit dem alten, kürzeren Spaltenformat (vor dieser Erweiterung), wird diese zu <code>_alt.csv</code> umbenannt (Daten bleiben erhalten) und eine neue Datei mit vollständigem Header begonnen — kein Vermischen unterschiedlicher Spaltenzahlen in einer Datei.</span>
+      <span class="en">If the firmware encounters an existing daily file with the old, shorter column format (prior to this extension) when writing, it renames it to <code>_alt.csv</code> (data is preserved) and starts a new file with the full header — no mixing of different column counts within one file.</span>
+    </div>
+
+    <h3><span class="de">Download & Löschen</span><span class="en">Download & Delete</span> (<span class="de">Konfiguration</span><span class="en">Configuration</span> → <span class="de">Daten-Log</span><span class="en">Data Log</span>)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Endpunkt</span><span class="en">Endpoint</span></th><th><span class="de">Methode</span><span class="en">Method</span></th><th><span class="de">Funktion</span><span class="en">Function</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>/api/logs</code></td><td>GET</td><td><span class="de">Liste aller <code>*.csv</code>-Dateien mit Dateigröße</span><span class="en">List of all <code>*.csv</code> files with file size</span></td></tr>
+          <tr><td><code>/api/logs/download?file=NAME</code></td><td>GET</td><td><span class="de">Streamt die Datei mit <code>Content-Disposition: attachment</code></span><span class="en">Streams the file with <code>Content-Disposition: attachment</code></span></td></tr>
+          <tr><td><code>/api/logs/delete</code></td><td>POST (JSON <code>{"file":"NAME"}</code>)</td><td><span class="de">Löscht die Datei (UI fragt vorher per Bestätigungsdialog nach)</span><span class="en">Deletes the file (UI asks for confirmation first)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="de">Dateinamen werden serverseitig gegen Pfad-Traversal geprüft (kein <code>/</code> oder <code>..</code> zulässig).</span>
+      <span class="en">Filenames are checked server-side against path traversal (no <code>/</code> or <code>..</code> allowed).</span>
+    </p>
+  </section>
+
+  <hr>
+
+  <!-- ===== MULTISENSOR ===== -->
+  <section id="multisensor" class="s-sensor">
+    <h2><span class="h2-icon" style="background:var(--green-bg);color:var(--green)">◈</span>Node: Multisensor</h2>
+    <p><strong>MCU:</strong> ESP32-C3 &nbsp;·&nbsp; Node-ID: <code>0x02</code> (compile-time) &nbsp;·&nbsp; <span class="de">wahlweise</span><span class="en">either</span> <span class="chip chip-green">ESP-NOW · NODE_TYPE_SENSOR 0x02</span> <span class="de">oder</span><span class="en">or</span> <span class="chip chip-blue">RS485 · Adr. 0x20</span></p>
+    <p>
+      <span class="de">Dieselbe Firmware unterstützt beide Übertragungswege; welcher aktiv ist, wird beim Start festgelegt. Im aktuellen Zelt-Deployment läuft der Node im <strong>RS485-Modus</strong> — Registerbelegung und Poll-Verhalten dazu: <a href="#rs485-multisensor">RS485-Multisensor</a>.</span>
+      <span class="en">The same firmware supports both transport modes; which one is active is set at startup. In the current tent deployment the node runs in <strong>RS485 mode</strong> — register layout and polling behavior: <a href="#rs485-multisensor">RS485 Multisensor</a>.</span>
+    </p>
+
+    <h3><span class="de">Sensoren</span><span class="en">Sensors</span> (I2C: SDA=1, SCL=0)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Sensor</span><span class="en">Sensor</span></th><th>I2C-<span class="de">Adresse</span><span class="en">address</span></th><th><span class="de">Messgrößen</span><span class="en">Measurands</span></th></tr></thead>
+        <tbody>
+          <tr><td>SCD41</td><td><code>0x62</code></td><td>CO₂ (ppm, NDIR) · <span class="de">Temperatur · Luftfeuchte</span><span class="en">temperature · humidity</span></td></tr>
+          <tr><td>AS7341</td><td><code>0x39</code></td><td>PPFD (µmol/m²/s × 10) · <span class="de">8 Spektralkanäle</span><span class="en">8 spectral channels</span> 415–680 nm</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <strong><span class="de">Bestückung geändert:</span><span class="en">Bill of materials changed:</span></strong>
+      <span class="de">Frühere Revisionen nutzten AHT21 (Temp/Feuchte) + ENS160 (eCO₂/TVOC). Beide wurden durch den SCD41 ersetzt (echter NDIR-CO₂-Sensor statt eCO₂-Schätzwert, plus Temperatur/Feuchte in einem Bauteil).</span>
+      <span class="en">Earlier revisions used AHT21 (temp/humidity) + ENS160 (eCO₂/TVOC). Both were replaced by the SCD41 (a true NDIR CO₂ sensor instead of an eCO₂ estimate, plus temperature/humidity in one part).</span>
+    </div>
+
+    <h3>GPIO-<span class="de">Pinout</span><span class="en">Pinout</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>GPIO</th><th><span class="de">Funktion</span><span class="en">Function</span></th><th><span class="de">Hinweis</span><span class="en">Note</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>0</code></td><td>I2C_SCL</td><td><span class="de">Sicher, kein Strapping-Pin</span><span class="en">Safe, not a strapping pin</span></td></tr>
+          <tr><td><code>1</code></td><td>I2C_SDA</td><td><span class="de">Sicher, kein Strapping-Pin</span><span class="en">Safe, not a strapping pin</span></td></tr>
+          <tr><td><code>3</code></td><td>CAN_TX</td><td><span class="de">Reserviert für TWAI/CAN-Transceiver</span><span class="en">Reserved for TWAI/CAN transceiver</span></td></tr>
+          <tr><td><code>5</code></td><td>CAN_RX</td><td>JTAG MTDI → <code>gpio_reset_pin(GPIO_NUM_5)</code> <span class="de">in setup()</span><span class="en">in setup()</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <strong>ESP32-C3 <span class="de">Strapping-Pins:</span><span class="en">strapping pins:</span></strong>
+      <span class="de">GPIO9 zieht ESP32-C3 in Download-Mode wenn LOW beim Booten — nicht für I2C verwenden. GPIO4, 5, 6, 7 sind JTAG-Pins und müssen vor Verwendung mit <code>gpio_reset_pin()</code> freigegeben werden.</span>
+      <span class="en">GPIO9 pulls the ESP32-C3 into download mode if LOW at boot — do not use for I2C. GPIO4, 5, 6, 7 are JTAG pins and must be released with <code>gpio_reset_pin()</code> before use.</span>
+    </div>
+
+    <h3><span class="de">Im ESP-NOW-Modus gesendete Datenpakete</span><span class="en">Data Packets Sent in ESP-NOW Mode</span></h3>
+    <ul>
+      <li><code>SUBTYPE_AIR (0x01)</code>: <span class="de">Temperatur, Luftfeuchte, CO₂ vom SCD41.</span><span class="en">Temperature, humidity, CO₂ from the SCD41.</span></li>
+      <li><code>SUBTYPE_LIGHT (0x02)</code>: PPFD + <span class="de">8 Spektralkanäle vom AS7341.</span><span class="en">8 spectral channels from the AS7341.</span></li>
+    </ul>
+    <p>
+      <span class="de">Im RS485-Modus entfällt der ESP-NOW-Versand — dieselben Werte liegen stattdessen in den Modbus-Registern, siehe <a href="#rs485-multisensor">RS485-Multisensor</a>.</span>
+      <span class="en">In RS485 mode, ESP-NOW transmission is skipped — the same values instead sit in the Modbus registers, see <a href="#rs485-multisensor">RS485 Multisensor</a>.</span>
+    </p>
+  </section>
+
+  <!-- ===== STECKDOSEN ===== -->
+  <section id="steckdosen" class="s-socket">
+    <h2><span class="h2-icon" style="background:var(--amber-bg);color:var(--amber)">⏻</span>Node: <span class="de">Steckdosen</span><span class="en">Sockets</span></h2>
+    <p><strong>MCU:</strong> ESP32 &nbsp;·&nbsp; 4× <span class="de">Relais-Ausgänge</span><span class="en">relay outputs</span> &nbsp;·&nbsp; <span class="chip chip-plain">NODE_TYPE_SOCKET · 0x03</span></p>
+    <p>
+      <span class="de">Allgemeine, manuell bzw. per API gesteuerte Relaisknoten — Verwendung u. a. als Ziel-Node der <a href="#co2">CO2-Steuerung</a>, für Pumpen, Lüfter und sonstige Verbraucher. Befehle kommen vom Master auf Anfrage (nicht zyklisch).</span>
+      <span class="en">General-purpose relay nodes, controlled manually or via API — used e.g. as the target node for <a href="#co2">CO2 control</a>, for pumps, fans, and other loads. Commands come from the master on demand (not cyclic).</span>
+    </p>
+
+    <div class="note">
+      <strong><span class="de">Licht-SSR-Modus ungenutzt:</span><span class="en">Light-SSR mode unused:</span></strong>
+      <span class="de">Die Firmware bietet beim Erststart weiterhin einen zweiten Node-Typ <code>NODE_TYPE_LIGHT_SSR (0x05)</code> für automatische Beleuchtungssteuerung an. Diese Funktion wurde durch den dedizierten RS485-Knoten <a href="#lichtx4">Lichtx4</a> abgelöst — im aktuellen Deployment laufen alle Steckdosen-Nodes als reguläre Steckdose.</span>
+      <span class="en">The firmware still offers a second node type <code>NODE_TYPE_LIGHT_SSR (0x05)</code> for automatic lighting control at first boot. This function has been replaced by the dedicated RS485 node <a href="#lichtx4">Lichtx4</a> — in the current deployment, all socket nodes run as regular sockets.</span>
+    </div>
+
+    <h3>Relay-<span class="de">Befehl</span><span class="en">Command</span></h3>
+    <pre><code>// <span class="de">Alle 4 Relais einschalten:</span><span class="en">Turn all 4 relays on:</span>
+MSG_COMMAND + CMD_SET_ONOFF (0x02) + payload[1] = 0x0F
+
+// <span class="de">Nur R1 + R3:</span><span class="en">Only R1 + R3:</span>
+payload[1] = 0b00000101  // = 0x05</code></pre>
+  </section>
+
+  <!-- ===== ERSTSTART ===== -->
+  <section id="erststart">
+    <h2><span class="h2-icon" style="background:var(--surface-up);color:var(--muted)">⊙</span><span class="de">Erststart & Konfiguration</span><span class="en">First Boot & Configuration</span></h2>
+
+    <h3><span class="de">Steckdosen — Node-Typ und ID</span><span class="en">Sockets — Node Type and ID</span></h3>
+    <p>
+      <span class="de">Beim allerersten Start (NVS-Namespace <code>"nodecfg"</code> leer) erscheint im Serial-Monitor:</span>
+      <span class="en">On the very first boot (NVS namespace <code>"nodecfg"</code> empty), the serial monitor shows:</span>
+    </p>
+    <pre><code>=== <span class="de">ERSTSTART: Node-Konfiguration</span><span class="en">FIRST BOOT: Node configuration</span> ===
+<span class="de">Typ waehlen (60s Timeout):</span><span class="en">Select type (60s timeout):</span>
+  1 = <span class="de">Steckdose  (allgemeine Steuerung)</span><span class="en">Socket  (general control)</span>
+  2 = <span class="de">Licht-SSR  (Sonnenauf/-untergang via Scheduler)</span><span class="en">Light-SSR  (sunrise/sunset via scheduler)</span>
+&gt; 1
+<span class="de">Node-ID eingeben (1-254) + Enter:</span><span class="en">Enter node ID (1-254) + Enter:</span>
+&gt; 10
+[NODE] <span class="de">Gespeichert: Typ=Steckdose  ID=0x0A</span><span class="en">Saved: Type=Socket  ID=0x0A</span></code></pre>
+    <p>
+      <span class="de">Gespeichert in NVS <code>"nodecfg"</code>: Keys <code>type</code> (uint8) und <code>id</code> (uint8). Mit <code>NODECLEAR</code> löschen → Dialog erscheint beim nächsten Boot. Option 2 (Licht-SSR) ist ein Legacy-Modus — siehe Hinweis unter <a href="#steckdosen">Node: Steckdosen</a>.</span>
+      <span class="en">Stored in NVS <code>"nodecfg"</code>: keys <code>type</code> (uint8) and <code>id</code> (uint8). Clear with <code>NODECLEAR</code> → dialog reappears on next boot. Option 2 (light-SSR) is a legacy mode — see the note under <a href="#steckdosen">Node: Sockets</a>.</span>
+    </p>
+
+    <h3><span class="de">WiFi-Kanal / Kein-WLAN-Modus (alle Nodes)</span><span class="en">WiFi Channel / No-WiFi Mode (all nodes)</span></h3>
+    <p>
+      <span class="de">Beim ersten Start ohne gespeicherten Kanal (NVS <code>"wificfg"</code> leer):</span>
+      <span class="en">On first boot without a saved channel (NVS <code>"wificfg"</code> empty):</span>
+    </p>
+    <pre><code>[WIFI] <span class="de">3 Netzwerke gefunden</span><span class="en">3 networks found</span>
+  [ 1] MeinRouter           <span class="de">Kanal</span><span class="en">Channel</span>  6  -62 dBm
+  [ 2] Nachbar-AP           <span class="de">Kanal</span><span class="en">Channel</span> 11  -78 dBm
+  [ 0] <span class="de">Kein WLAN (fester Kanal 6)</span><span class="en">No WiFi (fixed channel 6)</span>
+<span class="de">Nummer (0-3) + Enter (60s Timeout):</span><span class="en">Number (0-3) + Enter (60s timeout):</span>
+&gt; 0
+[WIFI] <span class="de">Kein WLAN, Kanal 6 gespeichert</span><span class="en">No WiFi, channel 6 saved</span></code></pre>
+
+    <div class="info">
+      <strong><span class="de">Kanal-Konsistenz:</span><span class="en">Channel consistency:</span></strong>
+      <span class="de">Alle Nodes und der Master-AP müssen auf demselben Kanal laufen. Der feste Kanal ist als <code>ESPNOW_DEFAULT_CHANNEL = 6</code> in allen drei <code>espnow_protocol.h</code> Dateien definiert. Der Master-AP verwendet diesen Kanal automatisch wenn <code>USE_ACCESS_POINT = true</code>.</span>
+      <span class="en">All nodes and the master AP must run on the same channel. The fixed channel is defined as <code>ESPNOW_DEFAULT_CHANNEL = 6</code> in all three <code>espnow_protocol.h</code> files. The master AP uses this channel automatically when <code>USE_ACCESS_POINT = true</code>.</span>
+    </div>
+
+    <h3><span class="de">60-Sekunden-Timeout</span><span class="en">60-Second Timeout</span></h3>
+    <p>
+      <span class="de">Wenn bei allen Setup-Dialogen (Typ-Auswahl, Node-ID, Kanal) innerhalb von 60 Sekunden keine Eingabe erfolgt, wird ein Standardwert verwendet: Steckdose / ID=3 / Kanal&nbsp;6.</span>
+      <span class="en">If no input is given within 60 seconds at any setup dialog (type selection, node ID, channel), a default value is used: Socket / ID=3 / Channel&nbsp;6.</span>
+    </p>
+  </section>
+
+  <hr>
+
+  <!-- ===== SERIAL ===== -->
+  <section id="serial">
+    <h2><span class="h2-icon" style="background:var(--surface-up);color:var(--muted)">&gt;_</span><span class="de">Serial-Kommandos</span><span class="en">Serial Commands</span></h2>
+    <p><span class="de">Baudrate</span><span class="en">Baud rate</span> <strong>115200</strong> · <span class="de">Zeilenende</span><span class="en">Line ending</span> <strong>LF</strong> <span class="de">oder</span><span class="en">or</span> <strong>CR+LF</strong></p>
+
+    <h3><span class="de">Steckdosen</span><span class="en">Sockets</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Kommando</span><span class="en">Command</span></th><th><span class="de">Wirkung</span><span class="en">Effect</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>STATUS</code></td><td><span class="de">Aktuelle Relais-Bitmaske und Einzelstatus R1–R4</span><span class="en">Current relay bitmask and individual status R1–R4</span></td></tr>
+          <tr><td><code>MASK &lt;0–15&gt;</code></td><td><span class="de">Alle Relais per Dezimalwert setzen (z. B. <code>MASK 5</code> → R1+R3 ein)</span><span class="en">Set all relays via decimal value (e.g. <code>MASK 5</code> → R1+R3 on)</span></td></tr>
+          <tr><td><code>R&lt;1–4&gt; &lt;0|1&gt;</code></td><td><span class="de">Einzelrelais schalten (z. B. <code>R2 1</code>)</span><span class="en">Switch a single relay (e.g. <code>R2 1</code>)</span></td></tr>
+          <tr><td><code>NODEINFO</code></td><td><span class="de">Gespeicherten Node-Typ und Node-ID anzeigen</span><span class="en">Show stored node type and node ID</span></td></tr>
+          <tr><td><code>NODECLEAR</code></td><td><span class="de">Node-Typ und ID löschen → Erststart-Dialog beim nächsten Neustart</span><span class="en">Clear node type and ID → first-boot dialog on next restart</span></td></tr>
+          <tr><td><code>WIFIINFO</code></td><td><span class="de">Gespeicherte SSID und Kanal anzeigen</span><span class="en">Show stored SSID and channel</span></td></tr>
+          <tr><td><code>WIFICLEAR</code></td><td><span class="de">WiFi-Konfiguration löschen → Kanal-Scan beim nächsten Neustart</span><span class="en">Clear WiFi configuration → channel scan on next restart</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Multisensor</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Kommando</span><span class="en">Command</span></th><th><span class="de">Wirkung</span><span class="en">Effect</span></th></tr></thead>
+        <tbody>
+          <tr><td><code>WIFIINFO</code></td><td><span class="de">Gespeicherte SSID und Kanal anzeigen</span><span class="en">Show stored SSID and channel</span></td></tr>
+          <tr><td><code>WIFICLEAR</code></td><td><span class="de">WiFi-Konfiguration löschen → Kanal-Scan beim nächsten Neustart</span><span class="en">Clear WiFi configuration → channel scan on next restart</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const links = document.querySelectorAll('.toc-link');
+const sections = document.querySelectorAll('section[id]');
+
+const obs = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      links.forEach(l => l.classList.remove('active'));
+      const a = document.querySelector(`.toc-link[href="#${e.target.id}"]`);
+      if (a) a.classList.add('active');
+    }
+  });
+}, { rootMargin: '-10% 0px -75% 0px' });
+
+sections.forEach(s => obs.observe(s));
+
+// Button-Aktivzustand nachziehen (beim frühen setLang()-Aufruf existierten die Buttons noch nicht)
+document.querySelectorAll('.lang-btn').forEach(b => {
+  b.classList.toggle('active', b.dataset.langBtn === document.documentElement.getAttribute('data-lang'));
+});
+</script>

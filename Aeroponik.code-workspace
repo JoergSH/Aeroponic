@@ -1,0 +1,34 @@
+{
+	"folders": [
+		{
+			"path": "Aeroponik"
+		},
+		{
+			"path": "Multisensor"
+		},
+		{
+			"path": "Steckdosen"
+		},
+		{
+			"name": "Lichtx4",
+			"path": "Lichtx4"
+		},
+		{
+			"path": "shared"
+		},
+		{
+			"name": "📄 Workspace-Root (README, .gitignore)",
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.exclude": {
+			"Aeroponik": true,
+			"Multisensor": true,
+			"Steckdosen": true,
+			"Lichtx4": true,
+			"shared": true,
+			".vscode": true
+		}
+	}
+}
