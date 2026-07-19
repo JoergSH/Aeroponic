@@ -287,27 +287,38 @@ const char* htmlPage = R"rawliteral(
                         style="width:100%;border-radius:6px;margin-top:6px;"></canvas>
                 </div>
 
-                <!-- CO2-Steuerung (nur wenn aktiv) -->
-                <div class="status-box-info" id="co2StatusCard" style="display:none;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <strong>🌫️ CO2-<span class="de">Steuerung</span><span class="en">Control</span></strong>
-                        <span id="co2OutputBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
+                <!-- CO2-Steuerung + Abluftluefter, gemeinsame Box (Nutzerwunsch), Abschnitte
+                     je nach Bedarf einzeln sichtbar (CO2 nur wenn aktiv, Luefter nur wenn der
+                     aktive Ausgang online ist) -->
+                <div class="status-box-info" id="co2FanStatusCard" style="display:none;">
+                    <div id="co2StatusSection" style="display:none;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <strong>🌫️ CO2-<span class="de">Steuerung</span><span class="en">Control</span></strong>
+                            <span id="co2OutputBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
+                            <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="co2StatusNow">--</div><div class="sensor-unit">ppm CO2</div></div>
+                            <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="co2StatusRange">--</div><div class="sensor-unit">Min / Max</div></div>
+                        </div>
                     </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="co2StatusNow">--</div><div class="sensor-unit">ppm CO2</div></div>
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="co2StatusRange">--</div><div class="sensor-unit">Min / Max</div></div>
-                    </div>
-                </div>
 
-                <!-- Abluftluefter (RS485 Adresse 6, MARS Hydro) -->
-                <div class="status-box-info" id="fanStatusCard" style="display:none;">
-                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                        <strong>🌀 <span class="de">Abluftlüfter</span><span class="en">Exhaust Fan</span></strong>
-                        <span id="fanModeBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
-                    </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="fanPercent">--</div><div class="sensor-unit">% <span class="de">Leistung</span><span class="en">Power</span></div></div>
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="fanRpm">--</div><div class="sensor-unit">RPM</div></div>
+                    <div id="fanStatusSection" style="display:none;margin-top:14px;padding-top:14px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <strong>🌀 <span class="de">Abluftlüfter</span><span class="en">Exhaust Fan</span></strong>
+                            <span id="fanModeBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
+                            <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="fanPercent">--</div><div class="sensor-unit">% <span class="de">Leistung</span><span class="en">Power</span></div></div>
+                            <div class="sensor-box" style="padding:8px;" id="fanRpmBox"><div class="sensor-value" style="font-size:1.4em;" id="fanRpm">--</div><div class="sensor-unit">RPM</div></div>
+                        </div>
+                        <div id="fanManualSliderRow" style="display:none;margin-top:12px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.85em;color:#6c757d;margin-bottom:4px;">
+                                <span class="de">Manuelle Leistung</span><span class="en">Manual power</span>
+                                <span id="fanManualSliderValue">--%</span>
+                            </div>
+                            <input type="range" id="fanManualSlider" min="0" max="100" value="0" style="width:100%;"
+                                oninput="onFanManualSliderInput()" onchange="onFanManualSliderChange()">
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1331,6 +1342,10 @@ const char* htmlPage = R"rawliteral(
         let schedNowMin = 0;
         let schedAnchorMin = 0;
         let schedAnchorMs  = 0;
+        // Aktueller Licht-Ausgang (0=Lichtx4 gestuft, 1=Analogmodul stufenlos), von
+        // loadOutputConfig() aktuell gehalten — bestimmt ob der Chart Treppen oder Kurve zeigt.
+        let outputLightMode = 0;
+        let outputFanMode   = 0;
 
         function minToTime(m) {
             return String(Math.floor(m/60)).padStart(2,'0') + ':' + String(m%60).padStart(2,'0');
@@ -1361,6 +1376,18 @@ const char* htmlPage = R"rawliteral(
             return (drop >= n) ? 0 : n - drop;
         }
 
+        // Spiegelt schedComputeBrightnessPercent() aus scheduler.cpp: stufenlose Rampe
+        // 0-100%, genutzt fuer den Chart wenn Licht-Ausgang = Analogmodul (kein n-Kanal-Stufen).
+        function schedComputeBrightnessPercent(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
+            if (nowMin < dawnStart || nowMin >= duskEnd) return 0;
+            if (nowMin >= dawnEnd && nowMin < duskStart) return 100;
+            let frac;
+            if (nowMin < dawnEnd) frac = (nowMin - dawnStart) / (dawnEnd - dawnStart);
+            else frac = 1 - (nowMin - duskStart) / (duskEnd - duskStart);
+            frac = Math.max(0, Math.min(1, frac));
+            return Math.round(frac * 100);
+        }
+
         function drawSchedChart() {
             const canvas = document.getElementById('schedChart');
             if (!canvas) return;
@@ -1388,6 +1415,10 @@ const char* htmlPage = R"rawliteral(
             const n = parseInt(document.getElementById('schedNumSsr').value) || 4;
 
             function stepY(m) {
+                if (outputLightMode == 1) {
+                    const pct = schedComputeBrightnessPercent(m, dawnStart, dawnEnd, duskStart, duskEnd);
+                    return H - 22 - (pct / 100) * (H - 34);
+                }
                 const active = schedComputeActive(m, n, dawnStart, dawnEnd, duskStart, duskEnd);
                 return H - 22 - (active / n) * (H - 34);
             }
@@ -1443,7 +1474,6 @@ const char* htmlPage = R"rawliteral(
             const duskStart = timeToMin(document.getElementById('schedDuskStart').value || '18:00');
             const duskEnd   = timeToMin(document.getElementById('schedDuskEnd').value   || '20:00');
             const n         = parseInt(document.getElementById('schedNumSsr').value) || 4;
-            const active    = schedComputeActive(schedNowMin, n, dawnStart, dawnEnd, duskStart, duskEnd);
 
             let phaseKey = 'phaseNight', isTransition = false, isDay = false;
             if (schedNowMin >= dawnStart && schedNowMin < dawnEnd)   { phaseKey = 'phaseDawn'; isTransition = true; }
@@ -1451,7 +1481,13 @@ const char* htmlPage = R"rawliteral(
             else if (schedNowMin >= duskStart && schedNowMin < duskEnd) { phaseKey = 'phaseDusk'; isTransition = true; }
             el.style.background = isDay ? '#fff3cd' : (isTransition ? '#d4edda' : '#e2e3e5');
             el.style.color = '#333';
-            el.textContent = t(phaseKey) + '  ' + t('channelsLabel') + ' ' + active + '/' + n;
+            if (outputLightMode == 1) {
+                const pct = schedComputeBrightnessPercent(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd);
+                el.textContent = t(phaseKey) + '  ' + pct + '%';
+            } else {
+                const active = schedComputeActive(schedNowMin, n, dawnStart, dawnEnd, duskStart, duskEnd);
+                el.textContent = t(phaseKey) + '  ' + t('channelsLabel') + ' ' + active + '/' + n;
+            }
         }
 
         // Zaehlt schedNowMin lokal hoch (verankert an der zuletzt vom Server gelesenen
@@ -1562,12 +1598,28 @@ const char* htmlPage = R"rawliteral(
         }
 
         // Startseite: Statuskarte, nur sichtbar wenn die Funktion aktiv ist
+        // CO2- und Luefter-Abschnitt teilen sich eine Box (Nutzerwunsch) — jeder Abschnitt
+        // blendet sich unabhaengig ein/aus, die Box selbst ist sichtbar sobald mindestens
+        // einer der beiden etwas zu zeigen hat. Der Luefter-Abschnitt bekommt nur dann eine
+        // sichtbare Trennlinie, wenn der CO2-Abschnitt gerade auch angezeigt wird.
+        function refreshCo2FanCardVisibility() {
+            const card = document.getElementById('co2FanStatusCard');
+            if (!card) return;
+            const co2Section = document.getElementById('co2StatusSection');
+            const fanSection = document.getElementById('fanStatusSection');
+            const co2Visible = co2Section && co2Section.style.display !== 'none';
+            const fanVisible = fanSection && fanSection.style.display !== 'none';
+            card.style.display = (co2Visible || fanVisible) ? 'block' : 'none';
+            if (fanSection) fanSection.style.borderTop = co2Visible ? '1px solid #e0e0e0' : 'none';
+        }
+
         function updateCo2Status() {
             fetch('/api/co2').then(r => r.json()).then(d => {
-                const card = document.getElementById('co2StatusCard');
-                if (!card) return;
-                if (!d.enabled) { card.style.display = 'none'; return; }
-                card.style.display = 'block';
+                const section = document.getElementById('co2StatusSection');
+                if (!section) return;
+                section.style.display = d.enabled ? 'block' : 'none';
+                refreshCo2FanCardVisibility();
+                if (!d.enabled) return;
                 const badge = document.getElementById('co2OutputBadge');
                 if (badge) {
                     if (!d.co2_online) { badge.textContent = t('noCo2Value'); badge.style.background = '#dc3545'; }
@@ -1651,17 +1703,46 @@ const char* htmlPage = R"rawliteral(
             if (row) row.style.display = (lightOutput == 0) ? 'grid' : 'none';
         }
 
+        // Gemeinsame Auswertung von /api/output: Status-Badges, Analog-Statuszeile und den
+        // fuer den Zeitplan-Chart massgeblichen outputLightMode aktuell halten. Fasst NICHT
+        // die <select>-Formularfelder an, damit eine unbestaetigte Auswahl des Nutzers beim
+        // naechsten 2s-Poll nicht ueberschrieben wird (analog zum schedLoaded-Muster).
+        function applyOutputStatus(d) {
+            const st = document.getElementById('analogStatus');
+            if (st) {
+                st.textContent = d.analog_online
+                    ? 'Online — Ch1=' + d.analog_ch1_raw + '  Ch2=' + d.analog_ch2_raw
+                    : t('offlineLabel');
+            }
+
+            // Geraetestatus-Leiste: bei Analog-Ausgang ersetzt der Online-Status des
+            // Analogmoduls den des (dann nicht mehr gepollten) Lichtx4/MARS-Geraets,
+            // sonst bleiben die von updateLicht()/updateFanStatus() gesetzten Farben stehen.
+            const badgeLicht = document.getElementById('badge_licht');
+            if (badgeLicht && d.light_output == 1) badgeLicht.style.background = d.analog_online ? '#28a745' : '#dc3545';
+            const badgeFan = document.getElementById('badge_fan');
+            if (badgeFan && d.fan_output == 1) badgeFan.style.background = d.analog_online ? '#28a745' : '#dc3545';
+
+            const modeChanged = (outputLightMode != d.light_output);
+            outputLightMode = d.light_output;
+            outputFanMode   = d.fan_output;
+            if (modeChanged && schedLoaded) { drawSchedChart(); updateSchedPhase(); }
+        }
+
+        // Periodischer Leichtgewicht-Poll (2s-Intervall): nur Status, keine Formularfelder.
+        function updateOutputStatus() {
+            fetch('/api/output').then(r => r.json()).then(applyOutputStatus).catch(() => {});
+        }
+
+        // Einmaliges Laden beim Tab-Wechsel/Initial-Load: fuellt zusaetzlich die Dropdowns.
         function loadOutputConfig() {
             fetch('/api/output').then(r => r.json()).then(d => {
-                document.getElementById('outputLight').value = d.light_output;
-                document.getElementById('outputFan').value   = d.fan_output;
+                const lightEl = document.getElementById('outputLight');
+                const fanEl   = document.getElementById('outputFan');
+                if (lightEl) lightEl.value = d.light_output;
+                if (fanEl)   fanEl.value   = d.fan_output;
                 updateSchedNumSsrVisibility(d.light_output);
-                const st = document.getElementById('analogStatus');
-                if (st) {
-                    st.textContent = d.analog_online
-                        ? 'Online — Ch1=' + d.analog_ch1_raw + '  Ch2=' + d.analog_ch2_raw
-                        : t('offlineLabel');
-                }
+                applyOutputStatus(d);
             }).catch(() => {});
         }
 
@@ -1758,16 +1839,40 @@ const char* htmlPage = R"rawliteral(
             }).catch(() => alert(t('connectionError')));
         }
 
-        // Startseite: Drehzahl/Modus, sichtbar sobald der Luefter (RS485) online ist
+        // Manuelle Leistungs-Schieberegler auf der Startseite (nur sichtbar bei Modus=Manuell).
+        // fanSliderDragging haelt den Server-Poll waehrend des Ziehens davon ab, den Wert
+        // unter der Maus des Nutzers zurueckzusetzen (gleiches Muster wie schedDirtyFlag).
+        let fanSliderDragging = false;
+
+        function onFanManualSliderInput() {
+            fanSliderDragging = true;
+            const v = document.getElementById('fanManualSlider').value;
+            document.getElementById('fanManualSliderValue').textContent = v + '%';
+        }
+
+        function onFanManualSliderChange() {
+            const v = parseInt(document.getElementById('fanManualSlider').value);
+            fetch('/api/fan/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({manual_percent: v})
+            }).then(() => { fanSliderDragging = false; })
+              .catch(() => { fanSliderDragging = false; });
+        }
+
+        // Startseite: Drehzahl/Modus, sichtbar sobald der aktive Luefter-Ausgang online ist
         function updateFanStatus() {
             fetch('/api/fan').then(r => r.json()).then(d => {
                 const badgeFan = document.getElementById('badge_fan');
-                if (badgeFan) badgeFan.style.background = d.online ? '#28a745' : '#dc3545';
+                // Bei Analog-Ausgang haelt updateOutputStatus() diese Badge aktuell (MARS-Luefter
+                // wird dann gar nicht mehr gepollt und waere sonst faelschlich immer offline).
+                if (badgeFan && outputFanMode != 1) badgeFan.style.background = d.online ? '#28a745' : '#dc3545';
 
-                const card = document.getElementById('fanStatusCard');
-                if (!card) return;
-                if (!d.online) { card.style.display = 'none'; return; }
-                card.style.display = 'block';
+                const section = document.getElementById('fanStatusSection');
+                if (!section) return;
+                section.style.display = d.online ? 'block' : 'none';
+                refreshCo2FanCardVisibility();
+                if (!d.online) return;
                 const badge = document.getElementById('fanModeBadge');
                 if (badge) {
                     if (d.enabled) { badge.textContent = fanModeName(d.mode) || '--'; badge.style.background = '#28a745'; }
@@ -1775,8 +1880,24 @@ const char* htmlPage = R"rawliteral(
                 }
                 const pctEl = document.getElementById('fanPercent');
                 if (pctEl) pctEl.textContent = d.percent + '%';
+                // RPM-Rueckmeldung gibt es nur vom MARS-Luefter (Tacho), das Analogmodul hat
+                // keinen Ruecklesewert dafuer.
+                const rpmBox = document.getElementById('fanRpmBox');
+                if (rpmBox) rpmBox.style.display = (d.rpm !== undefined) ? '' : 'none';
                 const rpmEl = document.getElementById('fanRpm');
-                if (rpmEl) rpmEl.textContent = d.rpm;
+                if (rpmEl && d.rpm !== undefined) rpmEl.textContent = d.rpm;
+
+                const sliderRow = document.getElementById('fanManualSliderRow');
+                if (sliderRow) {
+                    const showSlider = d.enabled && d.mode === 0;
+                    sliderRow.style.display = showSlider ? 'block' : 'none';
+                    if (showSlider && !fanSliderDragging) {
+                        const sl = document.getElementById('fanManualSlider');
+                        if (sl) sl.value = d.manual_percent;
+                        const valEl = document.getElementById('fanManualSliderValue');
+                        if (valEl) valEl.textContent = d.manual_percent + '%';
+                    }
+                }
             }).catch(() => {});
         }
 
@@ -2007,7 +2128,9 @@ const char* htmlPage = R"rawliteral(
                 const badgeMs2 = document.getElementById('badge_ms2');
                 if (badgeMs2) badgeMs2.style.background = ms2.online ? '#28a745' : '#dc3545';
                 const badgeLicht = document.getElementById('badge_licht');
-                if (badgeLicht && d.licht) badgeLicht.style.background = d.licht.online ? '#28a745' : '#dc3545';
+                // Bei Analog-Ausgang haelt updateOutputStatus() diese Badge aktuell (Lichtx4
+                // wird dann gar nicht mehr gepollt und waere sonst faelschlich immer offline).
+                if (badgeLicht && d.licht && outputLightMode != 1) badgeLicht.style.background = d.licht.online ? '#28a745' : '#dc3545';
             }).catch(() => {});
         }
 
@@ -2020,6 +2143,7 @@ const char* htmlPage = R"rawliteral(
                 updateLicht();
                 updateCo2Status();
                 updateFanStatus();
+                updateOutputStatus();
                 schedTick();
             }
         }, 2000);

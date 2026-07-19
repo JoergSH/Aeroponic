@@ -69,6 +69,11 @@ float volumenLiter      = 0.0;
 RTC_DS3231 rtc;
 bool rtcOK = false;
 unsigned long lastNtpSync = 0;
+unsigned long lastRtcRetryMs = 0;
+#define RTC_RETRY_INTERVAL_MS 30000UL  // Falls rtc.begin() beim Boot einmal fehlschlaegt
+                                        // (z.B. I2C-Timing-Race mit SD/W5500-Init), hier
+                                        // periodisch erneut versuchen statt bis zum naechsten
+                                        // manuellen Reset auf rtcOK=false stehen zu bleiben.
 
 // Forward-Deklaration
 void syncRtcMitNtp();
@@ -911,11 +916,21 @@ void handleApiFanGet() {
     doc["temp_cap_diff"]   = fanConfig.temp_cap_diff;
     doc["room_ok"]         = aht21Ok;
     if (aht21Ok) doc["room_temp"] = serialized(String(aht21Temp, 1));
-    const Rs485FanData& fan = rs485_get_fan();
-    doc["online"]          = fan.online;
-    if (fan.online) {
-        doc["percent"] = fan.percent;
-        doc["rpm"]     = fan.rpm;
+
+    // Status/Ist-Werte kommen vom tatsaechlich aktiven Ausgang — beim jeweils anderen
+    // Geraet ist das Pollen ja bewusst abgeschaltet (siehe outputctrl.h) und wuerde immer
+    // "offline" liefern.
+    if (outputConfig.fan_output == FAN_OUTPUT_ANALOG) {
+        const Rs485AnalogData& analog = rs485_get_analog();
+        doc["online"] = analog.online;
+        if (analog.online) doc["percent"] = (int)roundf(analog.ch1_raw / 4095.0f * 100.0f);
+    } else {
+        const Rs485FanData& fan = rs485_get_fan();
+        doc["online"] = fan.online;
+        if (fan.online) {
+            doc["percent"] = fan.percent;
+            doc["rpm"]     = fan.rpm;
+        }
     }
     String response;
     serializeJson(doc, response);
@@ -1293,6 +1308,14 @@ void loop() {
   }
 
   unsigned long now = millis();
+
+  if (!rtcOK && now - lastRtcRetryMs >= RTC_RETRY_INTERVAL_MS) {
+    lastRtcRetryMs = now;
+    if (rtc.begin()) {
+      rtcOK = true;
+      Serial.println("RTC: jetzt erkannt (fehlgeschlagener Init-Versuch beim Boot hat sich erholt)");
+    }
+  }
 
   if (now - lastNtpSync >= NTP_SYNC_INTERVAL) {
     syncRtcMitNtp();
