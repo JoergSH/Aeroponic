@@ -49,7 +49,9 @@ extern bool USE_ACCESS_POINT;
 //  63:    Luefter-Steuerung Magic Byte
 //  64–73: FanConfig (10 Bytes)
 //  74:    WLAN-Konfiguration Magic Byte
-//  75–174: WifiConfig (ssid[33] + password[65] = 98 Bytes)
+//  75–172: WifiConfig (ssid[33] + password[65] = 98 Bytes)
+//  173:    Ausgangs-Konfiguration Magic Byte
+//  174–175: OutputConfig (2 Bytes)
 #define EEPROM_SIZE             180
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
@@ -73,6 +75,11 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_WIFI_MAGIC_ADDR  74
 #define EEPROM_WIFI_MAGIC_BYTE  0x4E
 #define EEPROM_WIFI_BASE        75
+//  173:    Ausgangs-Konfiguration Magic Byte (Licht/Luefter: Lichtx4/MARS vs. Analogmodul)
+//  174–175: OutputConfig (2 Bytes) — Rest (176–179) bleibt Reserve
+#define EEPROM_OUTPUT_MAGIC_ADDR 173
+#define EEPROM_OUTPUT_MAGIC_BYTE 0x61
+#define EEPROM_OUTPUT_BASE       174
 
 // ========== Lichtsteuerung Scheduler Defaults ==========
 #define SCHED_DEFAULT_NODE        1

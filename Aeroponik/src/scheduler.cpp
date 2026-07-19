@@ -61,3 +61,25 @@ uint8_t schedComputeRelayMask(uint16_t now_min) {
     if (active > n) active = n;
     return (active == 0) ? 0x00 : (uint8_t)((1 << active) - 1);
 }
+
+// Fuer den analogen 0-10V-Lichtausgang: dieselben Zeitfenster wie oben, aber ohne
+// Stufen-Quantisierung — ein Analogsignal kann stufenlos der Rampe folgen, daher
+// bewusst eine eigene, einfachere Berechnung statt schedComputeRelayMask() anzufassen.
+uint8_t schedComputeBrightnessPercent(uint16_t now_min) {
+    if (now_min < schedConfig.dawn_start || now_min >= schedConfig.dusk_end) return 0;
+    if (now_min >= schedConfig.dawn_end && now_min < schedConfig.dusk_start) return 100;
+
+    float frac;
+    if (now_min < schedConfig.dawn_end) {
+        // Aufgang: 0.0 -> 1.0
+        frac = (float)(now_min - schedConfig.dawn_start) /
+               (float)(schedConfig.dawn_end - schedConfig.dawn_start);
+    } else {
+        // Untergang: 1.0 -> 0.0
+        frac = 1.0f - (float)(now_min - schedConfig.dusk_start) /
+                      (float)(schedConfig.dusk_end - schedConfig.dusk_start);
+    }
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+    return (uint8_t)roundf(frac * 100.0f);
+}

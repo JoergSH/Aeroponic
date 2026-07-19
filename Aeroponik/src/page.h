@@ -240,6 +240,7 @@ const char* htmlPage = R"rawliteral(
         <div class="tabs">
             <button class="tab active" onclick="showTab('startseite',    this)">🏠 <span class="de">Startseite</span><span class="en">Home</span></button>
             <button class="tab"        onclick="showTab('konfiguration', this)">⚙️ <span class="de">Konfiguration</span><span class="en">Settings</span></button>
+            <button class="tab"        onclick="showTab('parameter',     this)">🎛️ <span class="de">Parameter</span><span class="en">Parameters</span></button>
         </div>
 
         <!-- ============================================================ -->
@@ -339,225 +340,37 @@ const char* htmlPage = R"rawliteral(
                 </div>
             </div>
 
-            <!-- Ventile-Konfiguration -->
-            <h3 class="section-heading">🚿 <span class="de">Ventile-Konfiguration</span><span class="en">Valve Configuration</span></h3>
-            <div style="margin-bottom:15px; padding:12px; background:#f0f8ff; border-radius:8px; border-left:4px solid #17a2b8;">
-                <label><input type="checkbox" id="vorlaufAktiv" onchange="saveVentilConfig()"> <span class="de">Vorlauf Rückleitung aktiv</span><span class="en">Return pre-flush active</span></label>
-                &nbsp;&nbsp;
-                <label><span class="de">Vorlaufzeit</span><span class="en">Pre-flush time</span>: <input type="number" id="vorlaufzeit" min="1" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
-            </div>
-
-            <div id="behaelterCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:15px;"></div>
-
-            <div style="text-align:center; margin-top:20px;">
-                <button class="button button-on" onclick="saveVentilConfig()">💾 <span class="de">Speichern</span><span class="en">Save</span></button>
-            </div>
-
-            <div style="margin-top:24px;padding:16px;background:#fff8e1;border-radius:8px;border-left:4px solid #ffc107;">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <h4 style="margin:0;">🔌 PCF8574 <span class="de">Ausgangstest</span><span class="en">Output Test</span></h4>
-                    <button id="pcfTestToggle" onclick="togglePcfTest()"
-                        style="background:#e74c3c;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;">
-                        <span class="de">Test starten</span><span class="en">Start Test</span></button>
-                </div>
-                <div id="pcfTestWarning" style="display:none;margin-bottom:12px;padding:8px;background:#f8d7da;border-radius:4px;font-size:0.85em;color:#721c24;">
-                    ⚠ <span class="de">Automatische Ventilsteuerung pausiert!</span><span class="en">Automatic valve control paused!</span>
-                </div>
-                <div id="pcfTestButtons" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;opacity:0.4;pointer-events:none;">
-                    <button id="pcf_btn_0" onclick="pcfToggle(0)" class="pcf-btn">P0<br><small>MV1 <span class="de">Beh.1</span><span class="en">Res.1</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_1" onclick="pcfToggle(1)" class="pcf-btn">P1<br><small>MV2 <span class="de">Beh.2</span><span class="en">Res.2</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_2" onclick="pcfToggle(2)" class="pcf-btn">P2<br><small>MV3 <span class="de">Beh.3</span><span class="en">Res.3</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_3" onclick="pcfToggle(3)" class="pcf-btn">P3<br><small><span class="de">Rücklauf</span><span class="en">Return</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_4" onclick="pcfToggle(4)" class="pcf-btn">P4<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_5" onclick="pcfToggle(5)" class="pcf-btn">P5<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_6" onclick="pcfToggle(6)" class="pcf-btn">P6<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
-                    <button id="pcf_btn_7" onclick="pcfToggle(7)" class="pcf-btn">P7<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
-                </div>
-            </div>
-
-            <!-- Zeitplan-Konfiguration -->
-            <h3 class="section-heading">🌅 <span class="de">Zeitplan-Konfiguration</span><span class="en">Schedule Configuration</span></h3>
+            <!-- Geraete-Auswahl: Licht-/Luefter-Ausgang -->
+            <h3 class="section-heading">🔌 <span class="de">Geräte</span><span class="en">Devices</span></h3>
             <div class="status-box-info">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
-                        <input type="checkbox" id="schedEnabled" onchange="schedDirty();updateSchedPhase()" style="width:18px;height:18px;">
-                    </label>
-                </div>
-
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
                     <div>
-                        <div class="status-label"><span class="de">Anzahl Kanäle</span><span class="en">Channel Count</span></div>
-                        <input type="number" id="schedNumSsr" min="1" max="4" value="4"
-                            oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Anzahl SSR-Ausgänge (1–4)</span><span class="en">Number of SSR outputs (1–4)</span></div>
-                    </div>
-                </div>
-
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-                    <div>
-                        <div class="status-label"><span class="de">Sonnenaufgang — Start</span><span class="en">Sunrise — Start</span></div>
-                        <input type="time" id="schedDawnStart" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Beginn Aufblenden</span><span class="en">Fade-in start</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Sonnenaufgang — Ende</span><span class="en">Sunrise — End</span></div>
-                        <input type="time" id="schedDawnEnd" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Volle Helligkeit ab</span><span class="en">Full brightness from</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Sonnenuntergang — Start</span><span class="en">Sunset — Start</span></div>
-                        <input type="time" id="schedDuskStart" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Beginn Abblenden</span><span class="en">Fade-out start</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Sonnenuntergang — Ende</span><span class="en">Sunset — End</span></div>
-                        <input type="time" id="schedDuskEnd" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Licht aus</span><span class="en">Light off</span></div>
-                    </div>
-                </div>
-
-                <div style="display:flex;gap:8px;align-items:center;">
-                    <button id="schedSaveBtn" onclick="saveZeitplan()"
-                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
-                        <span class="de">Speichern</span><span class="en">Save</span></button>
-                    <span id="schedSaveStatus" style="font-size:0.85em;color:#888;"></span>
-                </div>
-            </div>
-
-            <!-- CO2-Steuerung -->
-            <h3 class="section-heading">🌫️ CO2-<span class="de">Steuerung</span><span class="en">Control</span></h3>
-            <div class="status-box-info">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
-                        <input type="checkbox" id="co2Enabled" style="width:18px;height:18px;">
-                    </label>
-                </div>
-
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-                    <div>
-                        <div class="status-label"><span class="de">Steckdose (Node)</span><span class="en">Socket (Node)</span></div>
-                        <select id="co2Node" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                            <option value="" id="co2NodeNoneOpt">— keine —</option>
-                        </select>
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Nur online erkannte Steckdosen-Nodes</span><span class="en">Only sockets currently detected online</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Ausgang</span><span class="en">Output</span></div>
-                        <select id="co2RelayBit" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                            <option value="0">R1</option>
-                            <option value="1">R2</option>
-                            <option value="2">R3</option>
-                            <option value="3">R4</option>
+                        <div class="status-label"><span class="de">Licht-Ausgang</span><span class="en">Light Output</span></div>
+                        <select id="outputLight" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="0" class="i18n-opt" data-de="Lichtx4 (Relais)" data-en="Lichtx4 (Relay)">Lichtx4 (Relais)</option>
+                            <option value="1" class="i18n-opt" data-de="Analog-Modul (0-10V)" data-en="Analog Module (0-10V)">Analog-Modul (0-10V)</option>
                         </select>
                     </div>
-                </div>
-
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
                     <div>
-                        <div class="status-label">CO2 Min (ppm)</div>
-                        <input type="number" id="co2Min" min="0" max="5000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Ausgang EIN</span><span class="en">Below: output ON</span></div>
+                        <div class="status-label"><span class="de">Lüfter-Ausgang</span><span class="en">Fan Output</span></div>
+                        <select id="outputFan" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="0" class="i18n-opt" data-de="MARS Hydro (RS485)" data-en="MARS Hydro (RS485)">MARS Hydro (RS485)</option>
+                            <option value="1" class="i18n-opt" data-de="Analog-Modul (0-10V)" data-en="Analog Module (0-10V)">Analog-Modul (0-10V)</option>
+                        </select>
                     </div>
-                    <div>
-                        <div class="status-label">CO2 Max (ppm)</div>
-                        <input type="number" id="co2Max" min="0" max="5000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Ausgang AUS</span><span class="en">Above: output OFF</span></div>
-                    </div>
-                </div>
-
-                <div style="display:flex;gap:8px;align-items:center;">
-                    <button onclick="saveCo2ConfigForm()"
-                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
-                        <span class="de">Speichern</span><span class="en">Save</span></button>
-                    <span id="co2SaveStatus" style="font-size:0.85em;color:#888;"></span>
-                </div>
-            </div>
-
-            <!-- Abluftluefter-Steuerung -->
-            <h3 class="section-heading">🌀 <span class="de">Abluftlüfter-Steuerung</span><span class="en">Exhaust Fan Control</span></h3>
-            <div class="status-box-info">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <span style="font-size:0.9em;"><span class="de">Eigene Steuerung aktiv</span><span class="en">Own control active</span></span>
-                        <input type="checkbox" id="fanEnabled" style="width:18px;height:18px;">
-                    </label>
                 </div>
                 <div style="font-size:0.78em;color:#888;margin-bottom:16px;">
-                    <span class="de">Wenn deaktiviert, sendet der Master keine eigenen Befehle — der iControl-Hub behält die Kontrolle über den Lüfter.</span>
-                    <span class="en">When disabled, the master sends no commands of its own — the iControl hub retains control over the fan.</span>
+                    <span class="de">Legt fest, welches Gerät angesteuert wird — nur dieses wird auch auf dem RS485-Bus abgefragt. Feineinstellungen (Rampen, Zeiten) stehen unter Parameter.</span>
+                    <span class="en">Determines which device is driven — only that device is polled on the RS485 bus. Fine-tuning (ramps, timing) is under Parameters.</span>
                 </div>
-
-                <div style="margin-bottom:16px;">
-                    <div class="status-label"><span class="de">Modus</span><span class="en">Mode</span></div>
-                    <select id="fanMode" onchange="updateFanModeVisibility()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <option value="0" class="i18n-opt" data-de="Manuell" data-en="Manual">Manuell</option>
-                        <option value="1" class="i18n-opt" data-de="Automatisch nach Luftfeuchte" data-en="Automatic by humidity">Automatisch nach Luftfeuchte</option>
-                        <option value="2" class="i18n-opt" data-de="Automatisch nach Temperatur (senken)" data-en="Automatic by temperature (reduce)">Automatisch nach Temperatur (senken)</option>
-                    </select>
-                </div>
-
-                <div id="fanManualSection" style="margin-bottom:16px;">
-                    <div class="status-label"><span class="de">Leistung (%)</span><span class="en">Power (%)</span></div>
-                    <input type="number" id="fanManualPercent" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                </div>
-
-                <div id="fanHumSection" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-                    <div>
-                        <div class="status-label"><span class="de">Feuchte Min (%rH)</span><span class="en">Humidity Min (%rH)</span></div>
-                        <input type="number" id="fanHumMin" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Mindestdrehzahl</span><span class="en">Below: minimum speed</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Feuchte Max (%rH)</span><span class="en">Humidity Max (%rH)</span></div>
-                        <input type="number" id="fanHumMax" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: 100%</span><span class="en">Above: 100%</span></div>
-                    </div>
-                </div>
-
-                <div id="fanTempSection" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
-                    <div style="grid-column:1/-1;">
-                        <div class="status-label"><span class="de">Temperatur-Basis</span><span class="en">Temperature Basis</span></div>
-                        <select id="fanTempMode" onchange="updateFanTempModeVisibility()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                            <option value="0" class="i18n-opt" data-de="Absolute Zelttemperatur" data-en="Absolute tent temperature">Absolute Zelttemperatur</option>
-                            <option value="1" class="i18n-opt" data-de="Differenz Zelt − Raum" data-en="Differential tent − room">Differenz Zelt − Raum</option>
-                        </select>
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;">
-                            <span class="de">"Differenz" vermeidet Volllast, wenn der Raum fast so warm wie das Zelt ist — Lüften bringt dann kaum Kühlung.</span>
-                            <span class="en">"Differential" avoids full blast when the room is nearly as warm as the tent — venting then barely cools anything.</span>
-                        </div>
-                    </div>
-                    <div>
-                        <div class="status-label" id="fanTempMinLabel"><span class="de">Temperatur Min (°C)</span><span class="en">Temperature Min (°C)</span></div>
-                        <input type="number" id="fanTempMin" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Mindestdrehzahl</span><span class="en">Below: minimum speed</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label" id="fanTempMaxLabel"><span class="de">Temperatur Max (°C)</span><span class="en">Temperature Max (°C)</span></div>
-                        <input type="number" id="fanTempMax" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: 100%</span><span class="en">Above: 100%</span></div>
-                    </div>
-                    <div id="fanTempCapSection" style="grid-column:1/-1;">
-                        <div class="status-label"><span class="de">Differenz-Bremse (°C, 0 = aus)</span><span class="en">Differential Cap (°C, 0 = off)</span></div>
-                        <input type="number" id="fanTempCapDiff" min="0" max="30" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;">
-                            <span class="de">Ist die Differenz Zelt−Raum kleiner als dieser Wert, läuft der Lüfter trotz obiger Rampe nur mit Mindestdrehzahl.</span>
-                            <span class="en">If the tent−room difference is below this value, the fan runs at minimum speed regardless of the ramp above.</span>
-                        </div>
-                    </div>
-                </div>
-
-                <div style="margin-bottom:16px;">
-                    <div class="status-label"><span class="de">Mindestdrehzahl (%) — für beide Automatik-Modi</span><span class="en">Minimum Speed (%) — for both auto modes</span></div>
-                    <input type="number" id="fanMinSpeed" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                </div>
-
-                <div style="display:flex;gap:8px;align-items:center;">
-                    <button onclick="saveFanConfigForm()"
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+                    <button onclick="saveOutputConfigForm()"
                         style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
                         <span class="de">Speichern</span><span class="en">Save</span></button>
-                    <span id="fanSaveStatus" style="font-size:0.85em;color:#888;"></span>
+                    <span id="outputSaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+                <div style="font-size:0.82em;color:#555;">
+                    <span class="de">Analog-Modul:</span><span class="en">Analog module:</span> <span id="analogStatus">--</span>
                 </div>
             </div>
 
@@ -673,6 +486,242 @@ const char* htmlPage = R"rawliteral(
             </div>
         </div>
 
+        <!-- ============================================================ -->
+        <!-- PARAMETER — Werte, die man öfter anpasst                     -->
+        <!-- ============================================================ -->
+        <div id="parameterTab" class="tab-content">
+
+            <!-- Ventile-Konfiguration -->
+            <h3 class="section-heading">🚿 <span class="de">Ventile-Konfiguration</span><span class="en">Valve Configuration</span></h3>
+            <div style="margin-bottom:15px; padding:12px; background:#f0f8ff; border-radius:8px; border-left:4px solid #17a2b8;">
+                <label><input type="checkbox" id="vorlaufAktiv" onchange="saveVentilConfig()"> <span class="de">Vorlauf Rückleitung aktiv</span><span class="en">Return pre-flush active</span></label>
+                &nbsp;&nbsp;
+                <label><span class="de">Vorlaufzeit</span><span class="en">Pre-flush time</span>: <input type="number" id="vorlaufzeit" min="1" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
+            </div>
+
+            <div id="behaelterCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:15px;"></div>
+
+            <div style="text-align:center; margin-top:20px;">
+                <button class="button button-on" onclick="saveVentilConfig()">💾 <span class="de">Speichern</span><span class="en">Save</span></button>
+            </div>
+
+            <div style="margin-top:24px;padding:16px;background:#fff8e1;border-radius:8px;border-left:4px solid #ffc107;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                    <h4 style="margin:0;">🔌 PCF8574 <span class="de">Ausgangstest</span><span class="en">Output Test</span></h4>
+                    <button id="pcfTestToggle" onclick="togglePcfTest()"
+                        style="background:#e74c3c;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:0.9em;">
+                        <span class="de">Test starten</span><span class="en">Start Test</span></button>
+                </div>
+                <div id="pcfTestWarning" style="display:none;margin-bottom:12px;padding:8px;background:#f8d7da;border-radius:4px;font-size:0.85em;color:#721c24;">
+                    ⚠ <span class="de">Automatische Ventilsteuerung pausiert!</span><span class="en">Automatic valve control paused!</span>
+                </div>
+                <div id="pcfTestButtons" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;opacity:0.4;pointer-events:none;">
+                    <button id="pcf_btn_0" onclick="pcfToggle(0)" class="pcf-btn">P0<br><small>MV1 <span class="de">Beh.1</span><span class="en">Res.1</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_1" onclick="pcfToggle(1)" class="pcf-btn">P1<br><small>MV2 <span class="de">Beh.2</span><span class="en">Res.2</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_2" onclick="pcfToggle(2)" class="pcf-btn">P2<br><small>MV3 <span class="de">Beh.3</span><span class="en">Res.3</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_3" onclick="pcfToggle(3)" class="pcf-btn">P3<br><small><span class="de">Rücklauf</span><span class="en">Return</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_4" onclick="pcfToggle(4)" class="pcf-btn">P4<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_5" onclick="pcfToggle(5)" class="pcf-btn">P5<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_6" onclick="pcfToggle(6)" class="pcf-btn">P6<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
+                    <button id="pcf_btn_7" onclick="pcfToggle(7)" class="pcf-btn">P7<br><small><span class="de">Reserve</span><span class="en">Spare</span></small><br><span>AUS</span></button>
+                </div>
+            </div>
+
+            <!-- Zeitplan-Konfiguration -->
+            <h3 class="section-heading">🌅 <span class="de">Zeitplan-Konfiguration</span><span class="en">Schedule Configuration</span></h3>
+            <div class="status-box-info">
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Ausgang (Lichtx4 / Analog) wird unter Konfiguration → Geräte festgelegt.</span>
+                    <span class="en">Output (Lichtx4 / Analog) is set under Configuration → Devices.</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
+                        <input type="checkbox" id="schedEnabled" onchange="schedDirty();updateSchedPhase()" style="width:18px;height:18px;">
+                    </label>
+                </div>
+
+                <div id="schedNumSsrRow" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Anzahl Kanäle</span><span class="en">Channel Count</span></div>
+                        <input type="number" id="schedNumSsr" min="1" max="4" value="4"
+                            oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Anzahl SSR-Ausgänge (1–4)</span><span class="en">Number of SSR outputs (1–4)</span></div>
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Sonnenaufgang — Start</span><span class="en">Sunrise — Start</span></div>
+                        <input type="time" id="schedDawnStart" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Beginn Aufblenden</span><span class="en">Fade-in start</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Sonnenaufgang — Ende</span><span class="en">Sunrise — End</span></div>
+                        <input type="time" id="schedDawnEnd" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Volle Helligkeit ab</span><span class="en">Full brightness from</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Sonnenuntergang — Start</span><span class="en">Sunset — Start</span></div>
+                        <input type="time" id="schedDuskStart" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Beginn Abblenden</span><span class="en">Fade-out start</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Sonnenuntergang — Ende</span><span class="en">Sunset — End</span></div>
+                        <input type="time" id="schedDuskEnd" oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Licht aus</span><span class="en">Light off</span></div>
+                    </div>
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button id="schedSaveBtn" onclick="saveZeitplan()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        <span class="de">Speichern</span><span class="en">Save</span></button>
+                    <span id="schedSaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+            </div>
+
+            <!-- CO2-Steuerung -->
+            <h3 class="section-heading">🌫️ CO2-<span class="de">Steuerung</span><span class="en">Control</span></h3>
+            <div class="status-box-info">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
+                        <input type="checkbox" id="co2Enabled" style="width:18px;height:18px;">
+                    </label>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Steckdose (Node)</span><span class="en">Socket (Node)</span></div>
+                        <select id="co2Node" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="" id="co2NodeNoneOpt">— keine —</option>
+                        </select>
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Nur online erkannte Steckdosen-Nodes</span><span class="en">Only sockets currently detected online</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Ausgang</span><span class="en">Output</span></div>
+                        <select id="co2RelayBit" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="0">R1</option>
+                            <option value="1">R2</option>
+                            <option value="2">R3</option>
+                            <option value="3">R4</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label">CO2 Min (ppm)</div>
+                        <input type="number" id="co2Min" min="0" max="5000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Ausgang EIN</span><span class="en">Below: output ON</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label">CO2 Max (ppm)</div>
+                        <input type="number" id="co2Max" min="0" max="5000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Ausgang AUS</span><span class="en">Above: output OFF</span></div>
+                    </div>
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button onclick="saveCo2ConfigForm()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        <span class="de">Speichern</span><span class="en">Save</span></button>
+                    <span id="co2SaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+            </div>
+
+            <!-- Abluftluefter-Steuerung -->
+            <h3 class="section-heading">🌀 <span class="de">Abluftlüfter-Steuerung</span><span class="en">Exhaust Fan Control</span></h3>
+            <div class="status-box-info">
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Ausgang (MARS Hydro / Analog) wird unter Konfiguration → Geräte festgelegt.</span>
+                    <span class="en">Output (MARS Hydro / Analog) is set under Configuration → Devices.</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <span style="font-size:0.9em;"><span class="de">Eigene Steuerung aktiv</span><span class="en">Own control active</span></span>
+                        <input type="checkbox" id="fanEnabled" style="width:18px;height:18px;">
+                    </label>
+                </div>
+                <div style="font-size:0.78em;color:#888;margin-bottom:16px;">
+                    <span class="de">Wenn deaktiviert, sendet der Master keine eigenen Befehle — der iControl-Hub behält die Kontrolle über den Lüfter.</span>
+                    <span class="en">When disabled, the master sends no commands of its own — the iControl hub retains control over the fan.</span>
+                </div>
+
+                <div style="margin-bottom:16px;">
+                    <div class="status-label"><span class="de">Modus</span><span class="en">Mode</span></div>
+                    <select id="fanMode" onchange="updateFanModeVisibility()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <option value="0" class="i18n-opt" data-de="Manuell" data-en="Manual">Manuell</option>
+                        <option value="1" class="i18n-opt" data-de="Automatisch nach Luftfeuchte" data-en="Automatic by humidity">Automatisch nach Luftfeuchte</option>
+                        <option value="2" class="i18n-opt" data-de="Automatisch nach Temperatur (senken)" data-en="Automatic by temperature (reduce)">Automatisch nach Temperatur (senken)</option>
+                    </select>
+                </div>
+
+                <div id="fanManualSection" style="margin-bottom:16px;">
+                    <div class="status-label"><span class="de">Leistung (%)</span><span class="en">Power (%)</span></div>
+                    <input type="number" id="fanManualPercent" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                </div>
+
+                <div id="fanHumSection" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Feuchte Min (%rH)</span><span class="en">Humidity Min (%rH)</span></div>
+                        <input type="number" id="fanHumMin" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Mindestdrehzahl</span><span class="en">Below: minimum speed</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Feuchte Max (%rH)</span><span class="en">Humidity Max (%rH)</span></div>
+                        <input type="number" id="fanHumMax" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: 100%</span><span class="en">Above: 100%</span></div>
+                    </div>
+                </div>
+
+                <div id="fanTempSection" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div style="grid-column:1/-1;">
+                        <div class="status-label"><span class="de">Temperatur-Basis</span><span class="en">Temperature Basis</span></div>
+                        <select id="fanTempMode" onchange="updateFanTempModeVisibility()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="0" class="i18n-opt" data-de="Absolute Zelttemperatur" data-en="Absolute tent temperature">Absolute Zelttemperatur</option>
+                            <option value="1" class="i18n-opt" data-de="Differenz Zelt − Raum" data-en="Differential tent − room">Differenz Zelt − Raum</option>
+                        </select>
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;">
+                            <span class="de">"Differenz" vermeidet Volllast, wenn der Raum fast so warm wie das Zelt ist — Lüften bringt dann kaum Kühlung.</span>
+                            <span class="en">"Differential" avoids full blast when the room is nearly as warm as the tent — venting then barely cools anything.</span>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="status-label" id="fanTempMinLabel"><span class="de">Temperatur Min (°C)</span><span class="en">Temperature Min (°C)</span></div>
+                        <input type="number" id="fanTempMin" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Mindestdrehzahl</span><span class="en">Below: minimum speed</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label" id="fanTempMaxLabel"><span class="de">Temperatur Max (°C)</span><span class="en">Temperature Max (°C)</span></div>
+                        <input type="number" id="fanTempMax" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: 100%</span><span class="en">Above: 100%</span></div>
+                    </div>
+                    <div id="fanTempCapSection" style="grid-column:1/-1;">
+                        <div class="status-label"><span class="de">Differenz-Bremse (°C, 0 = aus)</span><span class="en">Differential Cap (°C, 0 = off)</span></div>
+                        <input type="number" id="fanTempCapDiff" min="0" max="30" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;">
+                            <span class="de">Ist die Differenz Zelt−Raum kleiner als dieser Wert, läuft der Lüfter trotz obiger Rampe nur mit Mindestdrehzahl.</span>
+                            <span class="en">If the tent−room difference is below this value, the fan runs at minimum speed regardless of the ramp above.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-bottom:16px;">
+                    <div class="status-label"><span class="de">Mindestdrehzahl (%) — für beide Automatik-Modi</span><span class="en">Minimum Speed (%) — for both auto modes</span></div>
+                    <input type="number" id="fanMinSpeed" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button onclick="saveFanConfigForm()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        <span class="de">Speichern</span><span class="en">Save</span></button>
+                    <span id="fanSaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+            </div>
+        </div>
+
         <!-- Geraetestatus (immer sichtbar, unabhaengig vom aktiven Tab) -->
         <div id="deviceStatusBar" style="margin-top:20px;padding:10px 14px;background:#f8f9fa;border-radius:8px;font-size:0.82em;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;color:#555;">
             <span id="wifiMode"><span class="de">Lade Verbindungsinfo...</span><span class="en">Loading connection info...</span></span>
@@ -752,6 +801,7 @@ const char* htmlPage = R"rawliteral(
                 deleteFailed: 'Löschen fehlgeschlagen',
                 externalControl: 'Extern (iControl)',
                 saveBtn: 'Speichern',
+                offlineLabel: 'Offline',
             },
             en: {
                 loading: 'Loading...',
@@ -816,6 +866,7 @@ const char* htmlPage = R"rawliteral(
                 deleteFailed: 'Delete failed',
                 externalControl: 'External (iControl)',
                 saveBtn: 'Save',
+                offlineLabel: 'Offline',
             }
         };
         function t(key, ...args) {
@@ -855,7 +906,7 @@ const char* htmlPage = R"rawliteral(
             updateData(); updateVentile(); updateNodes(); updateRs485(); updateLicht();
             updateCo2Status(); updateFanStatus();
             loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadFanConfig();
-            loadWifiConfigForm(); loadLogFileList();
+            loadWifiConfigForm(); loadLogFileList(); loadOutputConfig();
             updateSchedPhase();
             updatePcfUi();
             updateFanModeVisibility();
@@ -868,11 +919,13 @@ const char* htmlPage = R"rawliteral(
             btn.classList.add('active');
             if (tabName === 'konfiguration') {
                 loadTankKonfig();
+                loadLogFileList();
+                loadWifiConfigForm();
+                loadOutputConfig();
+            } else if (tabName === 'parameter') {
                 loadZeitplan();
                 loadCo2Config();
                 loadFanConfig();
-                loadLogFileList();
-                loadWifiConfigForm();
             }
         }
 
@@ -1592,6 +1645,44 @@ const char* htmlPage = R"rawliteral(
             }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
         }
 
+        // Geraete-Auswahl: Licht-/Luefter-Ausgang (Lichtx4/MARS vs. Analogmodul)
+        function updateSchedNumSsrVisibility(lightOutput) {
+            const row = document.getElementById('schedNumSsrRow');
+            if (row) row.style.display = (lightOutput == 0) ? 'grid' : 'none';
+        }
+
+        function loadOutputConfig() {
+            fetch('/api/output').then(r => r.json()).then(d => {
+                document.getElementById('outputLight').value = d.light_output;
+                document.getElementById('outputFan').value   = d.fan_output;
+                updateSchedNumSsrVisibility(d.light_output);
+                const st = document.getElementById('analogStatus');
+                if (st) {
+                    st.textContent = d.analog_online
+                        ? 'Online — Ch1=' + d.analog_ch1_raw + '  Ch2=' + d.analog_ch2_raw
+                        : t('offlineLabel');
+                }
+            }).catch(() => {});
+        }
+
+        function saveOutputConfigForm() {
+            const lightOutput = parseInt(document.getElementById('outputLight').value);
+            const body = {
+                light_output: lightOutput,
+                fan_output:   parseInt(document.getElementById('outputFan').value),
+            };
+            const st = document.getElementById('outputSaveStatus');
+            fetch('/api/output/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body)
+            }).then(r => r.json()).then(d => {
+                st.style.color = d.success ? '#27ae60' : '#dc3545';
+                st.textContent = d.success ? t('saved') : t('error');
+                if (d.success) { updateSchedNumSsrVisibility(lightOutput); setTimeout(()=>st.textContent='',2000); }
+            }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
+        }
+
         // WLAN-Konfiguration
         function loadWifiConfigForm() {
             fetch('/api/wifi').then(r => r.json()).then(d => {
@@ -1942,6 +2033,7 @@ const char* htmlPage = R"rawliteral(
         updateCo2Status();
         updateFanStatus();
         loadZeitplan();
+        loadOutputConfig();
     </script>
 </body>
 </html>

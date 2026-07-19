@@ -28,6 +28,7 @@
 #include "co2ctrl.h"
 #include "fanctrl.h"
 #include "wifictrl.h"
+#include "outputctrl.h"
 #include "espnow/espnow_master.h"
 
 // HSPI (SPI3) für W5500 + SD: GPIO-Matrix erzwingt korrekte MOSI=13/MISO=11 Richtungen
@@ -750,18 +751,29 @@ void handleNodeOtaBin() {
 
 void loopScheduler() {
     if (!schedConfig.enabled || !rtcOK) return;
-    static uint8_t  last_mask  = 0xFF;  // 0xFF = unbekannt, erzwingt ersten Send
-    static uint32_t last_check = 0;
+    static uint8_t  last_mask    = 0xFF;  // 0xFF = unbekannt, erzwingt ersten Send
+    static uint8_t  last_percent = 0xFF;
+    static uint32_t last_check   = 0;
     if (millis() - last_check < 30000) return;
     last_check = millis();
     DateTime now = rtc.now();
     uint16_t now_min = now.hour() * 60 + now.minute();
-    uint8_t mask = schedComputeRelayMask(now_min);
-    if (mask != last_mask) {
-        rs485_set_licht_mask(mask);
-        last_mask = mask;
-        Serial.printf("[Sched] Licht-Maske=0x%02X (%d SSRs an)\n",
-                      mask, __builtin_popcount(mask));
+
+    if (outputConfig.light_output == LIGHT_OUTPUT_ANALOG) {
+        uint8_t pct = schedComputeBrightnessPercent(now_min);
+        if (pct != last_percent) {
+            rs485_set_analog_ch2((uint16_t)roundf(pct / 100.0f * 4095));
+            last_percent = pct;
+            Serial.printf("[Sched] Licht-Helligkeit (Analog)=%u%%\n", pct);
+        }
+    } else {
+        uint8_t mask = schedComputeRelayMask(now_min);
+        if (mask != last_mask) {
+            rs485_set_licht_mask(mask);
+            last_mask = mask;
+            Serial.printf("[Sched] Licht-Maske=0x%02X (%d SSRs an)\n",
+                          mask, __builtin_popcount(mask));
+        }
     }
 }
 
@@ -872,9 +884,13 @@ void loopFanCtrl() {
     }
 
     if (target != last_sent) {
-        if (rs485_set_fan_percent(target)) {
+        bool sent = (outputConfig.fan_output == FAN_OUTPUT_ANALOG)
+            ? rs485_set_analog_ch1((uint16_t)roundf(target / 100.0f * 4095))
+            : rs485_set_fan_percent(target);
+        if (sent) {
             last_sent = target;
-            Serial.printf("[Fan] Ziel-Leistung=%u%% (Modus=%d)\n", target, fanConfig.mode);
+            Serial.printf("[Fan] Ziel-Leistung=%u%% (Modus=%d, Ausgang=%s)\n", target, fanConfig.mode,
+                          outputConfig.fan_output == FAN_OUTPUT_ANALOG ? "Analog" : "MARS");
         }
     }
 }
@@ -921,6 +937,44 @@ void handleApiFanSave() {
     if (doc["temp_mode"].is<int>())       fanConfig.temp_mode      = constrain((int)doc["temp_mode"], 0, 1);
     if (doc["temp_cap_diff"].is<int>())   fanConfig.temp_cap_diff  = constrain((int)doc["temp_cap_diff"], 0, 30);
     saveFanConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== Ausgangs-Konfiguration (Licht/Luefter: Lichtx4/MARS vs. Analogmodul) ==========
+// Setup-Entscheidung statt Laufzeit-Umschaltung: legt fest, welches RS485-Geraet
+// ueberhaupt gepollt wird (siehe rs485_set_*_polling) und welches Geraet die
+// Steuerbefehle aus loopScheduler()/loopFanCtrl() bekommt.
+
+static void applyOutputPollingFlags() {
+    rs485_set_licht_polling(outputConfig.light_output == LIGHT_OUTPUT_LICHTX4);
+    rs485_set_fan_polling(outputConfig.fan_output == FAN_OUTPUT_MARS);
+    rs485_set_analog_polling(outputConfig.fan_output   == FAN_OUTPUT_ANALOG ||
+                              outputConfig.light_output == LIGHT_OUTPUT_ANALOG);
+}
+
+void handleApiOutputGet() {
+    JsonDocument doc;
+    doc["fan_output"]   = outputConfig.fan_output;
+    doc["light_output"] = outputConfig.light_output;
+    const Rs485AnalogData& a = rs485_get_analog();
+    doc["analog_online"] = a.online;
+    if (a.online) {
+        doc["analog_ch1_raw"] = a.ch1_raw;
+        doc["analog_ch2_raw"] = a.ch2_raw;
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiOutputSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["fan_output"].is<int>())   outputConfig.fan_output   = constrain((int)doc["fan_output"],   0, 1);
+    if (doc["light_output"].is<int>()) outputConfig.light_output = constrain((int)doc["light_output"], 0, 1);
+    saveOutputConfig();
+    applyOutputPollingFlags();
     server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -974,6 +1028,8 @@ void setup() {
   loadCo2Config();
   loadFanConfig();
   loadWifiConfig();
+  loadOutputConfig();
+  applyOutputPollingFlags();
 
   // SPI + W5500 Ethernet (vor WiFi, damit lwIP beide Interfaces kennt)
   WiFi.onEvent(onNetworkEvent);
@@ -1111,6 +1167,8 @@ void setup() {
   server.on("/api/co2/save",        HTTP_POST, handleApiCo2Save);
   server.on("/api/fan",             HTTP_GET,  handleApiFanGet);
   server.on("/api/fan/save",        HTTP_POST, handleApiFanSave);
+  server.on("/api/output",          HTTP_GET,  handleApiOutputGet);
+  server.on("/api/output/save",     HTTP_POST, handleApiOutputSave);
   server.on("/api/wifi",            HTTP_GET,  handleApiWifiGet);
   server.on("/api/wifi/save",       HTTP_POST, handleApiWifiSave);
   server.on("/api/tank",            handleApiTankConfig);

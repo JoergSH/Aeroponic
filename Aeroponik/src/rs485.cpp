@@ -26,33 +26,48 @@ static uint16_t crc16(const uint8_t* d, size_t n) {
 
 // ========== Gespeicherte Daten ==========
 
-static Rs485SensorData ms2   = {false, 0, 0, 0, 0, 0, {}, 0, 0};
-static Rs485LichtData  licht = {false, 0, 0};
-static Rs485FanData    fan   = {false, 0, 0, 0};
+static Rs485SensorData ms2    = {false, 0, 0, 0, 0, 0, {}, 0, 0};
+static Rs485LichtData  licht  = {false, 0, 0};
+static Rs485FanData    fan    = {false, 0, 0, 0};
+static Rs485AnalogData analog = {false, 0, 0, 0};
 
 // ========== Zustandsmaschine ==========
 // Ein Bus, ein Master, immer nur eine Anfrage gleichzeitig unterwegs.
-// Reihenfolge bei freiem Bus: anstehende Schreibbefehle (Licht, dann Fan) > MS2-Poll > Licht-Poll > Fan-Poll.
+// Reihenfolge bei freiem Bus: anstehende Schreibbefehle (Licht, Fan, Analog Ch1, Analog Ch2)
+// > MS2-Poll > Licht-Poll > Fan-Poll > Analog-Poll.
 // Der Luefter (Adresse 6) ist ein fremdes MARS-Hydro-Geraet, auf dessen Bus auch
 // der iControl-Hub als eigener Master pollt/schreibt — siehe CLAUDE_CODE_SPEC_RS485_MARS_FAN.md.
+// Licht/Fan/Analog koennen einzeln vom Pollen ausgenommen werden (siehe rs485_set_*_polling),
+// je nachdem welches Geraet laut Konfiguration (outputctrl.h) tatsaechlich verbaut ist.
 
 typedef enum { MB_IDLE, MB_WAIT_RESPONSE } mb_state_t;
 typedef enum { TARGET_MS2_READ, TARGET_LICHT_WRITE, TARGET_LICHT_READ,
-               TARGET_FAN_WRITE, TARGET_FAN_READ } mb_target_t;
+               TARGET_FAN_WRITE, TARGET_FAN_READ,
+               TARGET_ANALOG_WRITE_CH1, TARGET_ANALOG_WRITE_CH2, TARGET_ANALOG_READ } mb_target_t;
 
 static mb_state_t  mb_state      = MB_IDLE;
 static mb_target_t active_target = TARGET_MS2_READ;
 static uint32_t     poll_ms       = 0;
 static uint32_t     licht_poll_ms = 0;
 static uint32_t     fan_poll_ms   = 0;
+static uint32_t     analog_poll_ms = 0;
 static uint32_t     send_ms       = 0;
 static bool         first_poll    = true;
+
+static bool licht_polling_enabled  = true;
+static bool fan_polling_enabled    = true;
+static bool analog_polling_enabled = true;
 
 static bool    licht_write_pending = false;
 static uint8_t licht_write_value   = 0;
 
 static bool    fan_write_pending = false;
 static uint8_t fan_write_value   = 0;
+
+static bool     analog_ch1_write_pending = false;
+static uint16_t analog_ch1_write_value   = 0;
+static bool     analog_ch2_write_pending = false;
+static uint16_t analog_ch2_write_value   = 0;
 
 static uint8_t    rx_buf[RX_BUF_SIZE];
 static uint8_t    rx_len       = 0;
@@ -218,6 +233,55 @@ static void parse_fan_write_ack(const uint8_t* buf, uint8_t len) {
     Serial.printf("[RS485] Fan-ACK: Leistung=%u%% bestaetigt\n", fan.percent);
 }
 
+static void parse_analog_read(const uint8_t* buf, uint8_t len) {
+    // Erwartet: [addr][0x03][byte_count=4][2 × 2 bytes][crc_lo][crc_hi]
+    if (len < 9) return;
+    if (buf[0] != RS485_ADDR_ANALOG || buf[1] != 0x03) return;
+    uint8_t byte_count = buf[2];
+    if (byte_count != 4) return;
+
+    uint16_t calc = crc16(buf, 3 + byte_count);
+    uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
+    if (calc != recv) {
+        Serial.println("[RS485] CRC-Fehler Analog");
+        return;
+    }
+
+    analog.ch1_raw       = (uint16_t)buf[3] << 8 | buf[4];
+    analog.ch2_raw       = (uint16_t)buf[5] << 8 | buf[6];
+    analog.online         = true;
+    analog.last_update_ms = millis();
+    Serial.printf("[RS485] Analog: Ch1=%u  Ch2=%u\n", analog.ch1_raw, analog.ch2_raw);
+}
+
+static void parse_analog_write_ack(const uint8_t* buf, uint8_t len, uint16_t written_value, bool is_ch1) {
+    if (len < 5) return;
+    if (buf[0] != RS485_ADDR_ANALOG) return;
+
+    if (buf[1] == 0x86) {  // Exception: FC06 abgelehnt
+        uint16_t calc = crc16(buf, 3);
+        uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
+        if (calc != recv) return;
+        Serial.printf("[RS485] Analog lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
+        analog.online = true;
+        return;
+    }
+
+    // Normale Antwort: Echo der Anfrage [addr][0x06][reg][value][crc]
+    if (len < 8 || buf[1] != 0x06) return;
+    uint16_t calc = crc16(buf, 6);
+    uint16_t recv = (uint16_t)buf[7] << 8 | buf[6];
+    if (calc != recv) {
+        Serial.println("[RS485] CRC-Fehler Analog-ACK");
+        return;
+    }
+    if (is_ch1) analog.ch1_raw = written_value;
+    else        analog.ch2_raw = written_value;
+    analog.online          = true;
+    analog.last_update_ms  = millis();
+    Serial.printf("[RS485] Analog-ACK: %s=%u bestaetigt\n", is_ch1 ? "Ch1" : "Ch2", written_value);
+}
+
 // ========== Public ==========
 
 void setupRS485() {
@@ -249,6 +313,13 @@ void loopRS485() {
                 case TARGET_LICHT_READ:  parse_licht_read(rx_buf, rx_len);       break;
                 case TARGET_FAN_WRITE:   parse_fan_write_ack(rx_buf, rx_len);    break;
                 case TARGET_FAN_READ:    parse_fan_read(rx_buf, rx_len);         break;
+                case TARGET_ANALOG_WRITE_CH1:
+                    parse_analog_write_ack(rx_buf, rx_len, analog_ch1_write_value, true);
+                    break;
+                case TARGET_ANALOG_WRITE_CH2:
+                    parse_analog_write_ack(rx_buf, rx_len, analog_ch2_write_value, false);
+                    break;
+                case TARGET_ANALOG_READ: parse_analog_read(rx_buf, rx_len);      break;
             }
             rx_len   = 0;
             mb_state = MB_IDLE;
@@ -262,6 +333,12 @@ void loopRS485() {
                 case TARGET_FAN_READ:
                     Serial.printf("[RS485] Fan Timeout (rx_len=%d)\n", rx_len);
                     fan.online = false;
+                    break;
+                case TARGET_ANALOG_WRITE_CH1:
+                case TARGET_ANALOG_WRITE_CH2:
+                case TARGET_ANALOG_READ:
+                    Serial.printf("[RS485] Analog Timeout (rx_len=%d)\n", rx_len);
+                    analog.online = false;
                     break;
                 default:
                     Serial.printf("[RS485] Licht Timeout (rx_len=%d)\n", rx_len);
@@ -288,6 +365,20 @@ void loopRS485() {
             send_fc06(RS485_ADDR_FAN, RS485_FAN_REG_PERCENT, fan_write_value);
             active_target = TARGET_FAN_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
+        } else if (analog_ch1_write_pending) {
+            analog_ch1_write_pending = false;
+            send_ms                  = now;
+            Serial.printf("[RS485] Analog Ch1 schreiben: %u\n", analog_ch1_write_value);
+            send_fc06(RS485_ADDR_ANALOG, RS485_REG_ANALOG_CH1, analog_ch1_write_value);
+            active_target = TARGET_ANALOG_WRITE_CH1;
+            mb_state      = MB_WAIT_RESPONSE;
+        } else if (analog_ch2_write_pending) {
+            analog_ch2_write_pending = false;
+            send_ms                  = now;
+            Serial.printf("[RS485] Analog Ch2 schreiben: %u\n", analog_ch2_write_value);
+            send_fc06(RS485_ADDR_ANALOG, RS485_REG_ANALOG_CH2, analog_ch2_write_value);
+            active_target = TARGET_ANALOG_WRITE_CH2;
+            mb_state      = MB_WAIT_RESPONSE;
         } else if (first_poll || (now - poll_ms) >= POLL_INTERVAL_MS) {
             first_poll = false;
             poll_ms    = now;
@@ -296,18 +387,25 @@ void loopRS485() {
             send_fc03(RS485_ADDR_MS2, 0, RS485_MS2_REGS);
             active_target = TARGET_MS2_READ;
             mb_state      = MB_WAIT_RESPONSE;
-        } else if (now - licht_poll_ms >= LICHT_POLL_INTERVAL_MS) {
+        } else if (licht_polling_enabled && (now - licht_poll_ms >= LICHT_POLL_INTERVAL_MS)) {
             licht_poll_ms = now;
             send_ms       = now;
             Serial.println("[RS485] Poll Licht (0x40) ...");
             send_fc03(RS485_ADDR_LICHT, RS485_REG_MASK, 1);
             active_target = TARGET_LICHT_READ;
             mb_state      = MB_WAIT_RESPONSE;
-        } else if (now - fan_poll_ms >= FAN_POLL_INTERVAL_MS) {
+        } else if (fan_polling_enabled && (now - fan_poll_ms >= FAN_POLL_INTERVAL_MS)) {
             fan_poll_ms = now;
             send_ms     = now;
             send_fc03(RS485_ADDR_FAN, RS485_FAN_REG_RPM, RS485_FAN_READ_COUNT);
             active_target = TARGET_FAN_READ;
+            mb_state      = MB_WAIT_RESPONSE;
+        } else if (analog_polling_enabled && (now - analog_poll_ms >= LICHT_POLL_INTERVAL_MS)) {
+            analog_poll_ms = now;
+            send_ms        = now;
+            Serial.println("[RS485] Poll Analog (0x50) ...");
+            send_fc03(RS485_ADDR_ANALOG, RS485_REG_ANALOG_CH1, 2);
+            active_target = TARGET_ANALOG_READ;
             mb_state      = MB_WAIT_RESPONSE;
         }
     }
@@ -330,3 +428,21 @@ bool rs485_set_fan_percent(uint8_t percent) {
 }
 
 const Rs485FanData& rs485_get_fan() { return fan; }
+
+bool rs485_set_analog_ch1(uint16_t value) {
+    analog_ch1_write_pending = true;
+    analog_ch1_write_value   = value > 4095 ? 4095 : value;
+    return true;
+}
+
+bool rs485_set_analog_ch2(uint16_t value) {
+    analog_ch2_write_pending = true;
+    analog_ch2_write_value   = value > 4095 ? 4095 : value;
+    return true;
+}
+
+const Rs485AnalogData& rs485_get_analog() { return analog; }
+
+void rs485_set_licht_polling(bool enabled)  { licht_polling_enabled  = enabled; }
+void rs485_set_fan_polling(bool enabled)    { fan_polling_enabled    = enabled; }
+void rs485_set_analog_polling(bool enabled) { analog_polling_enabled = enabled; }

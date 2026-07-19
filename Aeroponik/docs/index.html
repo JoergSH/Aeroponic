@@ -382,6 +382,7 @@ setLang(localStorage.getItem('aeroponik-doc-lang') || 'de');
       <a href="#rs485-multisensor" class="toc-link"><span class="de">RS485-Multisensor (Zelt)</span><span class="en">RS485 Multisensor (Tent)</span></a>
       <a href="#lichtx4" class="toc-link">Lichtx4</a>
       <a href="#luefter" class="toc-link"><span class="de">Abluftlüfter</span><span class="en">Exhaust Fan</span></a>
+      <a href="#analog-modul" class="toc-link"><span class="de">Analog-Ausgangsmodul</span><span class="en">Analog Output Module</span></a>
       <a href="#co2" class="toc-link"><span class="de">CO2-Steuerung</span><span class="en">CO2 Control</span></a>
       <a href="#raumklima" class="toc-link"><span class="de">Raumklima & VPD</span><span class="en">Room Climate & VPD</span></a>
       <a href="#datenlog" class="toc-link"><span class="de">Daten-Log & Download</span><span class="en">Data Log & Download</span></a>
@@ -738,14 +739,19 @@ mask   = (active == 0) ? 0x00 : (uint8_t)((1 << active) - 1);</code></pre>
           <tr><td><code>0x20</code></td><td><span class="de">RS485-Multisensor (Zelt-Klima + PPFD)</span><span class="en">RS485 multisensor (tent climate + PPFD)</span></td><td>FC03 read</td><td>15 s</td></tr>
           <tr><td><code>0x40</code></td><td><span class="de">Lichtx4 (4× Relais-Lichtsteuerung)</span><span class="en">Lichtx4 (4× relay light control)</span></td><td>FC03 read + FC06 write</td><td>15 s (<span class="de">+ sofort bei Maskenänderung</span><span class="en">+ immediately on mask change</span>)</td></tr>
           <tr><td><code>6</code></td><td><span class="de">Abluftlüfter — MARS Hydro</span><span class="en">Exhaust fan — MARS Hydro</span></td><td>FC03 read + FC06 write</td><td>3 s</td></tr>
+          <tr><td><code>0x50</code></td><td><span class="de">Analog-Ausgangsmodul (2× 0-10V)</span><span class="en">Analog output module (2× 0-10V)</span></td><td>FC03 read + FC06 write</td><td>15 s</td></tr>
         </tbody>
       </table>
     </div>
+    <p>
+      <span class="de">Lichtx4, MARS-Lüfter und Analogmodul werden nur gepollt, wenn sie laut <a href="#analog-modul">Geräte-Konfiguration</a> tatsächlich als Ausgang ausgewählt sind — das RS485-Multisensor wird immer abgefragt.</span>
+      <span class="en">Lichtx4, the MARS fan, and the analog module are only polled when actually selected as the active output per the <a href="#analog-modul">device configuration</a> — the RS485 multisensor is always polled.</span>
+    </p>
 
     <h3><span class="de">Priorität bei gleichzeitigem Bedarf</span><span class="en">Priority on Concurrent Demand</span></h3>
     <p>
-      <span class="de">Ausstehende Schreibbefehle (Licht-Maske, Lüfter-Prozent) gehen vor den zyklischen Lesevorgängen. Reihenfolge: Licht-Write → Lüfter-Write → Multisensor-Read → Licht-Read → Lüfter-Read.</span>
-      <span class="en">Pending write commands (light mask, fan percent) take priority over cyclic reads. Order: light write → fan write → multisensor read → light read → fan read.</span>
+      <span class="de">Ausstehende Schreibbefehle gehen vor den zyklischen Lesevorgängen. Reihenfolge: Licht-Write → Lüfter-Write → Analog-Write (Kanal 1, dann 2) → Multisensor-Read → Licht-Read → Lüfter-Read → Analog-Read.</span>
+      <span class="en">Pending write commands take priority over cyclic reads. Order: light write → fan write → analog write (channel 1, then 2) → multisensor read → light read → fan read → analog read.</span>
     </p>
   </section>
 
@@ -846,6 +852,46 @@ mask   = (active == 0) ? 0x00 : (uint8_t)((1 << active) - 1);</code></pre>
 
     <h3><span class="de">Konfiguration</span><span class="en">Configuration</span> (EEPROM, Magic 0x92)</h3>
     <p><code>mode</code> · <code>manual_percent</code> · <code>min_speed</code> · <code>hum_min/max</code> · <code>temp_min/max</code> · <code>temp_mode</code> (<span class="de">absolut/Differenz</span><span class="en">absolute/differential</span>) · <code>temp_cap_diff</code> · <code>enabled</code></p>
+  </section>
+
+  <!-- ===== ANALOG-AUSGANGSMODUL ===== -->
+  <section id="analog-modul" class="s-master">
+    <h2><span class="h2-icon" style="background:var(--accent-bg);color:var(--accent)">📈</span><span class="de">Analog-Ausgangsmodul (0-10V)</span><span class="en">Analog Output Module (0-10V)</span></h2>
+    <p>
+      <span class="de">2-Kanal RS485-zu-0-10V-Wandler (ATO), Standard-Modbus-RTU. Wahlweise Alternative zu Lichtx4 (Kanal 2, stufenlose Helligkeit statt Relais-Stufen) und/oder zum MARS-Hydro-Lüfter (Kanal 1) — z. B. für generische Lüfter oder Dimmer mit 0-10V-Steuereingang.</span>
+      <span class="en">2-channel RS485-to-0-10V converter (ATO), standard Modbus RTU. An optional alternative to Lichtx4 (channel 2, stepless brightness instead of relay steps) and/or the MARS Hydro fan (channel 1) — e.g. for generic fans or dimmers with a 0-10V control input.</span>
+    </p>
+
+    <div class="note">
+      <strong><span class="de">Einmaliger Hardware-Setup:</span><span class="en">One-time hardware setup:</span></strong>
+      <span class="de">Das Modul kommt ab Werk auf Adresse <code>0x01</code> / 4800 Baud — inkompatibel mit unserem 9600-Baud-Bus. Vor dem Einbau muss es einmalig <strong>einzeln</strong> (nicht am gemeinsamen Bus) per USB-RS485-Adapter und der ATO-Konfigurationssoftware umgestellt werden: Adresse → <code>0x50</code>, Baudrate → 9600 (Registerwert 2), Ausgangstyp beider Kanäle → 0-10V (Register 0x0055 sowie die physischen Lötbrücken auf "V").</span>
+      <span class="en">The module ships at address <code>0x01</code> / 4800 baud by default — incompatible with our 9600-baud bus. Before installing it, it must be reconfigured once <strong>standalone</strong> (not on the shared bus) via a USB-RS485 adapter and the ATO configuration software: address → <code>0x50</code>, baud rate → 9600 (register value 2), output type of both channels → 0-10V (register 0x0055 plus the physical solder jumpers set to "V").</span>
+    </div>
+
+    <h3><span class="de">Register</span><span class="en">Registers</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><span class="de">Register</span><span class="en">Register</span></th><th><span class="de">Zugriff</span><span class="en">Access</span></th><th><span class="de">Inhalt</span><span class="en">Content</span></th></tr></thead>
+        <tbody>
+          <tr><td>0x0000</td><td>FC03 read + FC06 write</td><td><span class="de">Kanal 1 (Lüfter), 0–4095 (12-bit) = 0–10V</span><span class="en">Channel 1 (fan), 0–4095 (12-bit) = 0–10V</span></td></tr>
+          <tr><td>0x0001</td><td>FC03 read + FC06 write</td><td><span class="de">Kanal 2 (Licht), 0–4095 (12-bit) = 0–10V</span><span class="en">Channel 2 (light), 0–4095 (12-bit) = 0–10V</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      <span class="de">Ziel-Prozentwerte (0–100 %) aus Lüfter-Rampe bzw. Zeitplan werden linear auf 0–4095 umgerechnet (<code>round(percent / 100 × 4095)</code>).</span>
+      <span class="en">Target percentages (0–100 %) from the fan ramp or lighting schedule are linearly mapped to 0–4095 (<code>round(percent / 100 × 4095)</code>).</span>
+    </p>
+
+    <h3 id="geraete-konfiguration"><span class="de">Geräte-Konfiguration (Setup statt Laufzeit-Umschaltung)</span><span class="en">Device Configuration (Setup, Not a Runtime Toggle)</span></h3>
+    <p>
+      <span class="de">Unter Konfiguration → Geräte legt man fest, welches Gerät Licht bzw. Lüfter tatsächlich ansteuert (Lichtx4/MARS Hydro oder Analogmodul) — bewusst als Setup-Entscheidung, nicht als Umschalter im laufenden Betrieb. Das hat zwei Effekte: Nur das gewählte Gerät bekommt Steuerbefehle, und nur tatsächlich vorhandene Geräte werden überhaupt auf dem RS485-Bus gepollt (das Multisensor bleibt davon unberührt, es wird immer abgefragt).</span>
+      <span class="en">Under Configuration → Devices you choose which device actually drives the light and fan (Lichtx4/MARS Hydro or the analog module) — deliberately a setup-time decision, not a runtime switch. This has two effects: only the selected device receives control commands, and only devices actually present are polled on the RS485 bus at all (the multisensor is unaffected by this and is always polled).</span>
+    </p>
+    <p>
+      <span class="de">Für den Lichtausgang ändert die Auswahl auch die Regelcharakteristik: Lichtx4 nutzt weiterhin die gestufte Relais-Rampe (<a href="#scheduler">Beleuchtungs-Scheduler</a>), das Analogmodul eine stufenlose Helligkeitsrampe über dieselben Zeitfenster.</span>
+      <span class="en">For the light output, the selection also changes the control characteristic: Lichtx4 keeps using the stepped relay ramp (<a href="#scheduler">lighting scheduler</a>), while the analog module uses a stepless brightness ramp over the same time windows.</span>
+    </p>
   </section>
 
   <!-- ===== CO2-STEUERUNG ===== -->

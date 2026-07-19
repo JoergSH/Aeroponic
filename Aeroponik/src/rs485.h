@@ -20,6 +20,12 @@
 #define RS485_FAN_REG_PERCENT 16   // 0-basiert = Register 17 (1-basiert), Leistung 0-100%
 #define RS485_FAN_READ_COUNT 6     // deckt Register 12-17 (0-basiert 11-16) in einem Read ab
 
+#define RS485_ADDR_ANALOG     0x50 // 2-Kanal RS485->0-10V Modul (ATO), einmalig per
+                                    // Herstellersoftware auf diese Adresse + 9600 Baud
+                                    // eingestellt (Werkseinstellung 0x01 / 4800 Baud)
+#define RS485_REG_ANALOG_CH1  0    // Kanal 1 (Luefter), Wertebereich 0-4095 (12-bit)
+#define RS485_REG_ANALOG_CH2  1    // Kanal 2 (Licht),   Wertebereich 0-4095 (12-bit)
+
 struct Rs485SensorData {
     bool     online;
     uint32_t last_update_ms;
@@ -45,6 +51,13 @@ struct Rs485FanData {
     uint32_t last_update_ms;
 };
 
+struct Rs485AnalogData {
+    bool     online;
+    uint16_t ch1_raw;   // 0-4095, zuletzt am Geraet bestaetigter Wert Kanal 1 (Luefter)
+    uint16_t ch2_raw;   // 0-4095, Kanal 2 (Licht)
+    uint32_t last_update_ms;
+};
+
 void setupRS485();
 void loopRS485();
 
@@ -59,5 +72,18 @@ const Rs485LichtData& rs485_get_licht();
 // Register 0x10). Nicht-blockierend, siehe rs485_set_licht_mask().
 bool rs485_set_fan_percent(uint8_t percent);
 const Rs485FanData& rs485_get_fan();
+
+// Setzt Kanal 1/2 (0-4095) am Analog-Ausgangsmodul. Nicht-blockierend, siehe
+// rs485_set_licht_mask().
+bool rs485_set_analog_ch1(uint16_t value);
+bool rs485_set_analog_ch2(uint16_t value);
+const Rs485AnalogData& rs485_get_analog();
+
+// Schaltet das Pollen einzelner RS485-Geraete ab/an (Standard: alle an). Wird von
+// main.cpp anhand der Geraete-Auswahl (outputctrl.h) gesetzt, damit nicht angeschlossene
+// Hardware nicht sinnlos abgefragt wird. Ausstehende Schreibbefehle sind davon unabhaengig.
+void rs485_set_licht_polling(bool enabled);
+void rs485_set_fan_polling(bool enabled);
+void rs485_set_analog_polling(bool enabled);
 
 #endif

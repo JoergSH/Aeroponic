@@ -31,6 +31,7 @@ Multi-Root-Workspace, öffnen über `Aeroponik.code-workspace` (VSCode + [pioard
 - **Raumklima & VPD** — AHT21B als Referenzsensor außerhalb des Zelts, daraus berechneter VPD-Wert (Tetens-Formel)
 - **CO2-Steuerung** — Hysterese-Regelung eines CO₂-Ausgangs auf einem ESP-NOW-Steckdosen-Node
 - **Abluftlüfter-Steuerung** — MARS-Hydro-Lüfter über RS485, manuell oder automatisch (Luftfeuchte, Zelttemperatur absolut/differenz zur Raumtemperatur)
+- **Wählbarer Analog-Ausgang (0-10V)** — Licht und/oder Lüfter alternativ über ein RS485-2-Kanal-Analogmodul statt Lichtx4/MARS Hydro ansteuerbar, Auswahl als Setup-Entscheidung (bestimmt auch, welche Geräte überhaupt gepollt werden)
 - **SD-Karten-Log** — CSV pro Tag mit allen Sensor-/Steuerwerten, Download und Löschen direkt über die Weboberfläche
 - **WLAN-Konfiguration** — SSID/Passwort werden über die Weboberfläche gesetzt und im Flash gespeichert (nicht im Quellcode); ohne erreichbares WLAN startet automatisch ein Fallback-Hotspot zur (Re-)Konfiguration
 - **Ethernet + WiFi parallel** — Weboberfläche über LAN (W5500) und WiFi gleichzeitig erreichbar
@@ -76,6 +77,7 @@ Multi-root workspace, open via `Aeroponik.code-workspace` (VSCode + [pioarduino]
 - **Room climate & VPD** — AHT21B as a reference sensor outside the tent, VPD calculated from it (Tetens formula)
 - **CO2 control** — hysteresis control of a CO₂ output on an ESP-NOW socket node
 - **Exhaust fan control** — MARS Hydro fan over RS485, manual or automatic (humidity, tent temperature absolute/differential to room temperature)
+- **Selectable analog output (0-10V)** — light and/or fan can alternatively be driven via an RS485 2-channel analog module instead of Lichtx4/MARS Hydro, selected as a setup-time decision (also determines which devices are polled at all)
 - **SD card logging** — daily CSV with all sensor/control values, download and delete directly via the web interface
 - **WiFi configuration** — SSID/password are set via the web interface and stored in flash (not in source code); a fallback hotspot starts automatically for (re-)configuration if no WiFi is reachable
 - **Ethernet + WiFi in parallel** — web interface reachable over both LAN (W5500) and WiFi simultaneously
