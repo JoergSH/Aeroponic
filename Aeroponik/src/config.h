@@ -52,7 +52,9 @@ extern bool USE_ACCESS_POINT;
 //  75–172: WifiConfig (ssid[33] + password[65] = 98 Bytes)
 //  173:    Ausgangs-Konfiguration Magic Byte
 //  174–175: OutputConfig (2 Bytes)
-#define EEPROM_SIZE             180
+//  176:    DWC-Timer Magic Byte
+//  177–186: DwcTimerConfig (bis zu 10 Bytes)
+#define EEPROM_SIZE             190
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
 #define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter
@@ -80,6 +82,11 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_OUTPUT_MAGIC_ADDR 173
 #define EEPROM_OUTPUT_MAGIC_BYTE 0x61
 #define EEPROM_OUTPUT_BASE       174
+
+// DWC-Beleuchtungstimer (separates System, ueber Steckdosen-Node-Ausgang geschaltet)
+#define EEPROM_DWC_MAGIC_ADDR    176
+#define EEPROM_DWC_MAGIC_BYTE    0x3A
+#define EEPROM_DWC_BASE          177
 
 // ========== Lichtsteuerung Scheduler Defaults ==========
 #define SCHED_DEFAULT_NODE        1

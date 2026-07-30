@@ -279,12 +279,23 @@ const char* htmlPage = R"rawliteral(
                             <span class="de">Zuletzt:</span><span class="en">Last:</span> <span id="lichtAge">--</span>
                         </div>
                     </div>
-                    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
+                    <div id="schedPhaseRow" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;">
                         <span style="font-size:0.85em;color:#6c757d;"><span class="de">Zeitplan</span><span class="en">Schedule</span></span>
                         <div id="schedPhase" style="padding:2px 10px;border-radius:10px;background:#f0f0f0;font-size:0.8em;">—</div>
                     </div>
                     <canvas id="schedChart" width="800" height="130"
                         style="width:100%;border-radius:6px;margin-top:6px;"></canvas>
+
+                    <!-- Nur sichtbar wenn der Zeitplan deaktiviert ist: manuelle Helligkeit
+                         statt der Zeitrampe, analog zur manuellen Luefter-Leistung -->
+                    <div id="schedManualRow" style="display:none;margin-top:12px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.85em;color:#6c757d;margin-bottom:4px;">
+                            <span class="de">Zeitplan deaktiviert — manuelle Helligkeit</span><span class="en">Schedule disabled — manual brightness</span>
+                            <span id="schedManualValue">--%</span>
+                        </div>
+                        <input type="range" id="schedManualSlider" min="0" max="100" value="0" style="width:100%;"
+                            oninput="onSchedManualSliderInput()" onchange="onSchedManualSliderChange()">
+                    </div>
                 </div>
 
                 <!-- CO2-Steuerung + Abluftluefter, gemeinsame Box (Nutzerwunsch), Abschnitte
@@ -320,6 +331,15 @@ const char* htmlPage = R"rawliteral(
                                 oninput="onFanManualSliderInput()" onchange="onFanManualSliderChange()">
                         </div>
                     </div>
+                </div>
+
+                <!-- DWC-Beleuchtungstimer (separates System, eigener Steckdosen-Ausgang) -->
+                <div class="status-box-info" id="dwcStatusCard" style="display:none;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <strong>💡 DWC-<span class="de">Beleuchtung</span><span class="en">Lighting</span></strong>
+                        <span id="dwcOutputBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
+                    </div>
+                    <div style="font-size:0.85em;color:#6c757d;margin-top:8px;" id="dwcTimerInfo">--</div>
                 </div>
             </div>
         </div>
@@ -642,6 +662,58 @@ const char* htmlPage = R"rawliteral(
                 </div>
             </div>
 
+            <!-- DWC-Beleuchtungstimer -->
+            <h3 class="section-heading">💡 DWC-<span class="de">Beleuchtungstimer</span><span class="en">Lighting Timer</span></h3>
+            <div class="status-box-info">
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Einfacher Ein/Aus-Timer für ein separates DWC-System (kein Sonnenauf-/untergang wie beim Hauptzeitplan) — geschaltet über einen Ausgang eines Steckdosen-Nodes.</span>
+                    <span class="en">Simple on/off timer for a separate DWC system (no dawn/dusk ramp like the main schedule) — switched via an output on a socket node.</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
+                        <input type="checkbox" id="dwcEnabled" style="width:18px;height:18px;">
+                    </label>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Steckdose (Node)</span><span class="en">Socket (Node)</span></div>
+                        <select id="dwcNode" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="" id="dwcNodeNoneOpt">— keine —</option>
+                        </select>
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Nur online erkannte Steckdosen-Nodes</span><span class="en">Only sockets currently detected online</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Ausgang</span><span class="en">Output</span></div>
+                        <select id="dwcRelayBit" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="0">R1</option>
+                            <option value="1">R2</option>
+                            <option value="2">R3</option>
+                            <option value="3">R4</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Ein</span><span class="en">On</span></div>
+                        <input type="time" id="dwcOnTime" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Aus</span><span class="en">Off</span></div>
+                        <input type="time" id="dwcOffTime" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button onclick="saveDwcConfigForm()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        <span class="de">Speichern</span><span class="en">Save</span></button>
+                    <span id="dwcSaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+            </div>
+
             <!-- Abluftluefter-Steuerung -->
             <h3 class="section-heading">🌀 <span class="de">Abluftlüfter-Steuerung</span><span class="en">Exhaust Fan Control</span></h3>
             <div class="status-box-info">
@@ -915,8 +987,8 @@ const char* htmlPage = R"rawliteral(
             if (ncc) ncc.innerHTML = '<div id="nodes_control_loading" style="text-align:center;color:#888;padding:30px;grid-column:1/-1;">' + t('loading') + '</div>';
             ventilKonfigGeladen = false;
             updateData(); updateVentile(); updateNodes(); updateRs485(); updateLicht();
-            updateCo2Status(); updateFanStatus();
-            loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadFanConfig();
+            updateCo2Status(); updateFanStatus(); updateDwcStatus();
+            loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadDwcConfig(); loadFanConfig();
             loadWifiConfigForm(); loadLogFileList(); loadOutputConfig();
             updateSchedPhase();
             updatePcfUi();
@@ -936,6 +1008,7 @@ const char* htmlPage = R"rawliteral(
             } else if (tabName === 'parameter') {
                 loadZeitplan();
                 loadCo2Config();
+                loadDwcConfig();
                 loadFanConfig();
             }
         }
@@ -1211,6 +1284,7 @@ const char* htmlPage = R"rawliteral(
                 }
                 updateLichtVisibility();
                 updateCo2NodeOptions((d.nodes || []).filter(n => n.type === 3));
+                updateDwcNodeOptions((d.nodes || []).filter(n => n.type === 3));
                 updateEspnowBadges(d.nodes || []);
             }).catch(() => {});
         }
@@ -1541,6 +1615,47 @@ const char* htmlPage = R"rawliteral(
             }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
         }
 
+        // Startseite: manuelle Helligkeit statt Zeitrampe, wenn der Zeitplan deaktiviert ist
+        // (gleiches Muster wie die manuelle Luefter-Leistung).
+        let schedManualDragging = false;
+
+        function onSchedManualSliderInput() {
+            schedManualDragging = true;
+            const v = document.getElementById('schedManualSlider').value;
+            document.getElementById('schedManualValue').textContent = v + '%';
+        }
+
+        function onSchedManualSliderChange() {
+            const v = parseInt(document.getElementById('schedManualSlider').value);
+            fetch('/api/scheduler/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({manual_percent: v})
+            }).then(() => { schedManualDragging = false; })
+              .catch(() => { schedManualDragging = false; });
+        }
+
+        // Periodischer Status-Poll: entscheidet, ob Chart+Phase oder die manuelle
+        // Helligkeit gezeigt wird. Bewusst getrennt von loadZeitplan()/schedLoaded
+        // (dort werden nur die Formularfelder auf dem Parameter-Tab einmalig geladen,
+        // damit unbestaetigte Eingaben dort nicht ueberschrieben werden).
+        function updateSchedManualStatus() {
+            fetch('/api/scheduler').then(r => r.json()).then(d => {
+                const manualRow = document.getElementById('schedManualRow');
+                const phaseRow  = document.getElementById('schedPhaseRow');
+                const chart     = document.getElementById('schedChart');
+                if (manualRow) manualRow.style.display = d.enabled ? 'none' : 'block';
+                if (phaseRow)  phaseRow.style.display  = d.enabled ? 'flex' : 'none';
+                if (chart)     chart.style.display     = d.enabled ? 'block' : 'none';
+                if (!d.enabled && !schedManualDragging) {
+                    const sl = document.getElementById('schedManualSlider');
+                    if (sl) sl.value = d.manual_percent;
+                    const valEl = document.getElementById('schedManualValue');
+                    if (valEl) valEl.textContent = d.manual_percent + '%';
+                }
+            }).catch(() => {});
+        }
+
         // ===== CO2-Steuerung =====
         let co2ConfigLoaded = false;
         let co2PendingNodeId = null;  // aus Config geladen, aber Dropdown evtl. noch leer
@@ -1629,6 +1744,80 @@ const char* htmlPage = R"rawliteral(
                 if (nowEl) nowEl.textContent = d.co2_online ? d.co2_now : '--';
                 const rangeEl = document.getElementById('co2StatusRange');
                 if (rangeEl) rangeEl.textContent = d.co2_min + ' / ' + d.co2_max;
+            }).catch(() => {});
+        }
+
+        // ===== DWC-Beleuchtungstimer =====
+        let dwcConfigLoaded  = false;
+        let dwcPendingNodeId = null;  // aus Config geladen, aber Dropdown evtl. noch leer
+
+        // Wird aus updateNodes() mit der aktuellen Liste der Steckdosen-Nodes (type===3)
+        // aufgerufen, damit das Dropdown immer die tatsaechlich verfuegbaren Ziele zeigt.
+        function updateDwcNodeOptions(steckdosenNodes) {
+            const sel = document.getElementById('dwcNode');
+            if (!sel) return;
+            const prevValue = sel.value;
+            let html = '<option value="">' + t('noneOption') + '</option>';
+            for (const n of steckdosenNodes) {
+                html += `<option value="${n.id}">Node ${n.id}${n.online ? '' : ' (' + t('offlineSuffix') + ')'}</option>`;
+            }
+            sel.innerHTML = html;
+            if (dwcPendingNodeId !== null) {
+                sel.value = String(dwcPendingNodeId);
+                dwcPendingNodeId = null;
+            } else if (prevValue) {
+                sel.value = prevValue;
+            }
+        }
+
+        function loadDwcConfig() {
+            if (dwcConfigLoaded) return;
+            fetch('/api/dwc').then(r => r.json()).then(d => {
+                document.getElementById('dwcEnabled').checked  = d.enabled;
+                document.getElementById('dwcRelayBit').value   = d.target_relay_bit;
+                document.getElementById('dwcOnTime').value     = minToTime(d.on_min);
+                document.getElementById('dwcOffTime').value    = minToTime(d.off_min);
+                dwcPendingNodeId = d.target_node_id || null;
+                document.getElementById('dwcNode').value = dwcPendingNodeId !== null ? String(dwcPendingNodeId) : '';
+                dwcConfigLoaded = true;
+            }).catch(() => {});
+        }
+
+        function saveDwcConfigForm() {
+            const body = {
+                enabled:          document.getElementById('dwcEnabled').checked,
+                target_node_id:   parseInt(document.getElementById('dwcNode').value) || 0,
+                target_relay_bit: parseInt(document.getElementById('dwcRelayBit').value),
+                on_min:           timeToMin(document.getElementById('dwcOnTime').value),
+                off_min:          timeToMin(document.getElementById('dwcOffTime').value),
+            };
+            const st = document.getElementById('dwcSaveStatus');
+            fetch('/api/dwc/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body)
+            }).then(r => r.json()).then(d => {
+                st.style.color = d.success ? '#27ae60' : '#dc3545';
+                st.textContent = d.success ? t('saved') : t('error');
+                if (d.success) setTimeout(()=>st.textContent='',2000);
+            }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
+        }
+
+        // Startseite: eigene Statuskarte (separates System von der Zelt-Klimasteuerung),
+        // nur sichtbar wenn der Timer aktiv ist.
+        function updateDwcStatus() {
+            fetch('/api/dwc').then(r => r.json()).then(d => {
+                const card = document.getElementById('dwcStatusCard');
+                if (!card) return;
+                card.style.display = d.enabled ? 'block' : 'none';
+                if (!d.enabled) return;
+                const badge = document.getElementById('dwcOutputBadge');
+                if (badge) {
+                    badge.textContent = d.output_on ? t('on') : t('off');
+                    badge.style.background = d.output_on ? '#28a745' : '#6c757d';
+                }
+                const info = document.getElementById('dwcTimerInfo');
+                if (info) info.textContent = minToTime(d.on_min) + ' – ' + minToTime(d.off_min);
             }).catch(() => {});
         }
 
@@ -2144,6 +2333,8 @@ const char* htmlPage = R"rawliteral(
                 updateCo2Status();
                 updateFanStatus();
                 updateOutputStatus();
+                updateSchedManualStatus();
+                updateDwcStatus();
                 schedTick();
             }
         }, 2000);
@@ -2158,6 +2349,8 @@ const char* htmlPage = R"rawliteral(
         updateFanStatus();
         loadZeitplan();
         loadOutputConfig();
+        updateSchedManualStatus();
+        updateDwcStatus();
     </script>
 </body>
 </html>

@@ -5,7 +5,7 @@
 
 // ========== Relais (SSR-Ausgänge, HIGH-aktiv) ==========
 #define RELAY_PINS_COUNT 4
-static const uint8_t RELAY_PINS[RELAY_PINS_COUNT] = {1, 2, 3, 4};
+static const uint8_t RELAY_PINS[RELAY_PINS_COUNT] = {4, 3, 2, 1};
 
 // ========== RS485 (UART1) ==========
 #define RS485_TX  6

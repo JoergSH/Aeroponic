@@ -26,6 +26,7 @@
 #include "scheduler.h"
 #include "storage.h"
 #include "co2ctrl.h"
+#include "dwcctrl.h"
 #include "fanctrl.h"
 #include "wifictrl.h"
 #include "outputctrl.h"
@@ -80,9 +81,25 @@ void syncRtcMitNtp();
 
 // Ethernet
 static bool ethConnected = false;
+static bool ethPresent   = false;  // Modul beim Boot per SPI erkannt? (siehe w5500_present())
 
 static volatile bool ethJustConnected = false;
 static bool phyConfigured = false;
+
+// Liest das VERSIONR-Register (Common-Register-Block, Adresse 0x0039) direkt per SPI,
+// noch bevor ETH.begin() den Chip uebernimmt — ein echter W5500 antwortet dort immer mit
+// 0x04. Damit laesst sich ein nicht bestuecktes/angeschlossenes Modul erkennen und
+// ETH.begin() (das sonst ins Leere liefe) komplett ueberspringen — praktisch fuer Aufbauten
+// ohne LAN, wo kein W5500 angeschlossen ist.
+static bool w5500_present() {
+    BUS.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(SPI_CS_W5500, LOW);
+    BUS.transfer(0x00); BUS.transfer(0x39); BUS.transfer(0x00);  // Adresse 0x0039, Read/Common/Variable
+    uint8_t version = BUS.transfer(0x00);
+    digitalWrite(SPI_CS_W5500, HIGH);
+    BUS.endTransaction();
+    return version == 0x04;
+}
 
 // W5500 PHYCFGR (0x002E): Auto-Negotiation abschalten, 100BT Full-Duplex erzwingen
 // Wird aus loop() aufgerufen wenn ETH_CONNECTED feuert (nicht aus IRQ-Kontext)
@@ -494,9 +511,16 @@ void handleApiRelaySet() {
 
 // ========== Scheduler API ==========
 
+// Ueberspringt den 30s-Throttle in loopScheduler() einmalig, wenn sich die Konfiguration
+// (Zeiten, manuelle Helligkeit, Aktiv-Schalter) gerade geaendert hat — sonst dauert es bis
+// zu 30s, bis eine per Regler/Formular gesetzte Aenderung tatsaechlich an Lichtx4/Analog
+// rausgeschrieben wird.
+static bool sched_force_check = false;
+
 void handleApiSchedulerGet() {
     JsonDocument doc;
     doc["enabled"]     = schedConfig.enabled;
+    doc["manual_percent"] = schedConfig.manual_percent;
     doc["dawn_start"]  = schedConfig.dawn_start;
     doc["dawn_end"]    = schedConfig.dawn_end;
     doc["dusk_start"]  = schedConfig.dusk_start;
@@ -519,12 +543,14 @@ void handleApiSchedulerSave() {
     JsonDocument doc;
     deserializeJson(doc, server.arg("plain"));
     if (doc["enabled"].is<bool>())    schedConfig.enabled     = doc["enabled"];
+    if (doc["manual_percent"].is<int>()) schedConfig.manual_percent = constrain((int)doc["manual_percent"], 0, 100);
     if (doc["dawn_start"].is<int>())  schedConfig.dawn_start  = constrain((int)doc["dawn_start"], 0, 1439);
     if (doc["dawn_end"].is<int>())    schedConfig.dawn_end    = constrain((int)doc["dawn_end"],   1, 1439);
     if (doc["dusk_start"].is<int>())  schedConfig.dusk_start  = constrain((int)doc["dusk_start"], 0, 1439);
     if (doc["dusk_end"].is<int>())    schedConfig.dusk_end    = constrain((int)doc["dusk_end"],   1, 1439);
     if (doc["num_ssr"].is<int>())     schedConfig.num_ssr     = constrain((int)doc["num_ssr"],    1, 4);
     saveScheduleConfig();
+    sched_force_check = true;
     server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -755,30 +781,57 @@ void handleNodeOtaBin() {
 // ========== Scheduler Loop ==========
 
 void loopScheduler() {
-    if (!schedConfig.enabled || !rtcOK) return;
     static uint8_t  last_mask    = 0xFF;  // 0xFF = unbekannt, erzwingt ersten Send
     static uint8_t  last_percent = 0xFF;
     static uint32_t last_check   = 0;
-    if (millis() - last_check < 30000) return;
+    if (!sched_force_check && millis() - last_check < 30000) return;
+    sched_force_check = false;
     last_check = millis();
-    DateTime now = rtc.now();
-    uint16_t now_min = now.hour() * 60 + now.minute();
 
-    if (outputConfig.light_output == LIGHT_OUTPUT_ANALOG) {
-        uint8_t pct = schedComputeBrightnessPercent(now_min);
-        if (pct != last_percent) {
-            rs485_set_analog_ch2((uint16_t)roundf(pct / 100.0f * 4095));
-            last_percent = pct;
-            Serial.printf("[Sched] Licht-Helligkeit (Analog)=%u%%\n", pct);
+    uint8_t pct;
+    if (schedConfig.enabled) {
+        if (!rtcOK) return;  // Rampe braucht die Uhrzeit, manuelle Vorgabe unten nicht
+        DateTime now = rtc.now();
+        uint16_t now_min = now.hour() * 60 + now.minute();
+        pct = (outputConfig.light_output == LIGHT_OUTPUT_ANALOG)
+            ? schedComputeBrightnessPercent(now_min)
+            : 0;  // im Lichtx4-Zweig unten direkt ueber schedComputeRelayMask() bestimmt
+        if (outputConfig.light_output != LIGHT_OUTPUT_ANALOG) {
+            uint8_t mask = schedComputeRelayMask(now_min);
+            if (mask != last_mask) {
+                rs485_set_licht_mask(mask);
+                last_mask = mask;
+                Serial.printf("[Sched] Licht-Maske=0x%02X (%d SSRs an)\n",
+                              mask, __builtin_popcount(mask));
+            }
+            return;
         }
     } else {
-        uint8_t mask = schedComputeRelayMask(now_min);
-        if (mask != last_mask) {
-            rs485_set_licht_mask(mask);
-            last_mask = mask;
-            Serial.printf("[Sched] Licht-Maske=0x%02X (%d SSRs an)\n",
-                          mask, __builtin_popcount(mask));
+        // Zeitplan deaktiviert: manuelle Prozent-Vorgabe statt Zeitrampe, unabhaengig
+        // von der Uhrzeit/RTC. Bei Lichtx4 wird dieselbe Stufen-Quantisierung wie im
+        // Zeitplan verwendet, damit sich "50%" konsistent auf die Kanalzahl abbildet.
+        pct = schedConfig.manual_percent;
+        if (outputConfig.light_output != LIGHT_OUTPUT_ANALOG) {
+            uint8_t n = schedConfig.num_ssr;
+            if (n == 0 || n > 4) n = 4;
+            uint8_t active = (uint8_t)ceilf(pct / 100.0f * n);
+            if (active > n) active = n;
+            uint8_t mask = (active == 0) ? 0x00 : (uint8_t)((1 << active) - 1);
+            if (mask != last_mask) {
+                rs485_set_licht_mask(mask);
+                last_mask = mask;
+                Serial.printf("[Sched] Licht-Maske (manuell)=0x%02X (%d SSRs an)\n",
+                              mask, __builtin_popcount(mask));
+            }
+            return;
         }
+    }
+
+    if (pct != last_percent) {
+        rs485_set_analog_ch2((uint16_t)roundf(pct / 100.0f * 4095));
+        last_percent = pct;
+        Serial.printf("[Sched] Licht-Helligkeit (%s)=%u%%\n",
+                      schedConfig.enabled ? "Analog" : "manuell, Analog", pct);
     }
 }
 
@@ -841,6 +894,71 @@ void handleApiCo2Save() {
     if (doc["co2_min"].is<int>())           co2Config.co2_min          = constrain((int)doc["co2_min"], 0, 5000);
     if (doc["co2_max"].is<int>())           co2Config.co2_max          = constrain((int)doc["co2_max"], 0, 5000);
     saveCo2Config();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== DWC-Beleuchtungstimer ==========
+// Einfacher Ein/Aus-Timer (kein Dawn/Dusk-Ramp wie beim Haupt-Scheduler) fuer ein separates
+// DWC-System, geschaltet ueber einen Ausgang eines ESP-NOW-Steckdosen-Nodes.
+
+static bool dwcOutputOn      = false;
+static bool dwc_force_check  = false;  // ueberspringt den Throttle einmalig nach einem Save
+
+void loopDwcCtrl() {
+    if (!dwcConfig.enabled) return;
+    static uint32_t last_check = 0;
+    if (!dwc_force_check && millis() - last_check < 10000) return;
+    dwc_force_check = false;
+    last_check      = millis();
+    if (!rtcOK) return;
+
+    DateTime now = rtc.now();
+    uint16_t now_min = now.hour() * 60 + now.minute();
+
+    if (dwcConfig.on_min <= dwcConfig.off_min)
+        dwcOutputOn = (now_min >= dwcConfig.on_min && now_min < dwcConfig.off_min);
+    else
+        dwcOutputOn = (now_min >= dwcConfig.on_min || now_min < dwcConfig.off_min);  // ueber Mitternacht
+
+    int idx = findNodeIndex(dwcConfig.target_node_id);
+    if (idx < 0 || !espnow_nodes[idx].online) return;
+    uint8_t bit  = dwcConfig.target_relay_bit & 0x03;
+    uint8_t mask = nodeData[idx].relay_mask;
+    uint8_t want = dwcOutputOn ? (mask | (1 << bit)) : (mask & ~(1 << bit));
+    if (want != mask) {
+        if (espnow_send_relay_mask(dwcConfig.target_node_id, want))
+            Serial.printf("[DWC] Node %d Bit %d -> %s (%02u:%02u)\n",
+                          dwcConfig.target_node_id, bit, dwcOutputOn ? "EIN" : "AUS",
+                          now.hour(), now.minute());
+    }
+}
+
+// ========== DWC API ==========
+
+void handleApiDwcGet() {
+    JsonDocument doc;
+    doc["enabled"]          = dwcConfig.enabled;
+    doc["target_node_id"]   = dwcConfig.target_node_id;
+    doc["target_relay_bit"] = dwcConfig.target_relay_bit;
+    doc["on_min"]           = dwcConfig.on_min;
+    doc["off_min"]          = dwcConfig.off_min;
+    doc["output_on"]        = dwcOutputOn;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiDwcSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>())          dwcConfig.enabled          = doc["enabled"];
+    if (doc["target_node_id"].is<int>())    dwcConfig.target_node_id   = constrain((int)doc["target_node_id"],   0, 254);
+    if (doc["target_relay_bit"].is<int>())  dwcConfig.target_relay_bit = constrain((int)doc["target_relay_bit"], 0, 3);
+    if (doc["on_min"].is<int>())            dwcConfig.on_min           = constrain((int)doc["on_min"],  0, 1439);
+    if (doc["off_min"].is<int>())           dwcConfig.off_min          = constrain((int)doc["off_min"], 0, 1439);
+    saveDwcConfig();
+    dwc_force_check = true;
     server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -1038,24 +1156,12 @@ void setup() {
   Serial.println("\n\nESP32 Aeroponik");
 
   EEPROM.begin(EEPROM_SIZE);
-  loadTankConfig();
-  loadScheduleConfig();
-  loadCo2Config();
-  loadFanConfig();
-  loadWifiConfig();
-  loadOutputConfig();
-  applyOutputPollingFlags();
 
-  // SPI + W5500 Ethernet (vor WiFi, damit lwIP beide Interfaces kennt)
-  WiFi.onEvent(onNetworkEvent);
-  BUS.begin(SPI_SCK, SPI_MISO, SPI_MOSI, -1);
-  delay(200);  // W5500 auf ESP32-S3: IPC-Task braucht Zeit zur Initialisierung
-  ETH.begin(ETH_PHY_W5500, 1, SPI_CS_W5500, WSINT, -1, BUS);
-
-  // MicroSD (gleicher physischer Bus, anderer CS)
-  storage_init(BUS);
-
-  // I2C + RTC
+  // I2C + RTC + Ventile so frueh wie moeglich, VOR SPI/Ethernet/SD/WiFi: der PCF8574AP
+  // (Magnetventile) hat keinen definierten Power-on-Reset-Zustand und liegt bis zum ersten
+  // I2C-Schreibbefehl auf HIGH — je frueher pcf_write(0x00) laeuft, desto kuerzer dieser
+  // ungewollte Zustand. Vorher konnte das durch SPI/ETH/SD-Init und vor allem den bis zu
+  // 30s langen WiFi-Verbindungsversuch mehrere Sekunden dauern.
   Wire.begin(I2C_SDA, I2C_SCL);
   if (rtc.begin()) {
     rtcOK = true;
@@ -1070,6 +1176,33 @@ void setup() {
   } else {
     Serial.println("DS1307 nicht gefunden!");
   }
+  setupVentile();
+
+  loadTankConfig();
+  loadScheduleConfig();
+  loadCo2Config();
+  loadDwcConfig();
+  loadFanConfig();
+  loadWifiConfig();
+  loadOutputConfig();
+  applyOutputPollingFlags();
+
+  // SPI + W5500 Ethernet (vor WiFi, damit lwIP beide Interfaces kennt)
+  WiFi.onEvent(onNetworkEvent);
+  pinMode(SPI_CS_W5500, OUTPUT); digitalWrite(SPI_CS_W5500, HIGH);
+  pinMode(SPI_CS_SD, OUTPUT);    digitalWrite(SPI_CS_SD, HIGH);  // waehrend der Sonde deselektiert halten
+  BUS.begin(SPI_SCK, SPI_MISO, SPI_MOSI, -1);
+  delay(200);  // W5500 auf ESP32-S3: IPC-Task braucht Zeit zur Initialisierung
+  ethPresent = w5500_present();
+  if (ethPresent) {
+    ETH.begin(ETH_PHY_W5500, 1, SPI_CS_W5500, WSINT, -1, BUS);
+    Serial.println("[ETH] W5500 erkannt, Ethernet wird initialisiert");
+  } else {
+    Serial.println("[ETH] W5500 nicht gefunden — Ethernet uebersprungen (kein LAN-Modul verbaut?)");
+  }
+
+  // MicroSD (gleicher physischer Bus, anderer CS)
+  storage_init(BUS);
 
   // I2C Bus 2 + AHT21B
   I2CBus2.begin(I2C2_SDA, I2C2_SCL);
@@ -1101,6 +1234,9 @@ void setup() {
       WiFi.persistent(false);
       WiFi.mode(WIFI_OFF);
       delay(500);
+
+      WiFi.setHostname("Grow-Center");  // muss vor WiFi.mode(WIFI_STA) gesetzt werden, sonst
+                                       // uebernimmt der Router weiter den Auto-Namen
       WiFi.mode(WIFI_STA);
       delay(500);
 
@@ -1145,9 +1281,6 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ULTRASONIC_ECHO), ultraEchoISR, CHANGE);
   Serial.println("Ultraschall Sensor bereit");
 
-  // Ventile
-  setupVentile();
-
   // RS485
   setupRS485();
 
@@ -1180,6 +1313,8 @@ void setup() {
   server.on("/api/scheduler/save",  HTTP_POST, handleApiSchedulerSave);
   server.on("/api/co2",             HTTP_GET,  handleApiCo2Get);
   server.on("/api/co2/save",        HTTP_POST, handleApiCo2Save);
+  server.on("/api/dwc",             HTTP_GET,  handleApiDwcGet);
+  server.on("/api/dwc/save",        HTTP_POST, handleApiDwcSave);
   server.on("/api/fan",             HTTP_GET,  handleApiFanGet);
   server.on("/api/fan/save",        HTTP_POST, handleApiFanSave);
   server.on("/api/output",          HTTP_GET,  handleApiOutputGet);
@@ -1298,6 +1433,7 @@ void loop() {
   loopEspNow();
   loopScheduler();
   loopCo2Ctrl();
+  loopDwcCtrl();
   loopFanCtrl();
   loopDruck();
 

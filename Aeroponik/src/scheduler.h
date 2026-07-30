@@ -6,7 +6,7 @@
 
 struct LightScheduleConfig {
     bool     enabled;
-    uint8_t  _reserved;    // war target_node, nicht mehr genutzt
+    uint8_t  manual_percent;  // 0-100, genutzt wenn enabled==false (manuelle Vorgabe statt Rampe)
     uint16_t dawn_start;   // Minuten seit Mitternacht (0–1439)
     uint16_t dawn_end;
     uint16_t dusk_start;

@@ -21,6 +21,11 @@
 // Adresse: alle A-Pins auf GND → 0x38
 #define PCF8574_ADDR     0x38
 
+// Treiber-Polaritaet: 0 = High-aktiv (PCF8574-Pin HIGH -> Ventil AN, aktueller Aufbau),
+// 1 = Low-aktiv (nach Umbau auf invertierte MOSFET-Treiber) — dann bedeutet der
+// undefinierte HIGH-Zustand des PCF8574 beim Power-on "Ventil AUS" statt "AN".
+#define PCF8574_ACTIVE_LOW  1
+
 // Bit-Positionen im PCF8574AP (1 = Ventil AN, 0 = Ventil AUS)
 #define MV_BEHAELTER_1   0   // P0
 #define MV_BEHAELTER_2   1   // P1

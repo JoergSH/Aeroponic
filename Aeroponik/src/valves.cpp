@@ -13,7 +13,11 @@ static bool    testMode  = false;
 
 static void pcf_write() {
     Wire.beginTransmission(PCF8574_ADDR);
+#if PCF8574_ACTIVE_LOW
+    Wire.write((uint8_t)~pcf_state);  // Treiber invertiert: Bit=1 (Ventil AN) -> Pin LOW
+#else
     Wire.write(pcf_state);
+#endif
     Wire.endTransmission();
 }
 

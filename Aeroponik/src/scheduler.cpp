@@ -9,8 +9,8 @@ void loadScheduleConfig() {
     if (EEPROM.read(EEPROM_SCHED_MAGIC_ADDR) == EEPROM_SCHED_MAGIC_BYTE) {
         EEPROM.get(EEPROM_SCHED_BASE, schedConfig);
     } else {
-        schedConfig.enabled     = false;
-        schedConfig._reserved   = 0;
+        schedConfig.enabled        = false;
+        schedConfig.manual_percent = 0;
         schedConfig.dawn_start  = SCHED_DEFAULT_DAWN_START;
         schedConfig.dawn_end    = SCHED_DEFAULT_DAWN_END;
         schedConfig.dusk_start  = SCHED_DEFAULT_DUSK_START;
