@@ -21,8 +21,10 @@
 			"path": "."
 		},
 		{
-			"name": "TestRS485",
-			"path": "TestRS485"
+			"path": "../Licht-Meter"
+		},
+		{
+			"path": "ProtoRS485"
 		}
 	],
 	"settings": {

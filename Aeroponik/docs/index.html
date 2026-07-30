@@ -882,6 +882,10 @@ mask   = (active == 0) ? 0x00 : (uint8_t)((1 << active) - 1);</code></pre>
       <span class="de">Ziel-Prozentwerte (0–100 %) aus Lüfter-Rampe bzw. Zeitplan werden linear auf 0–4095 umgerechnet (<code>round(percent / 100 × 4095)</code>).</span>
       <span class="en">Target percentages (0–100 %) from the fan ramp or lighting schedule are linearly mapped to 0–4095 (<code>round(percent / 100 × 4095)</code>).</span>
     </p>
+    <p>
+      <span class="de">Zum Testen ohne die echte Hardware simuliert das separate Projekt <code>ProtoRS485</code> (ESP32-C3 + WS2812-Streifen) dieses Modul auf dem Bus — siehe <a href="../../ProtoRS485/README.md">ProtoRS485/README.md</a>.</span>
+      <span class="en">For testing without the real hardware, the separate <code>ProtoRS485</code> project (ESP32-C3 + WS2812 strip) simulates this module on the bus — see <a href="../../ProtoRS485/README.md">ProtoRS485/README.md</a>.</span>
+    </p>
 
     <h3 id="geraete-konfiguration"><span class="de">Geräte-Konfiguration (Setup statt Laufzeit-Umschaltung)</span><span class="en">Device Configuration (Setup, Not a Runtime Toggle)</span></h3>
     <p>

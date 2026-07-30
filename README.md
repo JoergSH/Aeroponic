@@ -20,6 +20,7 @@ Multi-Root-Workspace, öffnen über `Aeroponik.code-workspace` (VSCode + [pioard
 | `Lichtx4` | ESP32 | RS485 | 4× Relais-Lichtsteuerung, vom Master über den Beleuchtungs-Scheduler angesteuert |
 | `Multisensor` | ESP32-C3 | RS485 oder ESP-NOW | Zelt-Klima (SCD41: CO₂/Temp/Feuchte) + PPFD/Spektrum (AS7341) |
 | `Steckdosen` | ESP32 | ESP-NOW | Allgemeine Relais-Nodes (u. a. Ziel der CO2-Steuerung) |
+| `ProtoRS485` | ESP32-C3 | RS485 | Generischer Modbus-RTU-Slave-Simulator mit WS2812-Anzeige zum Testen ohne echte Hardware — aktuell das Analog-Ausgangsmodul emulierend, für andere Geräte anpassbar |
 | `shared/espnow_common` | — | — | Gemeinsam genutzte ESP-NOW-Protokoll-Library für Master/Multisensor/Steckdosen |
 
 ### Funktionsübersicht
@@ -66,6 +67,7 @@ Multi-root workspace, open via `Aeroponik.code-workspace` (VSCode + [pioarduino]
 | `Lichtx4` | ESP32 | RS485 | 4× relay light control, driven by the master's lighting scheduler |
 | `Multisensor` | ESP32-C3 | RS485 or ESP-NOW | Tent climate (SCD41: CO₂/temp/humidity) + PPFD/spectrum (AS7341) |
 | `Steckdosen` | ESP32 | ESP-NOW | General-purpose relay nodes (e.g. target of CO2 control) |
+| `ProtoRS485` | ESP32-C3 | RS485 | Generic Modbus RTU slave simulator with a WS2812 display for testing without real hardware — currently emulates the analog output module, adaptable for other devices |
 | `shared/espnow_common` | — | — | Shared ESP-NOW protocol library used by master/Multisensor/Steckdosen |
 
 ### Features
