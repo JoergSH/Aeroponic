@@ -10,6 +10,9 @@ Private Steuerung für ein Aeroponik-Growzelt auf Basis mehrerer ESP32-Firmwares
 
 ![Startseite der Weboberfläche](Aeroponik/docs/webui-startseite.png)
 
+
+Infos und Diskussion https://discord.gg/9mJS5AMgC
+
 ### Projekte
 
 Multi-Root-Workspace, öffnen über `Aeroponik.code-workspace` (VSCode + [pioarduino](https://github.com/pioarduino)-Extension — Ersatz für die offizielle PlatformIO-Extension, da PlatformIO das aktuell genutzte ESP32-Arduino-Framework nicht unterstützt):
