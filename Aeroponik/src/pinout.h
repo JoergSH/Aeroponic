@@ -31,7 +31,9 @@
 #define MV_BEHAELTER_2   1   // P1
 #define MV_BEHAELTER_3   2   // P2
 #define MV_RUECKLAUF     3   // P3
-// P4 = MV5 Reserve, P5 = MV6 Reserve
+#define MV_PUMPE         4   // P4 — automatisch an, sobald ein Behälter aktiv wässert
+#define MV_ZELTLUEFTER   5   // P5 — einfacher manueller An/Aus-Schalter (keine Automatik)
+// P6, P7 weiterhin frei
 
 // ========== I2C Bus 2 (AHT21B Temp/Feuchte) ==========
 // Nutzt die urspruenglich als TDS_PPM/FreeAnalogIn vorgesehenen Pins (Platine

@@ -261,10 +261,24 @@ const char* htmlPage = R"rawliteral(
                     <div id="messwerteExtra"></div>
                 </div>
 
-                <!-- Ventile-Status (nur aktive Behälter) -->
-                <div class="status-box-info">
+                <!-- Ventile-Status: Box nur sichtbar wenn mind. ein Behälter aktiv ist -->
+                <div class="status-box-info" id="behaelterStatusCard" style="display:none;">
                     <strong>🚿 <span class="de">Behälter</span><span class="en">Reservoirs</span></strong>
                     <div id="behaelterStatusCards"></div>
+                </div>
+
+                <!-- Pumpe (automatisch) & Zeltlüfter (manueller Schalter) -->
+                <div class="status-box-info">
+                    <strong>💧 <span class="de">Pumpe &amp; Zeltlüfter</span><span class="en">Pump &amp; Tent Fan</span></strong>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;">
+                        <span style="font-size:0.9em;"><span class="de">Pumpe</span><span class="en">Pump</span></span>
+                        <span id="pumpeBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+                        <span style="font-size:0.9em;"><span class="de">Zeltlüfter</span><span class="en">Tent fan</span></span>
+                        <button id="zeltluefterBtn" onclick="toggleZeltluefter()"
+                            style="border:none;padding:4px 16px;border-radius:10px;font-size:0.85em;cursor:pointer;color:white;background:#6c757d;">--</button>
+                    </div>
                 </div>
 
                 <!-- Licht (PPFD) & Zeitplan -->
@@ -528,6 +542,22 @@ const char* htmlPage = R"rawliteral(
                 <label><input type="checkbox" id="vorlaufAktiv" onchange="saveVentilConfig()"> <span class="de">Vorlauf Rückleitung aktiv</span><span class="en">Return pre-flush active</span></label>
                 &nbsp;&nbsp;
                 <label><span class="de">Vorlaufzeit</span><span class="en">Pre-flush time</span>: <input type="number" id="vorlaufzeit" min="1" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
+            </div>
+
+            <div style="margin-bottom:15px; padding:12px; background:#f0f8ff; border-radius:8px; border-left:4px solid #17a2b8;">
+                <label><input type="checkbox" id="gleicheZeiten" onchange="onGleicheZeitenChange()"> <span class="de">Gleiche Zeiten für alle Behälter</span><span class="en">Same times for all reservoirs</span></label>
+                <div id="gleicheZeitenFields" style="display:none;margin-top:10px;grid-template-columns:1fr 1fr;gap:12px;max-width:400px;">
+                    <label style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
+                        <input type="number" id="oeffnungGemeinsam" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
+                    </label>
+                    <label style="font-size:0.9em;"><span class="de">Pausenzeit (min)</span><span class="en">Pause time (min)</span><br>
+                        <input type="number" id="pauseGemeinsam" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
+                    </label>
+                </div>
+                <div style="font-size:0.78em;color:#888;margin-top:6px;">
+                    <span class="de">Aktiv laufen alle aktiven Behälter direkt nacheinander in einem Durchlauf — der Rücklauf-Vorlauf öffnet dabei nur einmal vor dem ersten, nicht vor jedem einzelnen Behälter.</span>
+                    <span class="en">When active, all active reservoirs run back-to-back in one pass — the return pre-flush only opens once before the first one, not before each individual reservoir.</span>
+                </div>
             </div>
 
             <div id="behaelterCards" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:15px;"></div>
@@ -2093,6 +2123,16 @@ const char* htmlPage = R"rawliteral(
         // ===== Ventile =====
         let ventilData = null;
         let ventilKonfigGeladen = false;
+        let zeltluefterState = false;
+
+        function toggleZeltluefter() {
+            const neu = !zeltluefterState;
+            fetch('/api/zeltluefter/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({an: neu})
+            }).then(() => updateVentile()).catch(() => {});
+        }
 
         function updateVentile() {
             fetch('/api/ventile').then(r => r.json()).then(d => {
@@ -2103,9 +2143,25 @@ const char* htmlPage = R"rawliteral(
                 const zustandLabel = { 'Pause': t('zustandPause'), 'Vorlauf': t('zustandVorlauf'), 'Aktiv': t('zustandAktiv') };
                 const namen = [t('behaelter') + ' 1', t('behaelter') + ' 2', t('behaelter') + ' 3'];
 
-                // Status (Startseite) — eine Karte, jeden Poll neu befuellt, nur aktive Behälter
+                // Status (Startseite) — eine Karte, jeden Poll neu befuellt, nur aktive Behälter.
+                // Die Box selbst ist nur sichtbar, wenn mindestens ein Behälter aktiv ist.
+                const statusCard = document.getElementById('behaelterStatusCard');
+                const anyActive  = d.behaelter.some(b => b.aktiv);
+                if (statusCard) statusCard.style.display = anyActive ? 'block' : 'none';
+                const pumpeBadge = document.getElementById('pumpeBadge');
+                if (pumpeBadge) {
+                    pumpeBadge.textContent = d.pumpe_aktiv ? t('on') : t('off');
+                    pumpeBadge.style.background = d.pumpe_aktiv ? '#28a745' : '#6c757d';
+                }
+                zeltluefterState = d.zeltluefter_aktiv;
+                const zBtn = document.getElementById('zeltluefterBtn');
+                if (zBtn) {
+                    zBtn.textContent = zeltluefterState ? t('on') : t('off');
+                    zBtn.style.background = zeltluefterState ? '#28a745' : '#6c757d';
+                }
+
                 const statusContainer = document.getElementById('behaelterStatusCards');
-                if (statusContainer) {
+                if (statusContainer && anyActive) {
                     let statusHtml = '';
                     for (let i = 0; i < 3; i++) {
                         const b = d.behaelter[i];
@@ -2117,13 +2173,14 @@ const char* htmlPage = R"rawliteral(
                         </div>
                         <div style="font-size:0.78em;color:#888;">${t('timerLabel')}: ${b.timer_s} s</div>`;
                     }
-                    statusContainer.innerHTML = statusHtml || '<div style="color:#aaa;font-size:0.85em;margin-top:8px;">' + t('noActiveReservoirs') + '</div>';
+                    statusContainer.innerHTML = statusHtml;
                 }
 
                 if (!ventilKonfigGeladen) {
                     // Einmalig: Konfig-Karten mit Eingabefeldern aufbauen (Konfiguration-Seite)
-                    document.getElementById('vorlaufAktiv').checked = d.vorlauf_aktiv;
-                    document.getElementById('vorlaufzeit').value    = d.vorlaufzeit_s;
+                    document.getElementById('vorlaufAktiv').checked  = d.vorlauf_aktiv;
+                    document.getElementById('vorlaufzeit').value     = d.vorlaufzeit_s;
+                    document.getElementById('gleicheZeiten').checked = d.gleiche_zeiten;
                     let html = '';
                     for (let i = 0; i < 3; i++) {
                         const b = d.behaelter[i];
@@ -2132,7 +2189,7 @@ const char* htmlPage = R"rawliteral(
                             <div style="margin-top:10px;">
                                 <label><input type="checkbox" id="aktiv${i}" ${b.aktiv ? 'checked' : ''}> ${t('active')}</label>
                             </div>
-                            <div style="margin-top:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                            <div class="behaelter-zeiten-individual" style="margin-top:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px;">
                                 <label style="font-size:0.9em;">${t('openingLabel')}<br>
                                     <input type="number" id="oeffnung${i}" min="1" max="60" value="${b.oeffnungszeit_s}" style="width:100%;padding:4px;">
                                 </label>
@@ -2143,15 +2200,60 @@ const char* htmlPage = R"rawliteral(
                         </div>`;
                     }
                     document.getElementById('behaelterCards').innerHTML = html;
+                    if (d.gleiche_zeiten) {
+                        document.getElementById('oeffnungGemeinsam').value = d.behaelter[0].oeffnungszeit_s;
+                        document.getElementById('pauseGemeinsam').value    = d.behaelter[0].pausenzeit_min;
+                    }
+                    updateGleicheZeitenVisibility();
                     ventilKonfigGeladen = true;
                 }
             }).catch(() => {});
         }
 
+        // "Gleiche Zeiten fuer alle": Checkbox schaltet zwischen 3 individuellen Zeitfeldern
+        // (pro Behaelter-Karte) und einem gemeinsamen Feldpaar um. Die einzelnen "Aktiv"-
+        // Haken bleiben in beiden Modi nutzbar, nur die Zeiten werden im gemeinsamen Modus
+        // synchron gehalten (auch serverseitig, siehe handleApiVentilConfig()).
+        function updateGleicheZeitenVisibility() {
+            const checked = document.getElementById('gleicheZeiten').checked;
+            const gf = document.getElementById('gleicheZeitenFields');
+            if (gf) gf.style.display = checked ? 'grid' : 'none';
+            document.querySelectorAll('.behaelter-zeiten-individual').forEach(el => {
+                el.style.display = checked ? 'none' : 'grid';
+            });
+        }
+
+        function applyGleicheZeiten() {
+            const o = document.getElementById('oeffnungGemeinsam').value;
+            const p = document.getElementById('pauseGemeinsam').value;
+            for (let i = 0; i < 3; i++) {
+                const oEl = document.getElementById('oeffnung' + i);
+                const pEl = document.getElementById('pause' + i);
+                if (oEl) oEl.value = o;
+                if (pEl) pEl.value = p;
+            }
+            saveVentilConfig();
+        }
+
+        function onGleicheZeitenChange() {
+            updateGleicheZeitenVisibility();
+            if (document.getElementById('gleicheZeiten').checked) {
+                // Gemeinsame Felder mit den aktuellen Werten von Behälter 1 vorbelegen
+                const o = document.getElementById('oeffnung0')?.value;
+                const p = document.getElementById('pause0')?.value;
+                if (o) document.getElementById('oeffnungGemeinsam').value = o;
+                if (p) document.getElementById('pauseGemeinsam').value = p;
+                applyGleicheZeiten();
+            } else {
+                saveVentilConfig();
+            }
+        }
+
         function saveVentilConfig() {
             const body = {
-                vorlauf_aktiv: document.getElementById('vorlaufAktiv').checked,
-                vorlaufzeit_s: parseInt(document.getElementById('vorlaufzeit').value),
+                vorlauf_aktiv:  document.getElementById('vorlaufAktiv').checked,
+                vorlaufzeit_s:  parseInt(document.getElementById('vorlaufzeit').value),
+                gleiche_zeiten: document.getElementById('gleicheZeiten').checked,
                 behaelter: [0,1,2].map(i => ({
                     aktiv:           document.getElementById('aktiv' + i)?.checked ?? false,
                     oeffnungszeit_s: parseInt(document.getElementById('oeffnung' + i)?.value ?? 5),

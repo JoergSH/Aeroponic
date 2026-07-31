@@ -54,7 +54,11 @@ extern bool USE_ACCESS_POINT;
 //  174–175: OutputConfig (2 Bytes)
 //  176:    DWC-Timer Magic Byte
 //  177–186: DwcTimerConfig (bis zu 10 Bytes)
-#define EEPROM_SIZE             190
+//  187:    Ventil-"Gleiche Zeiten" Magic Byte
+//  188:    Ventil-"Gleiche Zeiten" Wert (1 Byte)
+//  189:    Zeltlüfter Magic Byte
+//  190:    Zeltlüfter Wert (1 Byte)
+#define EEPROM_SIZE             192
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
 #define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter
@@ -87,6 +91,18 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_DWC_MAGIC_ADDR    176
 #define EEPROM_DWC_MAGIC_BYTE    0x3A
 #define EEPROM_DWC_BASE          177
+
+// Ventile: "Gleiche Zeiten fuer alle" Batch-Modus — eigener Magic-Bereich, weil das Feld
+// nachtraeglich zum urspruenglichen Ventilkonfig-Layout (Magic bei EEPROM_MAGIC_ADDR)
+// dazukam und sonst bei Bestandsinstallationen ungueltige Alt-Daten gelesen wuerden.
+#define EEPROM_VENTIL_GLEICH_MAGIC_ADDR 187
+#define EEPROM_VENTIL_GLEICH_MAGIC_BYTE 0x5C
+#define EEPROM_VENTIL_GLEICH_ADDR       188
+
+// Zeltluefter: einfacher manueller An/Aus-Schalter (PCF8574 P5), Zustand persistiert
+#define EEPROM_ZELTLUEFTER_MAGIC_ADDR   189
+#define EEPROM_ZELTLUEFTER_MAGIC_BYTE   0x7E
+#define EEPROM_ZELTLUEFTER_ADDR         190
 
 // ========== Lichtsteuerung Scheduler Defaults ==========
 #define SCHED_DEFAULT_NODE        1

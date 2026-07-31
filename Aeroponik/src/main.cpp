@@ -601,12 +601,23 @@ void handleApiVentilStatus() {
     unsigned long vergangen = (millis() - behaelterZustand[i].timerStart) / 1000;
     b["timer_s"]        = vergangen;
   }
-  doc["vorlaufzeit_s"]  = ventilConfig.vorlaufzeit_s;
-  doc["vorlauf_aktiv"]  = ventilConfig.vorlauf_aktiv;
-  doc["rueck_offen"]    = ventilRueckOffen();
+  doc["vorlaufzeit_s"]      = ventilConfig.vorlaufzeit_s;
+  doc["vorlauf_aktiv"]      = ventilConfig.vorlauf_aktiv;
+  doc["gleiche_zeiten"]     = ventilConfig.gleiche_zeiten;
+  doc["rueck_offen"]        = ventilRueckOffen();
+  doc["pumpe_aktiv"]        = pumpeAktiv();
+  doc["zeltluefter_aktiv"]  = zeltLuefterAktiv();
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
+}
+
+void handleApiZeltluefterSave() {
+  if (server.method() != HTTP_POST) { server.send(405); return; }
+  JsonDocument doc;
+  deserializeJson(doc, server.arg("plain"));
+  if (doc["an"].is<bool>()) zeltLuefterSetzen(doc["an"]);
+  server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleApiVentilConfig() {
@@ -616,6 +627,8 @@ void handleApiVentilConfig() {
   }
   JsonDocument doc;
   deserializeJson(doc, server.arg("plain"));
+
+  bool wasGleicheZeiten = ventilConfig.gleiche_zeiten;
 
   for (int i = 0; i < 3; i++) {
     if (doc["behaelter"][i]["oeffnungszeit_s"].is<int>())
@@ -629,8 +642,21 @@ void handleApiVentilConfig() {
     ventilConfig.vorlaufzeit_s = constrain((int)doc["vorlaufzeit_s"], 0, 30);
   if (doc["vorlauf_aktiv"].is<bool>())
     ventilConfig.vorlauf_aktiv = doc["vorlauf_aktiv"];
+  if (doc["gleiche_zeiten"].is<bool>())
+    ventilConfig.gleiche_zeiten = doc["gleiche_zeiten"];
+
+  // Im Batch-Modus muessen alle 3 Behaelter dieselbe Zeit haben — Behaelter 1 ist die
+  // massgebliche Quelle (das Frontend zeigt dann ohnehin nur noch ein gemeinsames Feld).
+  if (ventilConfig.gleiche_zeiten) {
+    for (int i = 1; i < 3; i++) {
+      ventilConfig.behaelter[i].oeffnungszeit_s = ventilConfig.behaelter[0].oeffnungszeit_s;
+      ventilConfig.behaelter[i].pausenzeit_min  = ventilConfig.behaelter[0].pausenzeit_min;
+    }
+  }
 
   saveVentilConfig();
+  // Modus-Wechsel: sauberer Reset, damit kein Ventil aus dem vorherigen Modus offen bleibt.
+  if (ventilConfig.gleiche_zeiten != wasGleicheZeiten) resetVentilRuntimeState();
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -1309,6 +1335,7 @@ void setup() {
   server.on("/api/logs/download",   HTTP_GET,  handleApiLogsDownload);
   server.on("/api/logs/delete",     HTTP_POST, handleApiLogsDelete);
   server.on("/api/ventile/config",  HTTP_POST, handleApiVentilConfig);
+  server.on("/api/zeltluefter/save", HTTP_POST, handleApiZeltluefterSave);
   server.on("/api/scheduler",       HTTP_GET,  handleApiSchedulerGet);
   server.on("/api/scheduler/save",  HTTP_POST, handleApiSchedulerSave);
   server.on("/api/co2",             HTTP_GET,  handleApiCo2Get);
