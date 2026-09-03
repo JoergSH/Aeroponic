@@ -16,7 +16,7 @@ Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sens
 
 **Hauptsteuerung**
 - [Hardware & Pinout](#hardware--pinout)
-- [Ventile PCF8574AP](#ventile-pcf8574ap)
+- [Ventile & Pumpen](#ventile--pumpen)
 - [Funktionen](#funktionen)
 - [Beleuchtungs-Scheduler](#beleuchtungs-scheduler)
 - [RS485-Bus](#rs485-bus)
@@ -44,9 +44,9 @@ Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sens
 
 ```
 Aeroponik Master (ESP32-S3 N16R8)
- │  W5500 Ethernet (LAN + WiFi parallel) · PCF8574AP Magnetventile MV1–MV4 · DS3231 RTC (I2C)
- │  MicroSD Datenlogging · RS485 UART1 (MAX13487) · 2× DS18B20 · Drucksensor 0,5–4,5V
- │  Ultraschall HC-SR04 Füllstand · Webinterface Port 80
+ │  W5500 Ethernet (LAN + WiFi parallel) · Magnetventile MV1–MV4 (direkte GPIO) · DS3231 RTC (I2C)
+ │  MicroSD Datenlogging · RS485 UART1 (MAX13487) · DS18B20 (Vorrat/Pflanze/Innen) · Drucksensor 0,5–4,5V
+ │  Ultraschall HC-SR04 Füllstand · Netzspannungsüberwachung (USV) · Webinterface Port 80
  │
  ├── RS485 (9600 Baud) ⇄
  │    ├─ Multisensor              0x20 · FC03           Zelt-Klima (CO₂/Temp/Feuchte) + PPFD/Spektrum (AS7341)
@@ -128,44 +128,59 @@ typedef struct {
 
 > **Gesperrte GPIOs:** 0, 3, 45, 46 (Strapping) · 19, 20 (USB-OTG) · 26–32 (Flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0)
 
+> **Hardware-Revision:** Ab der SMD-Platine (siehe [`SmdVersion_Pinbelegung.pdf`](../../DokuEtc/SmdVersion_Pinbelegung.pdf)) gibt es keinen I2C-GPIO-Expander (PCF8574AP) mehr — Ventile, Pumpe und Umwälzpumpe hängen an direkten GPIOs, und AHT21B teilt sich den Hauptbus mit der RTC statt eines eigenen zweiten I2C-Busses.
+
 | GPIO | Konstante | Peripherie |
 |---|---|---|
-| `1` | `RS485_DI` | UART1 TX → MAX13487 Data In |
-| `2` | `RS485_RO` | UART1 RX ← MAX13487 Receive Out |
-| `3` | `I2C2_SDA` | I2C-Bus 2: AHT21B (Raumklima) |
-| `4` | `DS18B20_PIN` | OneWire — 2× DS18B20 (Vorrat + Pflanze) |
+| `1` | `RS485_RO` | UART1 RX ← MAX13487 Receive Out |
+| `2` | `RS485_DI` | UART1 TX → MAX13487 Data In |
+| `4` | `DS18B20_PIN` | OneWire — DS18B20 (Vorrat, Pflanze, optional Innentemperatur), Zuordnung über ROM-Adresse (siehe [Funktionen](#funktionen)) |
 | `5` | `PRESSURE_PIN` | Analog — Drucksensor 0,5–4,5 V ratiometrisch |
-| `10` | `WSRST` | W5500 Reset (aktiv LOW) |
+| `6` | `GEHAEUSE_FAN_PIN` | Gehäuselüfter, An/Aus (kein PWM), temperaturgeregelt über Innen-DS18B20 |
+| `7` | `VENTIL1_PIN` | Magnetventil Behälter 1 (direkte GPIO) |
+| `8` | `VENTIL2_PIN` | Magnetventil Behälter 2 |
+| `9` | `VENTIL3_PIN` | Magnetventil Behälter 3 |
+| `10` | `VENTIL4_PIN` | Rücklaufventil |
 | `11` | `SPI_MOSI` | SPI2 MOSI — W5500 + MicroSD |
 | `12` | `SPI_SCK` | SPI2 SCK |
 | `13` | `SPI_MISO` | SPI2 MISO |
 | `14` | `SPI_CS_W5500` | W5500 Chip Select |
 | `15` | `ULTRASONIC_TRIG` | HC-SR04 Trigger |
 | `16` | `ULTRASONIC_ECHO` | HC-SR04 Echo (3,3 V direkt anschließbar) |
-| `17` | `I2C_SCL` | I2C-Bus: DS3231 + PCF8574AP |
-| `18` | `I2C_SDA` | I2C-Bus: DS3231 + PCF8574AP |
+| `17` | `I2C_SCL` | I2C-Bus: DS3231, AHT21B, optional GP8403 |
+| `18` | `I2C_SDA` | I2C-Bus: DS3231, AHT21B, optional GP8403 |
 | `21` | `WSINT` | W5500 Interrupt |
+| `38` | `NETZ_OK_PIN` | Netzspannungsüberwachung — HIGH = Netz vorhanden, LOW = USV-Betrieb (2000 ms entprellt) |
 | `39` | `SPI_CS_SD` | MicroSD Chip Select |
-| `46` | `I2C2_SCL` | I2C-Bus 2: AHT21B (Raumklima) — bidirektional, kein ADC, Strapping nur im USB-Auto-Flash-Reset-Fenster relevant |
+| `47` | `UMWAELZPUMPE_GPIO` | Umwälzpumpe (Vorratsbehälter-Zirkulation) |
+| `48` | `PUMPE_GPIO` | Hauptpumpe |
 
-### Ventile PCF8574AP
-
-I2C-Adresse `0x38` (alle A-Pins auf GND). Jedes Bit steuert ein Ventil: **1 = AN, 0 = AUS**. Der aktuelle Zustand aller 8 Outputs wird als ein Byte geschrieben.
-
-| Bit / Pin | Konstante | Ventil | Funktion |
-|---|---|---|---|
-| `Bit 0 · P0` | `MV_BEHAELTER_1` | MV1 | Zulauf Behälter 1 |
-| `Bit 1 · P1` | `MV_BEHAELTER_2` | MV2 | Zulauf Behälter 2 |
-| `Bit 2 · P2` | `MV_BEHAELTER_3` | MV3 | Zulauf Behälter 3 |
-| `Bit 3 · P3` | `MV_RUECKLAUF` | MV4 | Rücklauf / Ablauf |
-| `Bit 4–7 · P4–P7` | — | Reserve | Ungenutzt (5 weitere Reserve-Outputs) |
+Die Treiber-Polarität aller direkten Ausgänge (Ventile 1–4, Pumpe, Umwälzpumpe) ist über `OUTPUT_ACTIVE_LOW` in `pinout.h` umschaltbar (0 = High-aktiv, Default; 1 = Low-aktiv für invertierte MOSFET-Treiber).
 
 #### I2C-Geräte (SDA=18, SCL=17)
 
 | Adresse | Baustein | Funktion |
 |---|---|---|
-| `0x38` | PCF8574AP | GPIO-Expander für Magnetventile MV1–MV4 |
+| `0x38` | AHT21B | Raumklima-Referenzsensor (Standardadresse der Adafruit_AHTX0-Bibliothek) |
+| `0x58` | GP8403 | Optionaler 2-Kanal-0–10V-DAC, siehe [Analog-Ausgangsmodul](#analog-ausgangsmodul) |
 | `0x68` | DS3231 | Echtzeituhr + integriertes EEPROM (AT24C32) |
+
+### Ventile & Pumpen
+
+Die vier Magnetventile, die Hauptpumpe und die Umwälzpumpe sind direkte GPIO-Ausgänge (siehe [Hardware & Pinout](#hardware--pinout)) — kein I2C-Expander.
+
+| Konstante | Ventil | Funktion |
+|---|---|---|
+| `VENTIL1_PIN` | MV1 | Zulauf Behälter 1 |
+| `VENTIL2_PIN` | MV2 | Zulauf Behälter 2 |
+| `VENTIL3_PIN` | MV3 | Zulauf Behälter 3 |
+| `VENTIL4_PIN` | MV4 | Rücklauf / Ablauf |
+
+#### Hauptpumpe & Umwälzpumpe
+
+Die Hauptpumpe (`PUMPE_GPIO`) schaltet automatisch mit, sobald irgendein Behälter gerade aktiv wässert (Ventil offen) — unabhängig davon, ob im normalen oder im Batch-Zeitmodus (siehe [Ventilsteuerung](#funktionen)).
+
+Die Umwälzpumpe (`UMWAELZPUMPE_GPIO`, Vorratsbehälter-Zirkulation) läuft in einem konfigurierbaren Lauf-/Pausenzyklus (`laufzeit_s` / `pausenzeit_min`), sobald irgendein Behälter überhaupt aktiviert ist — unabhängig davon, ob dieser Behälter gerade tatsächlich wässert oder nur zwischen zwei Zyklen pausiert. Ist kein Behälter aktiviert, bleibt sie aus.
 
 ### Funktionen
 
@@ -177,11 +192,36 @@ Ohne Router: Master startet als **AP auf Kanal 6** (`ESPNOW_DEFAULT_CHANNEL`). N
 
 #### Ventilsteuerung
 
-Drei unabhängige Bewässerungskreise mit konfigurierbarer Öffnungszeit (Sek.) und Pausenintervall (Min.). Optional vorgeschalteter Rücklauf-Vorlauf via MV4 (konfigurierbare Vorlaufzeit).
+Drei unabhängige Bewässerungskreise mit konfigurierbarer Öffnungszeit (Sek.) und Pausenintervall (Min., jeweils getrennt für Licht- und Dunkelphase). Optional vorgeschalteter Rücklauf-Vorlauf via MV4 (konfigurierbare Vorlaufzeit). Im Modus "Gleiche Zeiten für alle" läuft statt drei unabhängiger Timer ein gemeinsamer Batch-Durchlauf (Vorlauf einmal vor dem ersten aktiven Behälter, dann alle aktiven Behälter direkt nacheinander, eine gemeinsame Pause).
 
 #### Tanküberwachung (Kegelstumpf)
 
 Füllstand per Ultraschall (HC-SR04). Umrechnung Distanz → Wasserhöhe → Volumen unter Berücksichtigung der konischen Tankgeometrie (einstellbare Radien oben/unten und Höhe).
+
+#### DS18B20 — Rollenzuordnung über ROM-Adresse
+
+Die DS18B20-Sensoren am gemeinsamen 1-Wire-Bus (Vorrat, Pflanze, optional Innentemperatur für den Gehäuselüfter) werden über ihre eindeutige 64-Bit-ROM-Adresse einer Rolle zugeordnet, statt sich auf die Bus-Scan-Reihenfolge zu verlassen (die sich bei vertauschten oder unterschiedlich langen Kabeln ändert). Solange eine Rolle nicht zugewiesen ist, fällt die Firmware auf die alte Index-Reihenfolge zurück (0=Vorrat, 1=Pflanze, 2=Innentemperatur).
+
+#### Gehäuselüfter
+
+Einfacher An/Aus-Schalter (kein PWM) am Steuerungsgehäuse, geregelt über den Innentemperatur-DS18B20. Hysterese: an ab `temp_max`, aus ab/unter `temp_min` — dazwischen bleibt der zuletzt gesetzte Zustand erhalten, damit der Lüfter nicht dauernd taktet.
+
+#### Netzspannungsüberwachung
+
+`NETZ_OK_PIN` erkennt einen Netzausfall (Betrieb an der USV) — HIGH = Netz vorhanden, LOW = Netzausfall, 2000 ms entprellt gegen kurze Spannungsschwankungen. Der Status ist in der Weboberfläche sichtbar und löst optional eine [WhatsApp-Benachrichtigung](#whatsapp-benachrichtigungen) aus.
+
+#### WhatsApp-Benachrichtigungen
+
+Über [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) (Telefonnummer + API-Key, einmalig per WhatsApp-Aktivierungsnachricht erhalten). Ein globaler Schalter (`global_enabled`) übersteuert alle einzelnen Alarme; jeder Alarm ist zusätzlich einzeln aktivierbar:
+
+| Alarm | Auslöser |
+|---|---|
+| Netzausfall | Siehe [Netzspannungsüberwachung](#netzspannungsüberwachung) |
+| Sensor-Ausfall | AHT21 / RTC / DS18B20 nicht erreichbar |
+| Luftfeuchte | Zelt-Luftfeuchte (RS485-Multisensor) außerhalb `feuchte_min`/`feuchte_max` |
+| Temperatur | Zelt-Temperatur (RS485-Multisensor) außerhalb `temperatur_min`/`temperatur_max` |
+| Behälter fast leer | Vorratsbehälter-Füllstand unter `tank_min_prozent` |
+| Zeltlüfter-Drehzahl | Ist-Drehzahl weicht vom Erwartungswert ab, siehe [Lueftermodul](#lueftermodul) |
 
 #### SD-Logging
 
@@ -395,9 +435,9 @@ Auf der Startseite erscheint eine Status-Karte nur, wenn die Funktion aktiviert 
 
 ### Raumklima & VPD
 
-#### AHT21B — I2C-Bus 2
+#### AHT21B
 
-Zweiter, unabhängiger I2C-Bus (ESP32-Hardwarecontroller #1) an `I2C2_SDA` (GPIO3) / `I2C2_SCL` (GPIO46) — ursprünglich als analoge Reserve-Eingänge auf der Platine vorgesehen, digital als I2C nutzbar. Der Sensor misst die **Raumluft außerhalb des Zelts** als Referenz.
+Hängt am Haupt-I2C-Bus (`I2C_SDA`/`I2C_SCL`, GPIO18/17) zusammen mit der RTC und dem optionalen GP8403 — siehe [I2C-Geräte](#i2c-geräte-sda18-scl17). Der Sensor misst die **Raumluft außerhalb des Zelts** als Referenz.
 
 > **Bekannter Library-Bug:** Adafruit_AHTX0 sendet standardmäßig den AHT10-Kalibrierbefehl `0xE1`. AHT20/AHT21(B)-Chips erwarten stattdessen `0xBE` — sonst liefert der Feuchtekanal dauerhaft ~100 %, während die Temperatur bereits korrekt ist. Die Firmware sendet den korrekten Befehl (`0xBE, 0x08, 0x00`) direkt nach `aht21.begin()` manuell nach.
 
@@ -574,7 +614,7 @@ System documentation — master (ESP32-S3) with RS485 devices and wireless senso
 
 **Main Controller**
 - [Hardware & Pinout](#hardware--pinout-1)
-- [Valves PCF8574AP](#valves-pcf8574ap)
+- [Valves & Pumps](#valves--pumps)
 - [Features](#features)
 - [Lighting Scheduler](#lighting-scheduler)
 - [RS485 Bus](#rs485-bus-1)
@@ -686,44 +726,59 @@ typedef struct {
 
 > **Reserved GPIOs:** 0, 3, 45, 46 (strapping) · 19, 20 (USB-OTG) · 26–32 (flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0)
 
+> **Hardware revision:** As of the SMD board (see [`SmdVersion_Pinbelegung.pdf`](../../DokuEtc/SmdVersion_Pinbelegung.pdf)), there is no longer an I2C GPIO expander (PCF8574AP) — valves, main pump, and circulation pump are direct GPIOs, and the AHT21B shares the main bus with the RTC instead of having its own second I2C bus.
+
 | GPIO | Constant | Peripheral |
 |---|---|---|
-| `1` | `RS485_DI` | UART1 TX → MAX13487 Data In |
-| `2` | `RS485_RO` | UART1 RX ← MAX13487 Receive Out |
-| `3` | `I2C2_SDA` | I2C bus 2: AHT21B (room climate) |
-| `4` | `DS18B20_PIN` | OneWire — 2× DS18B20 (reservoir + plant) |
+| `1` | `RS485_RO` | UART1 RX ← MAX13487 Receive Out |
+| `2` | `RS485_DI` | UART1 TX → MAX13487 Data In |
+| `4` | `DS18B20_PIN` | OneWire — DS18B20 (reservoir, plant, optional internal temperature), assigned by ROM address (see [Features](#features)) |
 | `5` | `PRESSURE_PIN` | Analog — pressure sensor 0.5–4.5 V ratiometric |
-| `10` | `WSRST` | W5500 reset (active LOW) |
+| `6` | `GEHAEUSE_FAN_PIN` | Enclosure fan, on/off (no PWM), temperature-controlled via the internal DS18B20 |
+| `7` | `VENTIL1_PIN` | Solenoid valve reservoir 1 (direct GPIO) |
+| `8` | `VENTIL2_PIN` | Solenoid valve reservoir 2 |
+| `9` | `VENTIL3_PIN` | Solenoid valve reservoir 3 |
+| `10` | `VENTIL4_PIN` | Return valve |
 | `11` | `SPI_MOSI` | SPI2 MOSI — W5500 + MicroSD |
 | `12` | `SPI_SCK` | SPI2 SCK |
 | `13` | `SPI_MISO` | SPI2 MISO |
 | `14` | `SPI_CS_W5500` | W5500 chip select |
 | `15` | `ULTRASONIC_TRIG` | HC-SR04 trigger |
 | `16` | `ULTRASONIC_ECHO` | HC-SR04 echo (3.3 V, direct connection) |
-| `17` | `I2C_SCL` | I2C bus: DS3231 + PCF8574AP |
-| `18` | `I2C_SDA` | I2C bus: DS3231 + PCF8574AP |
+| `17` | `I2C_SCL` | I2C bus: DS3231, AHT21B, optional GP8403 |
+| `18` | `I2C_SDA` | I2C bus: DS3231, AHT21B, optional GP8403 |
 | `21` | `WSINT` | W5500 interrupt |
+| `38` | `NETZ_OK_PIN` | Mains power monitoring — HIGH = mains present, LOW = running on UPS (2000 ms debounced) |
 | `39` | `SPI_CS_SD` | MicroSD chip select |
-| `46` | `I2C2_SCL` | I2C bus 2: AHT21B (room climate) — bidirectional, no ADC, strapping role only matters during the USB auto-flash reset window |
+| `47` | `UMWAELZPUMPE_GPIO` | Circulation pump (reservoir recirculation) |
+| `48` | `PUMPE_GPIO` | Main pump |
 
-### Valves PCF8574AP
-
-I2C address `0x38` (all A pins tied to GND). Each bit drives one valve: **1 = ON, 0 = OFF**. The current state of all 8 outputs is written as a single byte.
-
-| Bit / Pin | Constant | Valve | Function |
-|---|---|---|---|
-| `Bit 0 · P0` | `MV_BEHAELTER_1` | MV1 | Inlet reservoir 1 |
-| `Bit 1 · P1` | `MV_BEHAELTER_2` | MV2 | Inlet reservoir 2 |
-| `Bit 2 · P2` | `MV_BEHAELTER_3` | MV3 | Inlet reservoir 3 |
-| `Bit 3 · P3` | `MV_RUECKLAUF` | MV4 | Return / drain |
-| `Bit 4–7 · P4–P7` | — | Spare | Unused (5 spare outputs) |
+The driver polarity of every direct output (valves 1–4, main pump, circulation pump) is switchable via `OUTPUT_ACTIVE_LOW` in `pinout.h` (0 = active-high, default; 1 = active-low for inverted MOSFET drivers).
 
 #### I2C Devices (SDA=18, SCL=17)
 
 | Address | Chip | Function |
 |---|---|---|
-| `0x38` | PCF8574AP | GPIO expander for solenoid valves MV1–MV4 |
+| `0x38` | AHT21B | Room climate reference sensor (default address of the Adafruit_AHTX0 library) |
+| `0x58` | GP8403 | Optional 2-channel 0–10V DAC, see [Analog Output Module](#analog-output-module) |
 | `0x68` | DS3231 | Real-time clock + onboard EEPROM (AT24C32) |
+
+### Valves & Pumps
+
+The four solenoid valves, the main pump, and the circulation pump are direct GPIO outputs (see [Hardware & Pinout](#hardware--pinout-1)) — no I2C expander.
+
+| Constant | Valve | Function |
+|---|---|---|
+| `VENTIL1_PIN` | MV1 | Inlet reservoir 1 |
+| `VENTIL2_PIN` | MV2 | Inlet reservoir 2 |
+| `VENTIL3_PIN` | MV3 | Inlet reservoir 3 |
+| `VENTIL4_PIN` | MV4 | Return / drain |
+
+#### Main Pump & Circulation Pump
+
+The main pump (`PUMPE_GPIO`) switches on automatically whenever any reservoir is actively watering (valve open) — regardless of whether the normal or batch timing mode is active (see [Valve Control](#features)).
+
+The circulation pump (`UMWAELZPUMPE_GPIO`, reservoir recirculation) runs a configurable run/pause cycle (`laufzeit_s` / `pausenzeit_min`) whenever any reservoir is enabled at all — regardless of whether that reservoir is currently watering or just pausing between cycles. If no reservoir is enabled, it stays off.
 
 ### Features
 
@@ -735,11 +790,36 @@ Without a router: the master starts as an **AP on channel 6** (`ESPNOW_DEFAULT_C
 
 #### Valve Control
 
-Three independent irrigation circuits with configurable open time (sec.) and pause interval (min.). Optional return pre-flush via MV4 (configurable pre-flush time).
+Three independent irrigation circuits with configurable open time (sec.) and pause interval (min., separately configurable for the light and dark phases). Optional return pre-flush via MV4 (configurable pre-flush time). In "same times for all" mode, a single shared batch run replaces the three independent timers (pre-flush once before the first active reservoir, then all active reservoirs directly in sequence, one shared pause).
 
 #### Tank Monitoring (Truncated Cone)
 
 Fill level via ultrasonic sensor (HC-SR04). Conversion distance → water height → volume, accounting for the conical tank geometry (configurable top/bottom radii and height).
+
+#### DS18B20 — Role Assignment by ROM Address
+
+The DS18B20 sensors on the shared 1-Wire bus (reservoir, plant, optional internal temperature for the enclosure fan) are assigned to a role via their unique 64-bit ROM address, rather than relying on bus-scan order (which changes with swapped or differently-lengthed cables). As long as a role isn't assigned, the firmware falls back to the old index order (0=reservoir, 1=plant, 2=internal temperature).
+
+#### Enclosure Fan
+
+A simple on/off switch (no PWM) on the controller enclosure, controlled via the internal DS18B20. Hysteresis: on at/above `temp_max`, off at/below `temp_min` — in between, the last state is held so the fan doesn't chatter.
+
+#### Mains Power Monitoring
+
+`NETZ_OK_PIN` detects a mains power outage (running on the UPS) — HIGH = mains present, LOW = mains outage, debounced 2000 ms against brief voltage dips. The status is shown in the web interface and can optionally trigger a [WhatsApp notification](#whatsapp-notifications).
+
+#### WhatsApp Notifications
+
+Via [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) (phone number + API key, obtained once via a WhatsApp activation message). A global switch (`global_enabled`) overrides all individual alerts; each alert can also be enabled separately:
+
+| Alert | Trigger |
+|---|---|
+| Power outage | See [Mains Power Monitoring](#mains-power-monitoring) |
+| Sensor failure | AHT21 / RTC / DS18B20 unreachable |
+| Humidity | Tent humidity (RS485 multisensor) outside `feuchte_min`/`feuchte_max` |
+| Temperature | Tent temperature (RS485 multisensor) outside `temperatur_min`/`temperatur_max` |
+| Reservoir nearly empty | Reservoir fill level below `tank_min_prozent` |
+| Tent fan RPM | Actual RPM deviates from the expected value, see [Lueftermodul](#lueftermodul-1) |
 
 #### SD Logging
 
@@ -903,7 +983,7 @@ The master compares the reported actual RPM against an expected RPM derived from
 
 Standalone firmware (`Multimodul`) on the same RP2040-Zero base as the [Lueftermodul](#lueftermodul-1) — identical pinout, plus a second I2C bus (I2C1, SDA=GPIO10/SCL=GPIO11) for optional add-on hardware:
 
-- **SCD41 + AS7341** (I2C `0x62` / `0x39`) — the same sensors as in the [Multisensor](#multisensor-1) node. When present, the board additionally answers RS485 address `0x20` with the same 14-register layout as the [RS485 multisensor](#rs485-multisensor-tent).
+- **SCD41 + AS7341** (I2C `0x62` / `0x39`) — the same sensors as in the [Multisensor](#multisensor-2) node. When present, the board additionally answers RS485 address `0x20` with the same 14-register layout as the [RS485 multisensor](#rs485-multisensor-tent).
 - **GP8403** (I2C `0x58`, 2-channel 0–10V DAC) — when present, the board additionally answers RS485 address `0x50` with the same 2-register layout as the [analog output module](#analog-output-module).
 
 On boot, the firmware scans the I2C bus; only devices actually found are initialized and have their RS485 address activated. If a device is missing, its address simply stays unanswered on the bus — indistinguishable, from the master's point of view, from a separate Multisensor/analog module that was never installed. This means **no code change is needed on the master**: it already polls `0x20`, `0x50`, and `0x51` independently and already treats a missing response as "device offline".
@@ -953,9 +1033,9 @@ A status card appears on the home page only when the feature is enabled.
 
 ### Room Climate & VPD
 
-#### AHT21B — I2C Bus 2
+#### AHT21B
 
-A second, independent I2C bus (ESP32 hardware controller #1) on `I2C2_SDA` (GPIO3) / `I2C2_SCL` (GPIO46) — originally intended as spare analog inputs on the board, usable digitally as I2C. The sensor measures **room air outside the tent** as a reference.
+Sits on the main I2C bus (`I2C_SDA`/`I2C_SCL`, GPIO18/17) together with the RTC and the optional GP8403 — see [I2C Devices](#i2c-devices-sda18-scl17). The sensor measures **room air outside the tent** as a reference.
 
 > **Known library bug:** Adafruit_AHTX0 sends the AHT10 calibration command `0xE1` by default. AHT20/AHT21(B) chips instead expect `0xBE` — otherwise the humidity channel reports a constant ~100 % while temperature is already correct. The firmware manually re-sends the correct command (`0xBE, 0x08, 0x00`) right after `aht21.begin()`.
 
