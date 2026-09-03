@@ -27,4 +27,10 @@ uint8_t schedComputeRelayMask(uint16_t now_min);
 // aber ohne dessen Stufen-Quantisierung.
 uint8_t schedComputeBrightnessPercent(uint16_t now_min);
 
+// Grobe Licht/Dunkel-Einordnung für vom Lichtstatus abhängige Logik (z. B. Bewässerung,
+// siehe valves.cpp): bei aktivem Zeitplan alles zwischen dawn_start und dusk_end (also
+// inklusive der Dämmerungsrampen — schon während des Sonnenaufgangs zählt es als "an").
+// Bei deaktiviertem Zeitplan (manuelle Vorgabe) zählt jede Helligkeit > 0 % als "an".
+bool schedLichtIstAn(uint16_t now_min);
+
 #endif

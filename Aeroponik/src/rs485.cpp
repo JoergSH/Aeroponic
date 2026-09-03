@@ -1,7 +1,9 @@
 #include "rs485.h"
 #include "pinout.h"
+#include "dbg.h"
 #include <HardwareSerial.h>
 #include <Arduino.h>
+#include <string.h>
 #include "driver/gpio.h"
 
 #define RS485_BAUD           9600
@@ -30,6 +32,7 @@ static Rs485SensorData ms2    = {false, 0, 0, 0, 0, 0, {}, 0, 0};
 static Rs485LichtData  licht  = {false, 0, 0};
 static Rs485FanData    fan    = {false, 0, 0, 0};
 static Rs485AnalogData analog = {false, 0, 0, 0};
+static Rs485LueftData  lueft  = {false, {0,0,0,0}, {0,0,0,0}, 0};
 
 // ========== Zustandsmaschine ==========
 // Ein Bus, ein Master, immer nur eine Anfrage gleichzeitig unterwegs.
@@ -43,7 +46,8 @@ static Rs485AnalogData analog = {false, 0, 0, 0};
 typedef enum { MB_IDLE, MB_WAIT_RESPONSE } mb_state_t;
 typedef enum { TARGET_MS2_READ, TARGET_LICHT_WRITE, TARGET_LICHT_READ,
                TARGET_FAN_WRITE, TARGET_FAN_READ,
-               TARGET_ANALOG_WRITE_CH1, TARGET_ANALOG_WRITE_CH2, TARGET_ANALOG_READ } mb_target_t;
+               TARGET_ANALOG_WRITE_CH1, TARGET_ANALOG_WRITE_CH2, TARGET_ANALOG_READ,
+               TARGET_LUEFT_WRITE, TARGET_LUEFT_READ } mb_target_t;
 
 static mb_state_t  mb_state      = MB_IDLE;
 static mb_target_t active_target = TARGET_MS2_READ;
@@ -51,12 +55,14 @@ static uint32_t     poll_ms       = 0;
 static uint32_t     licht_poll_ms = 0;
 static uint32_t     fan_poll_ms   = 0;
 static uint32_t     analog_poll_ms = 0;
+static uint32_t     lueft_poll_ms  = 0;
 static uint32_t     send_ms       = 0;
 static bool         first_poll    = true;
 
 static bool licht_polling_enabled  = true;
 static bool fan_polling_enabled    = true;
 static bool analog_polling_enabled = true;
+static bool lueft_polling_enabled  = true;
 
 static bool    licht_write_pending = false;
 static uint8_t licht_write_value   = 0;
@@ -69,9 +75,26 @@ static uint16_t analog_ch1_write_value   = 0;
 static bool     analog_ch2_write_pending = false;
 static uint16_t analog_ch2_write_value   = 0;
 
+static bool    lueft_write_pending[RS485_LUEFT_COUNT] = {false, false, false, false};
+static uint8_t lueft_write_value[RS485_LUEFT_COUNT]   = {0, 0, 0, 0};
+static uint8_t lueft_write_ch_active = 0;   // welcher Kanal gerade in Bearbeitung ist
+
 static uint8_t    rx_buf[RX_BUF_SIZE];
 static uint8_t    rx_len       = 0;
 static uint32_t   last_byte_us = 0;
+
+// Selbst-Echo des MAX13487 (RO spiegelt die eigene Sendung auf DI zurueck, RE haengt
+// offenbar fest auf "immer empfangen") wird HIER direkt nach dem Senden aktiv weggeraeumt
+// -- genau das Muster, das in allen Slave-Firmwares (Lichtx4, Lueftermodul, ...) schon
+// funktioniert. Eine inhaltliche Erkennung im Nachhinein (wie zuvor versucht) ist bei FC06
+// nicht zuverlaessig moeglich: die gueltige Bestaetigung ist laut Modbus-Spec selbst ein
+// Echo der Anfrage, also inhaltlich identisch mit dem eigenen Sende-Echo -- beide waeren
+// nicht unterscheidbar, wuerde man sie erst hinterher am Inhalt vergleichen.
+static void drainSelfEcho() {
+    RS485Serial.flush();  // sicherstellen, dass der Frame komplett raus ist
+    delay(1);              // Turnaround-Reserve fuer den Transceiver
+    while (RS485Serial.available()) RS485Serial.read();
+}
 
 static void send_fc03(uint8_t addr, uint16_t start, uint16_t count) {
     uint8_t req[8];
@@ -85,6 +108,7 @@ static void send_fc03(uint8_t addr, uint16_t start, uint16_t count) {
     req[6] = c & 0xFF;
     req[7] = c >> 8;
     RS485Serial.write(req, 8);
+    drainSelfEcho();
     rx_len = 0;
 }
 
@@ -100,6 +124,7 @@ static void send_fc06(uint8_t addr, uint16_t reg, uint16_t value) {
     req[6] = c & 0xFF;
     req[7] = c >> 8;
     RS485Serial.write(req, 8);
+    drainSelfEcho();
     rx_len = 0;
 }
 
@@ -114,7 +139,7 @@ static void parse_ms2_response(const uint8_t* buf, uint8_t len) {
     uint16_t calc = crc16(buf, 3 + byte_count);
     uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler MS2");
+        dbgPrintln("[RS485] CRC-Fehler MS2");
         return;
     }
 
@@ -133,7 +158,7 @@ static void parse_ms2_response(const uint8_t* buf, uint8_t len) {
     ms2.online        = true;
     ms2.last_update_ms = millis();
 
-    Serial.printf("[RS485] MS2: CO2=%u ppm  T=%.1f°C  H=%.1f%%  PPFD=%.1f\n",
+    dbgPrintf("[RS485] MS2: CO2=%u ppm  T=%.1f°C  H=%.1f%%  PPFD=%.1f\n",
                   ms2.co2_ppm, ms2.temp_c, ms2.hum_pct, ms2.ppfd);
 }
 
@@ -147,14 +172,14 @@ static void parse_licht_read(const uint8_t* buf, uint8_t len) {
     uint16_t calc = crc16(buf, 3 + byte_count);
     uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler Licht");
+        dbgPrintln("[RS485] CRC-Fehler Licht");
         return;
     }
 
     licht.mask           = (uint8_t)((uint16_t)buf[3] << 8 | buf[4]);
     licht.online          = true;
     licht.last_update_ms = millis();
-    Serial.printf("[RS485] Licht: Maske=0x%02X\n", licht.mask);
+    dbgPrintf("[RS485] Licht: Maske=0x%02X\n", licht.mask);
 }
 
 static void parse_licht_write_ack(const uint8_t* buf, uint8_t len) {
@@ -165,7 +190,7 @@ static void parse_licht_write_ack(const uint8_t* buf, uint8_t len) {
         uint16_t calc = crc16(buf, 3);
         uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
         if (calc != recv) return;
-        Serial.printf("[RS485] Licht lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
+        dbgPrintf("[RS485] Licht lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
         licht.online = true;  // Geraet antwortet zumindest, nur der Befehl war ungueltig
         return;
     }
@@ -175,13 +200,13 @@ static void parse_licht_write_ack(const uint8_t* buf, uint8_t len) {
     uint16_t calc = crc16(buf, 6);
     uint16_t recv = (uint16_t)buf[7] << 8 | buf[6];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler Licht-ACK");
+        dbgPrintln("[RS485] CRC-Fehler Licht-ACK");
         return;
     }
     licht.mask            = licht_write_value;
     licht.online          = true;
     licht.last_update_ms  = millis();
-    Serial.printf("[RS485] Licht-ACK: Maske=0x%02X bestaetigt\n", licht.mask);
+    dbgPrintf("[RS485] Licht-ACK: Maske=0x%02X bestaetigt\n", licht.mask);
 }
 
 static void parse_fan_read(const uint8_t* buf, uint8_t len) {
@@ -195,7 +220,7 @@ static void parse_fan_read(const uint8_t* buf, uint8_t len) {
     uint16_t calc = crc16(buf, 3 + byte_count);
     uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler Fan");
+        dbgPrintln("[RS485] CRC-Fehler Fan");
         return;
     }
 
@@ -203,7 +228,7 @@ static void parse_fan_read(const uint8_t* buf, uint8_t len) {
     fan.percent         = (uint8_t)((uint16_t)buf[13] << 8 | buf[14]); // letztes Register = Reg17
     fan.online          = true;
     fan.last_update_ms  = millis();
-    Serial.printf("[RS485] Fan: %u%%  %u RPM\n", fan.percent, fan.rpm);
+    dbgPrintf("[RS485] Fan: %u%%  %u RPM\n", fan.percent, fan.rpm);
 }
 
 static void parse_fan_write_ack(const uint8_t* buf, uint8_t len) {
@@ -214,7 +239,7 @@ static void parse_fan_write_ack(const uint8_t* buf, uint8_t len) {
         uint16_t calc = crc16(buf, 3);
         uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
         if (calc != recv) return;
-        Serial.printf("[RS485] Fan lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
+        dbgPrintf("[RS485] Fan lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
         fan.online = true;
         return;
     }
@@ -224,13 +249,13 @@ static void parse_fan_write_ack(const uint8_t* buf, uint8_t len) {
     uint16_t calc = crc16(buf, 6);
     uint16_t recv = (uint16_t)buf[7] << 8 | buf[6];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler Fan-ACK");
+        dbgPrintln("[RS485] CRC-Fehler Fan-ACK");
         return;
     }
     fan.percent         = fan_write_value;
     fan.online          = true;
     fan.last_update_ms  = millis();
-    Serial.printf("[RS485] Fan-ACK: Leistung=%u%% bestaetigt\n", fan.percent);
+    dbgPrintf("[RS485] Fan-ACK: Leistung=%u%% bestaetigt\n", fan.percent);
 }
 
 static void parse_analog_read(const uint8_t* buf, uint8_t len) {
@@ -243,7 +268,7 @@ static void parse_analog_read(const uint8_t* buf, uint8_t len) {
     uint16_t calc = crc16(buf, 3 + byte_count);
     uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler Analog");
+        dbgPrintln("[RS485] CRC-Fehler Analog");
         return;
     }
 
@@ -251,7 +276,7 @@ static void parse_analog_read(const uint8_t* buf, uint8_t len) {
     analog.ch2_raw       = (uint16_t)buf[5] << 8 | buf[6];
     analog.online         = true;
     analog.last_update_ms = millis();
-    Serial.printf("[RS485] Analog: Ch1=%u  Ch2=%u\n", analog.ch1_raw, analog.ch2_raw);
+    dbgPrintf("[RS485] Analog: Ch1=%u  Ch2=%u\n", analog.ch1_raw, analog.ch2_raw);
 }
 
 static void parse_analog_write_ack(const uint8_t* buf, uint8_t len, uint16_t written_value, bool is_ch1) {
@@ -262,7 +287,7 @@ static void parse_analog_write_ack(const uint8_t* buf, uint8_t len, uint16_t wri
         uint16_t calc = crc16(buf, 3);
         uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
         if (calc != recv) return;
-        Serial.printf("[RS485] Analog lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
+        dbgPrintf("[RS485] Analog lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
         analog.online = true;
         return;
     }
@@ -272,14 +297,63 @@ static void parse_analog_write_ack(const uint8_t* buf, uint8_t len, uint16_t wri
     uint16_t calc = crc16(buf, 6);
     uint16_t recv = (uint16_t)buf[7] << 8 | buf[6];
     if (calc != recv) {
-        Serial.println("[RS485] CRC-Fehler Analog-ACK");
+        dbgPrintln("[RS485] CRC-Fehler Analog-ACK");
         return;
     }
     if (is_ch1) analog.ch1_raw = written_value;
     else        analog.ch2_raw = written_value;
     analog.online          = true;
     analog.last_update_ms  = millis();
-    Serial.printf("[RS485] Analog-ACK: %s=%u bestaetigt\n", is_ch1 ? "Ch1" : "Ch2", written_value);
+    dbgPrintf("[RS485] Analog-ACK: %s=%u bestaetigt\n", is_ch1 ? "Ch1" : "Ch2", written_value);
+}
+
+static void parse_lueft_read(const uint8_t* buf, uint8_t len) {
+    // Erwartet: [addr][0x03][byte_count=8][4 × 2 bytes RPM][crc_lo][crc_hi]
+    if (len < 13) return;
+    if (buf[0] != RS485_ADDR_LUEFT || buf[1] != 0x03) return;
+    uint8_t byte_count = buf[2];
+    if (byte_count != RS485_LUEFT_COUNT * 2) return;
+
+    uint16_t calc = crc16(buf, 3 + byte_count);
+    uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
+    if (calc != recv) {
+        dbgPrintln("[RS485] CRC-Fehler Lueftermodul");
+        return;
+    }
+
+    for (int i = 0; i < RS485_LUEFT_COUNT; i++)
+        lueft.rpm[i] = (uint16_t)buf[3 + i * 2] << 8 | buf[4 + i * 2];
+    lueft.online          = true;
+    lueft.last_update_ms  = millis();
+    dbgPrintf("[RS485] Lueftermodul: RPM %u/%u/%u/%u\n",
+                  lueft.rpm[0], lueft.rpm[1], lueft.rpm[2], lueft.rpm[3]);
+}
+
+static void parse_lueft_write_ack(const uint8_t* buf, uint8_t len, uint8_t channel, uint8_t value) {
+    if (len < 5) return;
+    if (buf[0] != RS485_ADDR_LUEFT) return;
+
+    if (buf[1] == 0x86) {  // Exception: FC06 abgelehnt
+        uint16_t calc = crc16(buf, 3);
+        uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
+        if (calc != recv) return;
+        dbgPrintf("[RS485] Lueftermodul lehnt Schreibbefehl ab (Code 0x%02X)\n", buf[2]);
+        lueft.online = true;
+        return;
+    }
+
+    // Normale Antwort: Echo der Anfrage [addr][0x06][reg][value][crc]
+    if (len < 8 || buf[1] != 0x06) return;
+    uint16_t calc = crc16(buf, 6);
+    uint16_t recv = (uint16_t)buf[7] << 8 | buf[6];
+    if (calc != recv) {
+        dbgPrintln("[RS485] CRC-Fehler Lueftermodul-ACK");
+        return;
+    }
+    lueft.percent[channel] = value;
+    lueft.online           = true;
+    lueft.last_update_ms   = millis();
+    dbgPrintf("[RS485] Lueftermodul-ACK: Kanal %u -> %u%% bestaetigt\n", channel + 1, value);
 }
 
 // ========== Public ==========
@@ -288,7 +362,7 @@ void setupRS485() {
     gpio_reset_pin((gpio_num_t)RS485_RO);
     gpio_reset_pin((gpio_num_t)RS485_DI);
     RS485Serial.begin(RS485_BAUD, SERIAL_8N1, RS485_RO, RS485_DI);
-    Serial.printf("RS485 bereit (%d Baud, UART1)\n", RS485_BAUD);
+    dbgPrintf("RS485 bereit (%d Baud, UART1)\n", RS485_BAUD);
 }
 
 void loopRS485() {
@@ -307,6 +381,9 @@ void loopRS485() {
         bool timed_out  = (now - send_ms) > RESPONSE_TIMEOUT_MS;
 
         if (frame_done) {
+            // Kein Selbst-Echo mehr im Puffer -- das wird schon direkt beim Senden aktiv
+            // weggeraeumt (siehe drainSelfEcho()), rx_buf/rx_len enthaelt hier also nur noch
+            // die echte Antwort (falls eine kam).
             switch (active_target) {
                 case TARGET_MS2_READ:    parse_ms2_response(rx_buf, rx_len);     break;
                 case TARGET_LICHT_WRITE: parse_licht_write_ack(rx_buf, rx_len);  break;
@@ -320,28 +397,38 @@ void loopRS485() {
                     parse_analog_write_ack(rx_buf, rx_len, analog_ch2_write_value, false);
                     break;
                 case TARGET_ANALOG_READ: parse_analog_read(rx_buf, rx_len);      break;
+                case TARGET_LUEFT_WRITE:
+                    parse_lueft_write_ack(rx_buf, rx_len, lueft_write_ch_active,
+                                           lueft_write_value[lueft_write_ch_active]);
+                    break;
+                case TARGET_LUEFT_READ:  parse_lueft_read(rx_buf, rx_len);       break;
             }
             rx_len   = 0;
             mb_state = MB_IDLE;
         } else if (timed_out) {
             switch (active_target) {
                 case TARGET_MS2_READ:
-                    Serial.printf("[RS485] MS2 Timeout (rx_len=%d)\n", rx_len);
+                    dbgPrintf("[RS485] MS2 Timeout (rx_len=%d)\n", rx_len);
                     ms2.online = false;
                     break;
                 case TARGET_FAN_WRITE:
                 case TARGET_FAN_READ:
-                    Serial.printf("[RS485] Fan Timeout (rx_len=%d)\n", rx_len);
+                    dbgPrintf("[RS485] Fan Timeout (rx_len=%d)\n", rx_len);
                     fan.online = false;
                     break;
                 case TARGET_ANALOG_WRITE_CH1:
                 case TARGET_ANALOG_WRITE_CH2:
                 case TARGET_ANALOG_READ:
-                    Serial.printf("[RS485] Analog Timeout (rx_len=%d)\n", rx_len);
+                    dbgPrintf("[RS485] Analog Timeout (rx_len=%d)\n", rx_len);
                     analog.online = false;
                     break;
+                case TARGET_LUEFT_WRITE:
+                case TARGET_LUEFT_READ:
+                    dbgPrintf("[RS485] Lueftermodul Timeout (rx_len=%d)\n", rx_len);
+                    lueft.online = false;
+                    break;
                 default:
-                    Serial.printf("[RS485] Licht Timeout (rx_len=%d)\n", rx_len);
+                    dbgPrintf("[RS485] Licht Timeout (rx_len=%d)\n", rx_len);
                     licht.online = false;
                     break;
             }
@@ -354,43 +441,54 @@ void loopRS485() {
         if (licht_write_pending) {
             licht_write_pending = false;
             send_ms             = now;
-            Serial.printf("[RS485] Licht-Maske schreiben: 0x%02X\n", licht_write_value);
+            dbgPrintf("[RS485] Licht-Maske schreiben: 0x%02X\n", licht_write_value);
             send_fc06(RS485_ADDR_LICHT, RS485_REG_MASK, licht_write_value);
             active_target = TARGET_LICHT_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (fan_write_pending) {
             fan_write_pending = false;
             send_ms           = now;
-            Serial.printf("[RS485] Fan-Leistung schreiben: %u%%\n", fan_write_value);
+            dbgPrintf("[RS485] Fan-Leistung schreiben: %u%%\n", fan_write_value);
             send_fc06(RS485_ADDR_FAN, RS485_FAN_REG_PERCENT, fan_write_value);
             active_target = TARGET_FAN_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (analog_ch1_write_pending) {
             analog_ch1_write_pending = false;
             send_ms                  = now;
-            Serial.printf("[RS485] Analog Ch1 schreiben: %u\n", analog_ch1_write_value);
+            dbgPrintf("[RS485] Analog Ch1 schreiben: %u\n", analog_ch1_write_value);
             send_fc06(RS485_ADDR_ANALOG, RS485_REG_ANALOG_CH1, analog_ch1_write_value);
             active_target = TARGET_ANALOG_WRITE_CH1;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (analog_ch2_write_pending) {
             analog_ch2_write_pending = false;
             send_ms                  = now;
-            Serial.printf("[RS485] Analog Ch2 schreiben: %u\n", analog_ch2_write_value);
+            dbgPrintf("[RS485] Analog Ch2 schreiben: %u\n", analog_ch2_write_value);
             send_fc06(RS485_ADDR_ANALOG, RS485_REG_ANALOG_CH2, analog_ch2_write_value);
             active_target = TARGET_ANALOG_WRITE_CH2;
+            mb_state      = MB_WAIT_RESPONSE;
+        } else if (lueft_write_pending[0] || lueft_write_pending[1] ||
+                   lueft_write_pending[2] || lueft_write_pending[3]) {
+            uint8_t ch = 0;
+            for (uint8_t i = 0; i < RS485_LUEFT_COUNT; i++) if (lueft_write_pending[i]) { ch = i; break; }
+            lueft_write_pending[ch] = false;
+            lueft_write_ch_active   = ch;
+            send_ms                 = now;
+            dbgPrintf("[RS485] Lueftermodul Kanal %u schreiben: %u%%\n", ch + 1, lueft_write_value[ch]);
+            send_fc06(RS485_ADDR_LUEFT, RS485_LUEFT_REG_PWM_BASE + ch, lueft_write_value[ch]);
+            active_target = TARGET_LUEFT_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (first_poll || (now - poll_ms) >= POLL_INTERVAL_MS) {
             first_poll = false;
             poll_ms    = now;
             send_ms    = now;
-            Serial.println("[RS485] Poll MS2 (0x20) ...");
+            dbgPrintln("[RS485] Poll MS2 (0x20) ...");
             send_fc03(RS485_ADDR_MS2, 0, RS485_MS2_REGS);
             active_target = TARGET_MS2_READ;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (licht_polling_enabled && (now - licht_poll_ms >= LICHT_POLL_INTERVAL_MS)) {
             licht_poll_ms = now;
             send_ms       = now;
-            Serial.println("[RS485] Poll Licht (0x40) ...");
+            dbgPrintln("[RS485] Poll Licht (0x40) ...");
             send_fc03(RS485_ADDR_LICHT, RS485_REG_MASK, 1);
             active_target = TARGET_LICHT_READ;
             mb_state      = MB_WAIT_RESPONSE;
@@ -403,9 +501,15 @@ void loopRS485() {
         } else if (analog_polling_enabled && (now - analog_poll_ms >= LICHT_POLL_INTERVAL_MS)) {
             analog_poll_ms = now;
             send_ms        = now;
-            Serial.println("[RS485] Poll Analog (0x50) ...");
+            dbgPrintln("[RS485] Poll Analog (0x50) ...");
             send_fc03(RS485_ADDR_ANALOG, RS485_REG_ANALOG_CH1, 2);
             active_target = TARGET_ANALOG_READ;
+            mb_state      = MB_WAIT_RESPONSE;
+        } else if (lueft_polling_enabled && (now - lueft_poll_ms >= FAN_POLL_INTERVAL_MS)) {
+            lueft_poll_ms = now;
+            send_ms       = now;
+            send_fc03(RS485_ADDR_LUEFT, RS485_LUEFT_REG_RPM_BASE, RS485_LUEFT_COUNT);
+            active_target = TARGET_LUEFT_READ;
             mb_state      = MB_WAIT_RESPONSE;
         }
     }
@@ -443,6 +547,16 @@ bool rs485_set_analog_ch2(uint16_t value) {
 
 const Rs485AnalogData& rs485_get_analog() { return analog; }
 
+bool rs485_set_lueft_percent(uint8_t channel, uint8_t percent) {
+    if (channel >= RS485_LUEFT_COUNT) return false;
+    lueft_write_pending[channel] = true;
+    lueft_write_value[channel]   = percent > 100 ? 100 : percent;
+    return true;
+}
+
+const Rs485LueftData& rs485_get_lueft() { return lueft; }
+
 void rs485_set_licht_polling(bool enabled)  { licht_polling_enabled  = enabled; }
 void rs485_set_fan_polling(bool enabled)    { fan_polling_enabled    = enabled; }
 void rs485_set_analog_polling(bool enabled) { analog_polling_enabled = enabled; }
+void rs485_set_lueft_polling(bool enabled)  { lueft_polling_enabled  = enabled; }

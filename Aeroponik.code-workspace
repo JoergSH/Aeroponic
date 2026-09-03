@@ -21,10 +21,20 @@
 			"path": "."
 		},
 		{
-			"path": "../Licht-Meter"
+			"path": "ProtoRS485"
 		},
 		{
-			"path": "ProtoRS485"
+			"path": "Analogmodul"
+		},
+		{
+			"path": "Lueftermodul"
+		},
+		{
+			"name": "test rs485",
+			"path": "../test rs485"
+		},
+		{
+			"path": "Multimodul"
 		}
 	],
 	"settings": {
@@ -35,6 +45,7 @@
 			"Lichtx4": true,
 			"shared": true,
 			".vscode": true
-		}
+		},
+		"stm32cube-ide-clangd.path": "cube"
 	}
 }

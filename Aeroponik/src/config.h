@@ -35,6 +35,21 @@ extern bool USE_ACCESS_POINT;
 #define VENTIL_VORLAUF_DEFAULT_S    3    // Vorlaufzeit Rückleitung in Sekunden
 #define VENTIL_VORLAUF_AKTIV        true // Vorlauf standardmäßig aktiv
 
+// ========== Umwälzpumpe Defaults (Vorratsbehälter-Zirkulation) ==========
+#define UMWAELZ_AKTIV_DEFAULT       false
+#define UMWAELZ_LAUFZEIT_DEFAULT_S      30   // Sekunden pro Lauf-Zyklus
+#define UMWAELZ_PAUSE_DEFAULT_MIN       30   // Minuten Pause zwischen den Zyklen
+
+// ========== Lueftermodul Defaults (Zeltluefter, Arctic PWM, 600-3000 U/min) ==========
+#define LUEFTMODUL_MONITOR_TOL_DEFAULT   30   // % grosszuegige Toleranz um den Erwartungswert
+
+// ========== WhatsApp-Benachrichtigung Defaults (CallMeBot) ==========
+#define NOTIFY_FEUCHTE_MIN_DEFAULT       40   // %rH
+#define NOTIFY_FEUCHTE_MAX_DEFAULT       80   // %rH
+#define NOTIFY_TEMPERATUR_MIN_DEFAULT    15   // °C
+#define NOTIFY_TEMPERATUR_MAX_DEFAULT    32   // °C
+#define NOTIFY_TANK_MIN_PROZENT_DEFAULT  15   // %
+
 // ========== EEPROM Konfiguration ==========
 // Adressen:
 //  0–3:   Magic Number (Ventilkonfig)
@@ -56,9 +71,21 @@ extern bool USE_ACCESS_POINT;
 //  177–186: DwcTimerConfig (bis zu 10 Bytes)
 //  187:    Ventil-"Gleiche Zeiten" Magic Byte
 //  188:    Ventil-"Gleiche Zeiten" Wert (1 Byte)
-//  189:    Zeltlüfter Magic Byte
-//  190:    Zeltlüfter Wert (1 Byte)
-#define EEPROM_SIZE             192
+//  189–190: frei (ehemals Zeltlüfter, entfallen mit dem SMD-Board)
+//  191:    Gehäuselüfter Magic Byte
+//  192–195: GehaeuseFanConfig (4 Bytes)
+//  196:    DS18B20-Rollenzuordnung Magic Byte
+//  197–223: Ds18b20Config (27 Bytes)
+//  224:    Ventil-Dunkelphase Magic Byte (Werte selbst in den Behälter-Reserve-Bytes 3/4)
+//  225:    Umwälzpumpe Magic Byte
+//  226–228: UmwaelzConfig (3 Bytes: aktiv + laufzeit_s + pausenzeit_min)
+//  229:    frei
+//  230:    WhatsApp-Benachrichtigung Magic Byte
+//  231–275: NotifyConfig (45 Bytes: global_enabled + phone[20] + apikey[12] + 6 Alarm-
+//           Aktivierungen [inkl. Lueftermodul] + je min/max fuer Feuchte/Temperatur/Tank)
+//  276:    Lueftermodul (Zeltluefter) Magic Byte
+//  277–284: LueftmodulConfig (8 Bytes)
+#define EEPROM_SIZE             290
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
 #define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter
@@ -99,10 +126,48 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_VENTIL_GLEICH_MAGIC_BYTE 0x5C
 #define EEPROM_VENTIL_GLEICH_ADDR       188
 
-// Zeltluefter: einfacher manueller An/Aus-Schalter (PCF8574 P5), Zustand persistiert
-#define EEPROM_ZELTLUEFTER_MAGIC_ADDR   189
-#define EEPROM_ZELTLUEFTER_MAGIC_BYTE   0x7E
-#define EEPROM_ZELTLUEFTER_ADDR         190
+// Ventile: Dunkelphase-Zeiten je Behaelter (oeffnungszeit_s_dunkel/pausenzeit_min_dunkel)
+// -- liegen in den ohnehin reservierten Bytes 3/4 jedes 5-Byte-Behaelter-Blocks (siehe
+// EEPROM_BEHAELTER_BASE), aber mit eigenem Magic-Byte, damit bei Bestandsinstallationen
+// nicht versehentlich Alt-Reserve-Bytes als Zeiten interpretiert werden.
+#define EEPROM_VENTIL_DUNKEL_MAGIC_ADDR 224
+#define EEPROM_VENTIL_DUNKEL_MAGIC_BYTE 0x6F
+
+// Umwälzpumpe (Vorratsbehälter-Zirkulation): automatischer Lauf-/Pausenzyklus, aktiv sobald
+// irgendein Behälter aktiviert ist (siehe loopVentile() in valves.cpp). Ersetzt den
+// fruexeren rein manuellen Zeltlüfter-Schalter auf demselben GPIO (siehe pinout.h) — eigener
+// Adressbereich in bisher ungenutzten Reserve-Bytes, damit alte Zeltlüfter-Werte nicht
+// versehentlich als neue Konfiguration gelesen werden.
+#define EEPROM_UMWAELZ_MAGIC_ADDR       225
+#define EEPROM_UMWAELZ_MAGIC_BYTE       0x2F
+#define EEPROM_UMWAELZ_BASE             226   // 3 Bytes: aktiv + laufzeit_s + pausenzeit_min
+
+// WhatsApp-Benachrichtigungen (CallMeBot) — Zugangsdaten + generelle und je Alarmtyp
+// einzeln abschaltbare Aktivierung, siehe notify.h. Magic-Byte geaendert (0x9A -> 0x9B), da
+// mit dem Lueftermodul-Alarm ein weiteres Aktivierungs-Bit dazugekommen ist.
+#define EEPROM_NOTIFY_MAGIC_ADDR        230
+#define EEPROM_NOTIFY_MAGIC_BYTE        0x9B
+#define EEPROM_NOTIFY_BASE              231   // 45 Bytes, siehe NotifyConfig in notify.h
+
+// Lueftermodul (Zeltluefter, RS485-Adresse 0x51): PWM-Sollwerte + Drehzahlueberwachung,
+// siehe lueftmodul.h.
+#define EEPROM_LUEFTMODUL_MAGIC_ADDR    276
+#define EEPROM_LUEFTMODUL_MAGIC_BYTE    0x5E
+#define EEPROM_LUEFTMODUL_BASE          277   // 8 Bytes, siehe LueftmodulConfig in lueftmodul.h
+
+// Gehaeuseluefter-Config: eigener Magic-Bereich. Magic-Byte geaendert (0x4D -> 0x51), da
+// min_speed mit dem Wechsel von PWM auf reines An/Aus entfallen ist (dieser Lueftertyp
+// kommt mit PWM-Drosselung nicht klar).
+#define EEPROM_GEHFAN_MAGIC_ADDR        191
+#define EEPROM_GEHFAN_MAGIC_BYTE        0x51
+#define EEPROM_GEHFAN_BASE              192   // 3 Bytes (enabled, temp_min, temp_max)
+
+// DS18B20-Rollenzuordnung (Vorrat/Pflanze/Innentemperatur) ueber ROM-Adresse statt
+// Bus-Scan-Reihenfolge. Solange eine Rolle nicht zugewiesen ist,
+// faellt main.cpp auf die alte Index-Reihenfolge zurueck (0/1/2).
+#define EEPROM_DS18B20_MAGIC_ADDR       196
+#define EEPROM_DS18B20_MAGIC_BYTE       0x2C
+#define EEPROM_DS18B20_BASE             197   // 27 Bytes: 3x (1 Byte "gesetzt" + 8 Byte Adresse)
 
 // ========== Lichtsteuerung Scheduler Defaults ==========
 #define SCHED_DEFAULT_NODE        1

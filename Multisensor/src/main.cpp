@@ -303,7 +303,7 @@ void loop() {
                 };
                 rs485_slave_update(d.co2_ppm, d.temperature_cdeg, d.humidity_cpct,
                                    d.ppfd_dppfd, ch, d.as7341_gain,
-                                   !scd41_has_error(), true);
+                                   !scd41_has_error(), sensor_manager_as7341_ok());
             }
             break;
 

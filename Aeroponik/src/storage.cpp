@@ -1,5 +1,6 @@
 #include "storage.h"
 #include "pinout.h"
+#include "dbg.h"
 #include <SD.h>
 #include <SPI.h>
 
@@ -7,12 +8,12 @@ static bool sdOk = false;
 
 bool storage_init(SPIClass &spi) {
     if (!SD.begin(SPI_CS_SD, spi)) {
-        Serial.println("[SD] Nicht gefunden");
+        dbgPrintln("[SD] Nicht gefunden");
         sdOk = false;
         return false;
     }
     uint64_t mb = (uint64_t)SD.cardSize() / (1024ULL * 1024ULL);
-    Serial.printf("[SD] OK — %llu MB (Typ %d)\n", mb, (int)SD.cardType());
+    dbgPrintf("[SD] OK — %llu MB (Typ %d)\n", mb, (int)SD.cardType());
     sdOk = true;
     return true;
 }
@@ -49,7 +50,7 @@ void storage_log(time_t ts, const LogEntry &e) {
 
     File f = SD.open(filename, FILE_APPEND);
     if (!f) {
-        Serial.printf("[SD] Öffnen fehlgeschlagen: %s\n", filename);
+        dbgPrintf("[SD] Öffnen fehlgeschlagen: %s\n", filename);
         return;
     }
     if (isNew) {
@@ -91,7 +92,9 @@ void storage_list_logs(void (*cb)(const char *name, size_t size, void *ctx), voi
         if (!file.isDirectory()) {
             String name = file.name();
             if (name.startsWith("/")) name = name.substring(1);
-            if (name.endsWith(".csv")) cb(name.c_str(), file.size(), ctx);
+            // .txt: Debug-Aufzeichnungen (siehe dbg.h) landen im selben Ordner und werden
+            // hier mit aufgelistet, damit dieselbe Download-UI genutzt werden kann.
+            if (name.endsWith(".csv") || name.endsWith(".txt")) cb(name.c_str(), file.size(), ctx);
         }
         file = root.openNextFile();
     }

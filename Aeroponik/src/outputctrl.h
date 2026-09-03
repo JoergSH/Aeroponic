@@ -8,9 +8,11 @@
 // welches Geraet Schreibbefehle bekommt (main.cpp), als auch welches RS485-Geraet
 // ueberhaupt gepollt wird (rs485.cpp), siehe rs485_set_licht_polling() etc.
 #define FAN_OUTPUT_MARS       0   // MARS Hydro Luefter, RS485-Adresse 6
-#define FAN_OUTPUT_ANALOG     1   // Analog-Modul Kanal 1 (0-10V)
+#define FAN_OUTPUT_ANALOG     1   // RS485-Analog-Modul Kanal 1 (0-10V)
+#define FAN_OUTPUT_GP8403     2   // GP8403 I2C-DAC Kanal 0 (0-10V)
 #define LIGHT_OUTPUT_LICHTX4  0   // Lichtx4, RS485-Adresse 0x40 (4x Relais-Stufen)
-#define LIGHT_OUTPUT_ANALOG   1   // Analog-Modul Kanal 2 (0-10V, stufenlos)
+#define LIGHT_OUTPUT_ANALOG   1   // RS485-Analog-Modul Kanal 2 (0-10V, stufenlos)
+#define LIGHT_OUTPUT_GP8403   2   // GP8403 I2C-DAC Kanal 1 (0-10V, stufenlos)
 
 struct OutputConfig {
     uint8_t fan_output;    // FAN_OUTPUT_*

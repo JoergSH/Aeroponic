@@ -4,10 +4,16 @@
 #include <Arduino.h>
 
 // ========== Konfiguration pro Behälter ==========
+// Öffnungszeit/Pausenzeit gelten für die Lichtphase; für die Dunkelphase (siehe
+// schedLichtIstAn() in scheduler.h) gibt es ein eigenes, kürzer/länger einstellbares
+// Zeitpaar — siehe LPA_Betriebsprotokoll.md Punkt 2/3 (Sprühintervalle hängen vom
+// Lichtstatus ab, z. B. seltener/kürzer sprühen wenn die Lampen aus sind).
 struct BehaelterConfig {
-  uint8_t  oeffnungszeit_s;   // Düsenventil offen (Sekunden)
-  uint8_t  pausenzeit_min;    // Wartezeit bis nächster Zyklus (Minuten)
-  bool     aktiv;             // Behälter aktiv
+  uint8_t  oeffnungszeit_s;         // Düsenventil offen (Sekunden) — Lichtphase
+  uint8_t  pausenzeit_min;          // Wartezeit bis nächster Zyklus (Minuten) — Lichtphase
+  bool     aktiv;                   // Behälter aktiv
+  uint8_t  oeffnungszeit_s_dunkel;  // wie oeffnungszeit_s, aber während der Dunkelphase
+  uint8_t  pausenzeit_min_dunkel;   // wie pausenzeit_min, aber während der Dunkelphase
 };
 
 // ========== Gesamte Ventilkonfiguration ==========
@@ -35,7 +41,9 @@ extern BehaelterZustand behaelterZustand[3];
 
 // Funktionen
 void setupVentile();
-void loopVentile();
+// lichtAn: aktueller Lichtstatus (siehe schedLichtIstAn() in scheduler.h) — bestimmt, ob
+// die Licht- oder die Dunkelphase-Zeiten je Behälter verwendet werden.
+void loopVentile(bool lichtAn);
 void saveVentilConfig();
 void loadVentilConfig();
 
@@ -51,15 +59,29 @@ bool        ventilRueckOffen();
 // Pumpe: automatisch an, sobald irgendein Behälter gerade aktiv wässert (Ventil offen).
 bool pumpeAktiv();
 
-// Zeltlüfter: einfacher manueller An/Aus-Schalter (kein Zusammenhang mit den Ventilen),
-// Zustand wird im EEPROM gespeichert und beim Boot wiederhergestellt.
-bool zeltLuefterAktiv();
-void zeltLuefterSetzen(bool an);
+// ========== Umwälzpumpe (Vorratsbehälter-Zirkulation) ==========
+// Läuft automatisch im konfigurierbaren Lauf-/Pausenzyklus, sobald irgendein Behälter
+// aktiviert ist (Konfig-Haken) — unabhängig davon, ob dieser gerade tatsächlich wässert
+// oder nur zwischen zwei Zyklen pausiert. Ist kein Behälter aktiviert, bleibt sie aus —
+// siehe loopVentile().
+struct UmwaelzConfig {
+  bool     aktiv;           // Automatik ein/aus
+  uint8_t  laufzeit_s;      // Laufzeit pro Zyklus (Sekunden)
+  uint8_t  pausenzeit_min;  // Pause zwischen den Zyklen (Minuten)
+};
+extern UmwaelzConfig umwaelzConfig;
+bool umwaelzpumpeAktiv();   // aktueller Ausgangszustand (an/aus)
+void saveUmwaelzConfig();
+void loadUmwaelzConfig();
 
-// PCF8574 Direkttest (pausiert automatische Ventilsteuerung)
-void    pcf_test_mode(bool enable);
-void    pcf_test_set(uint8_t pin, bool on);
-bool    pcf_test_active();
-uint8_t pcf_get_state();
+// Ausgangs-Direkttest (pausiert automatische Ventil-/Pumpensteuerung) zur
+// Verkabelungspruefung. Index 0-3 = Ventil 1-4 (Behälter 1-3 + Rücklauf),
+// 4 = Umwälzpumpe, 5 = Pumpe — siehe OUTPUT_TEST_COUNT/output_test_name().
+#define OUTPUT_TEST_COUNT 6
+void        output_test_mode(bool enable);
+void        output_test_set(uint8_t index, bool on);
+bool        output_test_active();
+uint8_t     output_test_get_state();   // Bitmaske, Bit i = Ausgang i an/aus
+const char* output_test_name(uint8_t index);
 
 #endif

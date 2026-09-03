@@ -17,6 +17,9 @@ compile_commands.json
 # 3D-Druck-STL-Dateien: zu groß fürs GitHub-LFS-Freikontingent, wird woanders veröffentlicht
 STL/
 
+# Interne Notizen (Kalkulation, PCB-Fotos, Grow-Protokoll) — nicht für öffentliches Repo
+DokuEtc/
+
 # OS
 .DS_Store
 Thumbs.db

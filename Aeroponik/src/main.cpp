@@ -11,6 +11,8 @@
 #include <EEPROM.h>
 #include <Update.h>
 #include <esp_wifi.h>
+#include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Wire.h>
@@ -27,9 +29,15 @@
 #include "storage.h"
 #include "co2ctrl.h"
 #include "dwcctrl.h"
+#include "ds18b20cfg.h"
+#include "gehaeusefan.h"
 #include "fanctrl.h"
 #include "wifictrl.h"
 #include "outputctrl.h"
+#include "gp8403.h"
+#include "notify.h"
+#include "lueftmodul.h"
+#include "dbg.h"
 #include "espnow/espnow_master.h"
 
 // HSPI (SPI3) für W5500 + SD: GPIO-Matrix erzwingt korrekte MOSI=13/MISO=11 Richtungen
@@ -43,14 +51,14 @@ OneWire           oneWire(DS18B20_PIN);
 DallasTemperature sensors(&oneWire);
 float tempVorrat  = -127.0;
 float tempPflanze = -127.0;
+float tempInnen   = -127.0;  // Innentemperatur der Steuerung (DS18B20 Index 2)
 
 // DS18B20-Konvertierung läuft nicht-blockierend (setWaitForConversion(false) in setup())
 static bool     tempConversionPending = false;
 static uint32_t tempConversionStartMs = 0;
 static uint16_t tempConversionDelayMs = 750;  // wird in setup() aus sensors.millisToWaitForConversion(12) gesetzt
 
-// AHT21B (2. I2C-Bus, GPIO3/46 — siehe pinout.h)
-static TwoWire        I2CBus2(1);
+// AHT21B (am Haupt-I2C-Bus, Wire — siehe pinout.h)
 static Adafruit_AHTX0 aht21;
 static bool           aht21Ok   = false;
 static float          aht21Temp = NAN;
@@ -71,10 +79,43 @@ RTC_DS3231 rtc;
 bool rtcOK = false;
 unsigned long lastNtpSync = 0;
 unsigned long lastRtcRetryMs = 0;
+// Aktueller Lichtstatus fuer die licht-/dunkelphasenabhaengige Bewaesserung — Fallback ohne
+// RTC ist true (Lichtphase-Werte, entspricht dem Verhalten vor dieser Funktion).
+bool lichtAnCached = true;
+#define WDT_TIMEOUT_S 30  // Watchdog-Timeout: haengt loop() laenger als das, Reset-Ausloeser
 #define RTC_RETRY_INTERVAL_MS 30000UL  // Falls rtc.begin() beim Boot einmal fehlschlaegt
                                         // (z.B. I2C-Timing-Race mit SD/W5500-Init), hier
                                         // periodisch erneut versuchen statt bis zum naechsten
                                         // manuellen Reset auf rtcOK=false stehen zu bleiben.
+
+// Grund des letzten Neustarts (siehe setup()) — hilft nachtraeglich zu erkennen, ob ein
+// Ausfall ein Watchdog-Reset (haengender loop()), ein Absturz (Panic), ein Spannungseinbruch
+// (Brownout) oder ein normaler Neustart/Stromausfall war, auch ohne live angeschlossenen
+// seriellen Monitor im Moment des Ausfalls.
+static String bootResetReasonText;
+
+static const char* resetReasonToText(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "Power-On";
+        case ESP_RST_EXT:       return "Extern (Reset-Pin)";
+        case ESP_RST_SW:        return "Software (Neustart-Knopf/Update)";
+        case ESP_RST_PANIC:     return "Absturz (Panic)";
+        case ESP_RST_INT_WDT:   return "Interner Watchdog";
+        case ESP_RST_TASK_WDT:  return "Task-Watchdog (loop() haengengeblieben)";
+        case ESP_RST_WDT:       return "Sonstiger Watchdog";
+        case ESP_RST_BROWNOUT:  return "Spannungseinbruch (Brownout)";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "Unbekannt";
+    }
+}
+
+// Netzspannungsueberwachung (GPIO38, siehe pinout.h): HIGH = Netz vorhanden, LOW = USV-
+// Betrieb. Kurz entprellt, damit ein einzelner Messstoerer nicht sofort als Netzausfall
+// gilt. Reine Statusanzeige — eine Benachrichtigung bei Ausfall folgt spaeter (WhatsApp).
+bool netzOk = true;
+static bool     netzOkRaw       = true;
+static uint32_t netzOkChangedMs = 0;
+#define NETZ_OK_DEBOUNCE_MS 2000UL
 
 // Forward-Deklaration
 void syncRtcMitNtp();
@@ -116,7 +157,7 @@ static void w5500_force_phy_100fd() {
     BUS.transfer(0xD8); // RST=1 → PHY-Reset zum Übernehmen der Config
     digitalWrite(SPI_CS_W5500, HIGH);
     BUS.endTransaction();
-    Serial.println("[ETH] PHYCFGR: 100BT Full-Duplex erzwungen");
+    dbgPrintln("[ETH] PHYCFGR: 100BT Full-Duplex erzwungen");
 }
 
 static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
@@ -125,11 +166,11 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
             ETH.setHostname("aeroponik");
             break;
         case ARDUINO_EVENT_ETH_CONNECTED:
-            Serial.println("[ETH] Kabel verbunden");
+            dbgPrintln("[ETH] Kabel verbunden");
             ethJustConnected = true;
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
-            Serial.printf("[ETH] IP: %s  %dMbps  %s-duplex\n",
+            dbgPrintf("[ETH] IP: %s  %dMbps  %s-duplex\n",
                           ETH.localIP().toString().c_str(),
                           ETH.linkSpeed(),
                           ETH.fullDuplex() ? "Full" : "Half");
@@ -137,7 +178,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
             syncRtcMitNtp();  // NTP bevorzugt über LAN
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
-            Serial.println("[ETH] Kabel getrennt");
+            dbgPrintln("[ETH] Kabel getrennt");
             ethConnected = false;
             break;
         default: break;
@@ -208,6 +249,7 @@ struct NodeData {
     uint16_t pwm_ch2;
     bool     has_air;
     bool     has_light;
+    bool     light_sensor_ok = true;  // false = AS7341 am Multisensor-Node fehlt/defekt
     bool     has_relays;
     bool     has_pwm;
     uint32_t last_update_ms;
@@ -248,6 +290,10 @@ void onEspNowSensor(uint8_t node_id, uint8_t /*node_type*/, const uint8_t* paylo
     } else if (sensor_type == 0x02 && len >= 3) {
         d.ppfd      = (uint16_t)((payload[1] << 8) | payload[2]) / 10.0f;
         d.has_light = true;
+        // Byte 3 = AS7341-Gain-Index (0-10 gueltig); der Multisensor-Node sendet hier
+        // 0xFF, wenn der Sensor beim Boot nicht gefunden wurde/defekt ist (kein Fake-PPFD
+        // mehr, siehe as7341_handler.cpp) — dann sind ppfd/Kanaele nicht aussagekraeftig.
+        d.light_sensor_ok = !(len >= 4 && payload[3] == 0xFF);
         if (len >= 12) {
             for (int j = 0; j < 8; j++) d.spektrum[j] = payload[4 + j];
             d.has_sensor_channels = true;
@@ -288,6 +334,11 @@ void handleApiRs485() {
         ms2["hum"]   = serialized(String(d.hum_pct, 1));
         ms2["ppfd"]  = serialized(String(d.ppfd,    1));
         ms2["status"] = d.status;
+        // Status-Byte (siehe RS485_REG_STATUS im Multisensor): Bit0=SCD41 ok, Bit1=AS7341 ok.
+        // Kein Fake mehr bei fehlendem AS7341 (siehe as7341_handler.cpp) — stattdessen hier
+        // explizit als "nicht ok" markiert, damit das Webinterface das anzeigen kann.
+        ms2["co2_sensor_ok"]   = (d.status & 0x01) != 0;
+        ms2["light_sensor_ok"] = (d.status & 0x02) != 0;
         JsonArray ch = ms2["channels"].to<JsonArray>();
         for (int i = 0; i < 8; i++) ch.add(d.channels[i]);
     }
@@ -343,20 +394,25 @@ void handleApiLogsDelete() {
     server.send(ok ? 200 : 404, "application/json", ok ? "{\"success\":true}" : "{\"success\":false}");
 }
 
-void handleApiPcfTest() {
+void handleApiOutputTest() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     JsonDocument doc;
     deserializeJson(doc, server.arg("plain"));
     if (doc["testmode"].is<bool>()) {
-        pcf_test_mode(doc["testmode"]);
-    } else if (doc["pin"].is<int>() && doc["on"].is<bool>()) {
-        if (!pcf_test_active()) { server.send(400, "application/json", "{\"error\":\"Testmodus nicht aktiv\"}"); return; }
-        pcf_test_set((uint8_t)(int)doc["pin"], (bool)doc["on"]);
+        output_test_mode(doc["testmode"]);
+    } else if (doc["index"].is<int>() && doc["on"].is<bool>()) {
+        if (!output_test_active()) { server.send(400, "application/json", "{\"error\":\"Testmodus nicht aktiv\"}"); return; }
+        output_test_set((uint8_t)(int)doc["index"], (bool)doc["on"]);
     }
-    char resp[50];
-    snprintf(resp, sizeof(resp), "{\"success\":true,\"state\":%d,\"testmode\":%s}",
-             pcf_get_state(), pcf_test_active() ? "true" : "false");
-    server.send(200, "application/json", resp);
+    JsonDocument resp;
+    resp["success"]  = true;
+    resp["state"]    = output_test_get_state();
+    resp["testmode"] = output_test_active();
+    JsonArray names = resp["names"].to<JsonArray>();
+    for (uint8_t i = 0; i < OUTPUT_TEST_COUNT; i++) names.add(output_test_name(i));
+    String response;
+    serializeJson(resp, response);
+    server.send(200, "application/json", response);
 }
 
 void handleRoot() {
@@ -372,6 +428,8 @@ void handleApiData() {
     doc["aht21Temp"] = serialized(String(aht21Temp, 1));
     doc["aht21Hum"]  = serialized(String(aht21Hum,  1));
   }
+  doc["netzOk"]            = netzOk;
+  doc["lastResetReason"]   = bootResetReasonText;
   doc["druckBar"]          = serialized(String(druckBar, 2));
   doc["distanzMM"]         = distanzMM;
   doc["wasserHoeheMM"]     = wasserHoeheMM;
@@ -433,8 +491,10 @@ void handleApiEspNow() {
                 n["humidity"]    = serialized(String(nodeData[i].humidity,    2));
                 n["co2"]         = nodeData[i].co2;
             }
-            if (nodeData[i].has_light)
+            if (nodeData[i].has_light) {
                 n["ppfd"] = serialized(String(nodeData[i].ppfd, 1));
+                n["light_sensor_ok"] = nodeData[i].light_sensor_ok;
+            }
             if (nodeData[i].has_sensor_channels) {
                 JsonArray sp = n["spektrum"].to<JsonArray>();
                 for (int j = 0; j < 8; j++) sp.add(nodeData[i].spektrum[j]);
@@ -596,8 +656,10 @@ void handleApiVentilStatus() {
     JsonObject b = doc["behaelter"][i].to<JsonObject>();
     b["zustand"]        = ventilZustandText(behaelterZustand[i].zustand);
     b["aktiv"]          = ventilConfig.behaelter[i].aktiv;
-    b["oeffnungszeit_s"] = ventilConfig.behaelter[i].oeffnungszeit_s;
-    b["pausenzeit_min"]  = ventilConfig.behaelter[i].pausenzeit_min;
+    b["oeffnungszeit_s"]        = ventilConfig.behaelter[i].oeffnungszeit_s;
+    b["pausenzeit_min"]         = ventilConfig.behaelter[i].pausenzeit_min;
+    b["oeffnungszeit_s_dunkel"] = ventilConfig.behaelter[i].oeffnungszeit_s_dunkel;
+    b["pausenzeit_min_dunkel"]  = ventilConfig.behaelter[i].pausenzeit_min_dunkel;
     unsigned long vergangen = (millis() - behaelterZustand[i].timerStart) / 1000;
     b["timer_s"]        = vergangen;
   }
@@ -606,17 +668,32 @@ void handleApiVentilStatus() {
   doc["gleiche_zeiten"]     = ventilConfig.gleiche_zeiten;
   doc["rueck_offen"]        = ventilRueckOffen();
   doc["pumpe_aktiv"]        = pumpeAktiv();
-  doc["zeltluefter_aktiv"]  = zeltLuefterAktiv();
+  doc["umwaelzpumpe_aktiv"] = umwaelzpumpeAktiv();
+  doc["licht_an"]           = lichtAnCached;
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
 }
 
-void handleApiZeltluefterSave() {
+void handleApiUmwaelzGet() {
+  JsonDocument doc;
+  doc["aktiv"]          = umwaelzConfig.aktiv;
+  doc["laufzeit_s"]      = umwaelzConfig.laufzeit_s;
+  doc["pausenzeit_min"]  = umwaelzConfig.pausenzeit_min;
+  doc["laeuft"]          = umwaelzpumpeAktiv();
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleApiUmwaelzSave() {
   if (server.method() != HTTP_POST) { server.send(405); return; }
   JsonDocument doc;
   deserializeJson(doc, server.arg("plain"));
-  if (doc["an"].is<bool>()) zeltLuefterSetzen(doc["an"]);
+  if (doc["aktiv"].is<bool>())          umwaelzConfig.aktiv          = doc["aktiv"];
+  if (doc["laufzeit_s"].is<int>())      umwaelzConfig.laufzeit_s     = constrain((int)doc["laufzeit_s"],     1, 255);
+  if (doc["pausenzeit_min"].is<int>())  umwaelzConfig.pausenzeit_min = constrain((int)doc["pausenzeit_min"], 1, 255);
+  saveUmwaelzConfig();
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -635,6 +712,10 @@ void handleApiVentilConfig() {
       ventilConfig.behaelter[i].oeffnungszeit_s = constrain((int)doc["behaelter"][i]["oeffnungszeit_s"], 1, 60);
     if (doc["behaelter"][i]["pausenzeit_min"].is<int>())
       ventilConfig.behaelter[i].pausenzeit_min  = constrain((int)doc["behaelter"][i]["pausenzeit_min"], 1, 60);
+    if (doc["behaelter"][i]["oeffnungszeit_s_dunkel"].is<int>())
+      ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = constrain((int)doc["behaelter"][i]["oeffnungszeit_s_dunkel"], 1, 60);
+    if (doc["behaelter"][i]["pausenzeit_min_dunkel"].is<int>())
+      ventilConfig.behaelter[i].pausenzeit_min_dunkel  = constrain((int)doc["behaelter"][i]["pausenzeit_min_dunkel"], 1, 60);
     if (doc["behaelter"][i]["aktiv"].is<bool>())
       ventilConfig.behaelter[i].aktiv = doc["behaelter"][i]["aktiv"];
   }
@@ -649,8 +730,10 @@ void handleApiVentilConfig() {
   // massgebliche Quelle (das Frontend zeigt dann ohnehin nur noch ein gemeinsames Feld).
   if (ventilConfig.gleiche_zeiten) {
     for (int i = 1; i < 3; i++) {
-      ventilConfig.behaelter[i].oeffnungszeit_s = ventilConfig.behaelter[0].oeffnungszeit_s;
-      ventilConfig.behaelter[i].pausenzeit_min  = ventilConfig.behaelter[0].pausenzeit_min;
+      ventilConfig.behaelter[i].oeffnungszeit_s        = ventilConfig.behaelter[0].oeffnungszeit_s;
+      ventilConfig.behaelter[i].pausenzeit_min         = ventilConfig.behaelter[0].pausenzeit_min;
+      ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = ventilConfig.behaelter[0].oeffnungszeit_s_dunkel;
+      ventilConfig.behaelter[i].pausenzeit_min_dunkel  = ventilConfig.behaelter[0].pausenzeit_min_dunkel;
     }
   }
 
@@ -669,7 +752,7 @@ void syncRtcMitNtp() {
 
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 3000)) {
-    Serial.println("NTP: kein Signal");
+    dbgPrintln("NTP: kein Signal");
     return;
   }
 
@@ -683,9 +766,9 @@ void syncRtcMitNtp() {
 
   if (abweichung > NTP_MAX_ABWEICHUNG) {
     rtc.adjust(ntpLokal);
-    Serial.printf("RTC gestellt (Abweichung: %ld s)\n", abweichung);
+    dbgPrintf("RTC gestellt (Abweichung: %ld s)\n", abweichung);
   } else {
-    Serial.printf("RTC OK (Abweichung: %ld s)\n", abweichung);
+    dbgPrintf("RTC OK (Abweichung: %ld s)\n", abweichung);
   }
   lastNtpSync = millis();
 }
@@ -701,7 +784,7 @@ void handleOTAUpdate() {
   HTTPUpload& upload = server.upload();
 
   if (upload.status == UPLOAD_FILE_START) {
-    Serial.printf("OTA Start: %s\n", upload.filename.c_str());
+    dbgPrintf("OTA Start: %s\n", upload.filename.c_str());
     otaInProgress = true;
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Update.printError(Serial);
@@ -712,7 +795,7 @@ void handleOTAUpdate() {
     }
   } else if (upload.status == UPLOAD_FILE_END) {
     if (Update.end(true)) {
-      Serial.printf("OTA OK: %u bytes\n", upload.totalSize);
+      dbgPrintf("OTA OK: %u bytes\n", upload.totalSize);
       delay(2000);
       ESP.restart();
     } else {
@@ -736,14 +819,14 @@ void handleNodeOtaUpload() {
         if (!ota_buf)
             ota_buf = (uint8_t*)heap_caps_malloc(OTA_BUF_MAX, MALLOC_CAP_SPIRAM);
         ota_buf_len = 0;
-        Serial.printf("[NODE-OTA] Upload Start fuer Node %d\n", ota_buf_node);
+        dbgPrintf("[NODE-OTA] Upload Start fuer Node %d\n", ota_buf_node);
     } else if (u.status == UPLOAD_FILE_WRITE) {
         if (ota_buf && ota_buf_len + u.currentSize <= OTA_BUF_MAX) {
             memcpy(ota_buf + ota_buf_len, u.buf, u.currentSize);
             ota_buf_len += u.currentSize;
         }
     } else if (u.status == UPLOAD_FILE_END) {
-        Serial.printf("[NODE-OTA] Upload fertig: %u Bytes\n", (unsigned)ota_buf_len);
+        dbgPrintf("[NODE-OTA] Upload fertig: %u Bytes\n", (unsigned)ota_buf_len);
     }
 }
 
@@ -775,7 +858,7 @@ void handleNodeOtaFlash() {
     WiFi.softAP(OTA_AP_SSID, ota_ap_pass);
     ota_ap_active = true;
     ota_ap_start  = millis();
-    Serial.printf("[NODE-OTA] AP '%s' gestartet  Pass=%s  IP=%s\n",
+    dbgPrintf("[NODE-OTA] AP '%s' gestartet  Pass=%s  IP=%s\n",
                   OTA_AP_SSID, ota_ap_pass, WiFi.softAPIP().toString().c_str());
     bool ok = espnow_trigger_ota(node_id, ota_ap_pass);
     char resp[80];
@@ -789,7 +872,7 @@ void handleNodeOtaBin() {
         server.send(404, "text/plain", "kein Firmware");
         return;
     }
-    Serial.printf("[NODE-OTA] Sende %u Bytes\n", (unsigned)ota_buf_len);
+    dbgPrintf("[NODE-OTA] Sende %u Bytes\n", (unsigned)ota_buf_len);
     server.setContentLength(ota_buf_len);
     server.send(200, "application/octet-stream", "");
     WiFiClient client = server.client();
@@ -801,7 +884,7 @@ void handleNodeOtaBin() {
         if (w == 0) break;
         sent += w;
     }
-    Serial.printf("[NODE-OTA] Gesendet: %u Bytes\n", (unsigned)sent);
+    dbgPrintf("[NODE-OTA] Gesendet: %u Bytes\n", (unsigned)sent);
 }
 
 // ========== Scheduler Loop ==========
@@ -814,20 +897,25 @@ void loopScheduler() {
     sched_force_check = false;
     last_check = millis();
 
+    // Analogmodul und GP8403 sind beide stufenlose 0-10V-Ausgaenge — nur das Schreibziel
+    // unterscheidet sich. Lichtx4 dagegen bekommt eine gestufte Relais-Maske.
+    bool lichtStufenlos = (outputConfig.light_output == LIGHT_OUTPUT_ANALOG ||
+                           outputConfig.light_output == LIGHT_OUTPUT_GP8403);
+
     uint8_t pct;
     if (schedConfig.enabled) {
         if (!rtcOK) return;  // Rampe braucht die Uhrzeit, manuelle Vorgabe unten nicht
         DateTime now = rtc.now();
         uint16_t now_min = now.hour() * 60 + now.minute();
-        pct = (outputConfig.light_output == LIGHT_OUTPUT_ANALOG)
+        pct = lichtStufenlos
             ? schedComputeBrightnessPercent(now_min)
             : 0;  // im Lichtx4-Zweig unten direkt ueber schedComputeRelayMask() bestimmt
-        if (outputConfig.light_output != LIGHT_OUTPUT_ANALOG) {
+        if (!lichtStufenlos) {
             uint8_t mask = schedComputeRelayMask(now_min);
             if (mask != last_mask) {
                 rs485_set_licht_mask(mask);
                 last_mask = mask;
-                Serial.printf("[Sched] Licht-Maske=0x%02X (%d SSRs an)\n",
+                dbgPrintf("[Sched] Licht-Maske=0x%02X (%d SSRs an)\n",
                               mask, __builtin_popcount(mask));
             }
             return;
@@ -837,7 +925,7 @@ void loopScheduler() {
         // von der Uhrzeit/RTC. Bei Lichtx4 wird dieselbe Stufen-Quantisierung wie im
         // Zeitplan verwendet, damit sich "50%" konsistent auf die Kanalzahl abbildet.
         pct = schedConfig.manual_percent;
-        if (outputConfig.light_output != LIGHT_OUTPUT_ANALOG) {
+        if (!lichtStufenlos) {
             uint8_t n = schedConfig.num_ssr;
             if (n == 0 || n > 4) n = 4;
             uint8_t active = (uint8_t)ceilf(pct / 100.0f * n);
@@ -846,7 +934,7 @@ void loopScheduler() {
             if (mask != last_mask) {
                 rs485_set_licht_mask(mask);
                 last_mask = mask;
-                Serial.printf("[Sched] Licht-Maske (manuell)=0x%02X (%d SSRs an)\n",
+                dbgPrintf("[Sched] Licht-Maske (manuell)=0x%02X (%d SSRs an)\n",
                               mask, __builtin_popcount(mask));
             }
             return;
@@ -854,10 +942,13 @@ void loopScheduler() {
     }
 
     if (pct != last_percent) {
-        rs485_set_analog_ch2((uint16_t)roundf(pct / 100.0f * 4095));
+        uint16_t raw = (uint16_t)roundf(pct / 100.0f * 4095);
+        const char* out;
+        if (outputConfig.light_output == LIGHT_OUTPUT_GP8403) { gp8403_set_channel(1, raw); out = "GP8403"; }
+        else                                                  { rs485_set_analog_ch2(raw);  out = "Analog"; }
         last_percent = pct;
-        Serial.printf("[Sched] Licht-Helligkeit (%s)=%u%%\n",
-                      schedConfig.enabled ? "Analog" : "manuell, Analog", pct);
+        dbgPrintf("[Sched] Licht-Helligkeit (%s%s)=%u%%\n",
+                      schedConfig.enabled ? "" : "manuell, ", out, pct);
     }
 }
 
@@ -887,7 +978,7 @@ void loopCo2Ctrl() {
     uint8_t want = co2OutputOn ? (mask | (1 << bit)) : (mask & ~(1 << bit));
     if (want != mask) {
         if (espnow_send_relay_mask(co2Config.target_node_id, want))
-            Serial.printf("[CO2] Node %d Bit %d -> %s (CO2=%u ppm)\n",
+            dbgPrintf("[CO2] Node %d Bit %d -> %s (CO2=%u ppm)\n",
                           co2Config.target_node_id, bit, co2OutputOn ? "EIN" : "AUS", ms2.co2_ppm);
     }
 }
@@ -953,7 +1044,7 @@ void loopDwcCtrl() {
     uint8_t want = dwcOutputOn ? (mask | (1 << bit)) : (mask & ~(1 << bit));
     if (want != mask) {
         if (espnow_send_relay_mask(dwcConfig.target_node_id, want))
-            Serial.printf("[DWC] Node %d Bit %d -> %s (%02u:%02u)\n",
+            dbgPrintf("[DWC] Node %d Bit %d -> %s (%02u:%02u)\n",
                           dwcConfig.target_node_id, bit, dwcOutputOn ? "EIN" : "AUS",
                           now.hour(), now.minute());
     }
@@ -988,6 +1079,342 @@ void handleApiDwcSave() {
     server.send(200, "application/json", "{\"success\":true}");
 }
 
+// ========== Gehaeuseluefter (An/Aus mit Hysterese ueber Innen-DS18B20) ==========
+// Kein PWM — dieser Luefter kommt mit Drosselung nicht klar, daher reines Schalten mit
+// Hysterese (an ab temp_max, aus ab/unter temp_min), damit er nicht dauernd taktet.
+static bool gehaeuseFanOn = false;  // aktueller Ist-Zustand fuer die Statusanzeige
+
+void loopGehaeuseFan() {
+    static uint32_t last_check = 0;
+    if (millis() - last_check < 5000) return;
+    last_check = millis();
+
+    if (!gehaeuseFanConfig.enabled || tempInnen < -100) {
+        gehaeuseFanOn = false;
+    } else if (tempInnen >= gehaeuseFanConfig.temp_max) {
+        gehaeuseFanOn = true;
+    } else if (tempInnen <= gehaeuseFanConfig.temp_min) {
+        gehaeuseFanOn = false;
+    }
+    // dazwischen: gehaeuseFanOn unveraendert lassen (Hysterese)
+
+    digitalWrite(GEHAEUSE_FAN_PIN, gehaeuseFanOn ? HIGH : LOW);
+}
+
+void handleApiGehaeuseGet() {
+    JsonDocument doc;
+    doc["sensor_available"] = (tempInnen > -100);
+    if (tempInnen > -100) doc["temp_innen"] = serialized(String(tempInnen, 1));
+    doc["fan_available"] = true;
+    doc["enabled"]    = gehaeuseFanConfig.enabled;
+    doc["temp_min"]   = gehaeuseFanConfig.temp_min;
+    doc["temp_max"]   = gehaeuseFanConfig.temp_max;
+    doc["on"]         = gehaeuseFanOn;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiGehaeuseSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>())   gehaeuseFanConfig.enabled   = doc["enabled"];
+    if (doc["temp_min"].is<int>())   gehaeuseFanConfig.temp_min  = constrain((int)doc["temp_min"],  0, 80);
+    if (doc["temp_max"].is<int>())   gehaeuseFanConfig.temp_max  = constrain((int)doc["temp_max"],  0, 80);
+    saveGehaeuseFanConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== Lueftermodul (Zeltluefter, RS485 0x51, siehe lueftmodul.h) ==========
+// Schreibt die Sollwerte nur bei Aenderung auf den Bus (kein staendiges Neuschreiben
+// derselben Werte). Die Drehzahlueberwachung selbst laeuft in loopNotify().
+static uint8_t lueftLastSent[RS485_LUEFT_COUNT] = {0xFF, 0xFF, 0xFF, 0xFF};  // erzwingt Erstsync
+
+void loopLueftmodul() {
+    static uint32_t lastCheck = 0;
+    if (millis() - lastCheck < 2000) return;
+    lastCheck = millis();
+
+    for (uint8_t i = 0; i < RS485_LUEFT_COUNT; i++) {
+        uint8_t target = lueftmodulConfig.enabled
+            ? (lueftmodulConfig.gleiche_werte ? lueftmodulConfig.percent[0] : lueftmodulConfig.percent[i])
+            : 0;
+        if (target != lueftLastSent[i]) {
+            rs485_set_lueft_percent(i, target);
+            lueftLastSent[i] = target;
+        }
+    }
+}
+
+void handleApiLueftmodulGet() {
+    JsonDocument doc;
+    doc["enabled"]         = lueftmodulConfig.enabled;
+    doc["gleiche_werte"]   = lueftmodulConfig.gleiche_werte;
+    JsonArray pct = doc["percent"].to<JsonArray>();
+    for (uint8_t i = 0; i < RS485_LUEFT_COUNT; i++) pct.add(lueftmodulConfig.percent[i]);
+    doc["monitor_enabled"]  = lueftmodulConfig.monitor_enabled;
+    doc["monitor_tol_pct"]  = lueftmodulConfig.monitor_tol_pct;
+
+    const Rs485LueftData& lft = rs485_get_lueft();
+    doc["online"] = lft.online;
+    if (lft.online) {
+        JsonArray rpm = doc["rpm"].to<JsonArray>();
+        for (uint8_t i = 0; i < RS485_LUEFT_COUNT; i++) rpm.add(lft.rpm[i]);
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiLueftmodulSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>())        lueftmodulConfig.enabled       = doc["enabled"];
+    if (doc["gleiche_werte"].is<bool>())  lueftmodulConfig.gleiche_werte = doc["gleiche_werte"];
+    if (doc["percent"].is<JsonArray>()) {
+        JsonArray pct = doc["percent"].as<JsonArray>();
+        for (uint8_t i = 0; i < RS485_LUEFT_COUNT && i < pct.size(); i++) {
+            int v = pct[i].as<int>();
+            lueftmodulConfig.percent[i] = (uint8_t)constrain(v, 0, 100);
+        }
+    }
+    if (doc["monitor_enabled"].is<bool>())  lueftmodulConfig.monitor_enabled  = doc["monitor_enabled"];
+    if (doc["monitor_tol_pct"].is<int>())   lueftmodulConfig.monitor_tol_pct  = constrain((int)doc["monitor_tol_pct"], 5, 100);
+    saveLueftmodulConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== WhatsApp-Benachrichtigungen (CallMeBot, siehe notify.h) ==========
+// Zustandswechsel-basiert: sendet eine Nachricht, sobald ein Alarm neu auftritt, danach in
+// festem Abstand eine Erinnerung solange er anhaelt, und eine Entwarnung sobald er sich
+// wieder loest. sendWhatsApp() selbst hat zusaetzlich ein knappes Rate-Limit (siehe notify.cpp).
+#define NOTIFY_REMINDER_MS (30UL * 60000UL)   // Erinnerung alle 30 Minuten, solange ein Alarm aktiv bleibt
+
+struct NotifyAlertState { bool aktiv = false; unsigned long lastSentMs = 0; };
+static NotifyAlertState alertNetz, alertSensor, alertFeuchte, alertTemperatur, alertTank, alertLueft;
+
+static void checkAlert(NotifyAlertState& st, bool enabled, bool problemNow, const String& onMsg, const String& offMsg) {
+    if (!notifyConfig.global_enabled || !enabled) { st.aktiv = false; return; }
+    unsigned long now = millis();
+    if (problemNow) {
+        if (!st.aktiv || (now - st.lastSentMs >= NOTIFY_REMINDER_MS)) {
+            st.aktiv      = true;
+            st.lastSentMs = now;
+            sendWhatsApp(onMsg);
+        }
+    } else if (st.aktiv) {
+        st.aktiv = false;
+        sendWhatsApp(offMsg);
+    }
+}
+
+void loopNotify() {
+    static uint32_t lastCheck = 0;
+    if (millis() - lastCheck < 10000) return;  // Alarme sind nicht zeitkritisch, alle 10s reicht
+    lastCheck = millis();
+
+    checkAlert(alertNetz, notifyConfig.netzausfall_enabled, !netzOk,
+               "🔌 Netzausfall! Die Steuerung läuft auf USV-Betrieb.",
+               "✅ Netzspannung wieder vorhanden.");
+
+    String sensorProblem = "";
+    if (!aht21Ok)             sensorProblem += "AHT21 (Zelt-Klima)\n";
+    if (!rtcOK)               sensorProblem += "RTC (Uhrzeit)\n";
+    if (tempVorrat  <= -100)  sensorProblem += "DS18B20 Vorrat\n";
+    if (tempPflanze <= -100)  sensorProblem += "DS18B20 Pflanze\n";
+    {
+        const Rs485SensorData& ms2 = rs485_get_ms2();
+        if (ms2.online && !(ms2.status & 0x01)) sensorProblem += "Multisensor CO2 (SCD41)\n";
+        if (ms2.online && !(ms2.status & 0x02)) sensorProblem += "Multisensor Licht (AS7341)\n";
+    }
+    checkAlert(alertSensor, notifyConfig.sensorausfall_enabled, sensorProblem.length() > 0,
+               "⚠️ Sensor-Ausfall:\n" + sensorProblem,
+               "✅ Alle Sensoren wieder erreichbar.");
+
+    const Rs485SensorData& ms2 = rs485_get_ms2();
+    if (ms2.online) {
+        char fmsg[100];
+        snprintf(fmsg, sizeof(fmsg), "💧 Luftfeuchte außerhalb des Bereichs: %.0f%% (Soll %d–%d%%)",
+                 ms2.hum_pct, notifyConfig.feuchte_min, notifyConfig.feuchte_max);
+        checkAlert(alertFeuchte, notifyConfig.feuchte_enabled,
+                   ms2.hum_pct < notifyConfig.feuchte_min || ms2.hum_pct > notifyConfig.feuchte_max,
+                   fmsg, "✅ Luftfeuchte wieder im Normalbereich.");
+
+        char tmsg[100];
+        snprintf(tmsg, sizeof(tmsg), "🌡️ Temperatur außerhalb des Bereichs: %.1f°C (Soll %d–%d°C)",
+                 ms2.temp_c, notifyConfig.temperatur_min, notifyConfig.temperatur_max);
+        checkAlert(alertTemperatur, notifyConfig.temperatur_enabled,
+                   ms2.temp_c < notifyConfig.temperatur_min || ms2.temp_c > notifyConfig.temperatur_max,
+                   tmsg, "✅ Temperatur wieder im Normalbereich.");
+    }
+
+    if (distanzMM > 0) {  // erst nach der ersten gueltigen Ultraschall-Messung bewerten
+        char tkmsg[100];
+        snprintf(tkmsg, sizeof(tkmsg), "🪣 Vorratsbehälter fast leer: %d%% (Grenze %d%%)",
+                 fuellstandProzent, notifyConfig.tank_min_prozent);
+        checkAlert(alertTank, notifyConfig.tank_enabled, fuellstandProzent < notifyConfig.tank_min_prozent,
+                   tkmsg, "✅ Vorratsbehälter wieder ausreichend gefüllt.");
+    }
+
+    if (lueftmodulConfig.enabled && lueftmodulConfig.monitor_enabled) {
+        const Rs485LueftData& lft = rs485_get_lueft();
+        if (lft.online) {
+            String lueftProblem = "";
+            for (uint8_t i = 0; i < RS485_LUEFT_COUNT; i++) {
+                uint8_t  target   = lueftmodulConfig.gleiche_werte ? lueftmodulConfig.percent[0] : lueftmodulConfig.percent[i];
+                uint16_t expected = lueftmodulErwarteteRpm(target);
+                uint16_t tol      = (uint16_t)((uint32_t)expected * lueftmodulConfig.monitor_tol_pct / 100);
+                if (tol < 200) tol = 200;  // grosszuegige Mindesttoleranz, auch nahe 0 U/min
+                int diff = (int)lft.rpm[i] - (int)expected;
+                if (diff < 0) diff = -diff;
+                if (diff > tol) {
+                    char line[64];
+                    snprintf(line, sizeof(line), "Kanal %u: %u U/min (erwartet ~%u)\n", i + 1, lft.rpm[i], expected);
+                    lueftProblem += line;
+                }
+            }
+            checkAlert(alertLueft, notifyConfig.lueftmodul_enabled, lueftProblem.length() > 0,
+                       "🌀 Zeltlüfter-Drehzahl auffällig:\n" + lueftProblem,
+                       "✅ Zeltlüfter-Drehzahl wieder im Normalbereich.");
+        }
+    }
+}
+
+void handleApiNotifyGet() {
+    JsonDocument doc;
+    doc["global_enabled"]       = notifyConfig.global_enabled;
+    doc["phone"]                = notifyConfig.phone;
+    doc["has_apikey"]           = strlen(notifyConfig.apikey) > 0;
+    doc["netzausfall_enabled"]  = notifyConfig.netzausfall_enabled;
+    doc["sensorausfall_enabled"] = notifyConfig.sensorausfall_enabled;
+    doc["feuchte_enabled"]      = notifyConfig.feuchte_enabled;
+    doc["feuchte_min"]          = notifyConfig.feuchte_min;
+    doc["feuchte_max"]          = notifyConfig.feuchte_max;
+    doc["temperatur_enabled"]   = notifyConfig.temperatur_enabled;
+    doc["temperatur_min"]       = notifyConfig.temperatur_min;
+    doc["temperatur_max"]       = notifyConfig.temperatur_max;
+    doc["tank_enabled"]         = notifyConfig.tank_enabled;
+    doc["tank_min_prozent"]     = notifyConfig.tank_min_prozent;
+    doc["lueftmodul_enabled"]   = notifyConfig.lueftmodul_enabled;
+    doc["ms2_online"]           = rs485_get_ms2().online;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiNotifySave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["global_enabled"].is<bool>())        notifyConfig.global_enabled       = doc["global_enabled"];
+    if (doc["phone"].is<const char*>()) {
+        strncpy(notifyConfig.phone, doc["phone"] | "", sizeof(notifyConfig.phone) - 1);
+        notifyConfig.phone[sizeof(notifyConfig.phone) - 1] = '\0';
+    }
+    // API-Key nur ueberschreiben, wenn einer mitgeschickt wurde (leer = vorhandenen behalten)
+    const char* apikey = doc["apikey"] | "";
+    if (strlen(apikey) > 0) {
+        strncpy(notifyConfig.apikey, apikey, sizeof(notifyConfig.apikey) - 1);
+        notifyConfig.apikey[sizeof(notifyConfig.apikey) - 1] = '\0';
+    }
+    if (doc["netzausfall_enabled"].is<bool>())   notifyConfig.netzausfall_enabled   = doc["netzausfall_enabled"];
+    if (doc["sensorausfall_enabled"].is<bool>()) notifyConfig.sensorausfall_enabled = doc["sensorausfall_enabled"];
+    if (doc["feuchte_enabled"].is<bool>())       notifyConfig.feuchte_enabled       = doc["feuchte_enabled"];
+    if (doc["feuchte_min"].is<int>())            notifyConfig.feuchte_min           = constrain((int)doc["feuchte_min"], 0, 100);
+    if (doc["feuchte_max"].is<int>())            notifyConfig.feuchte_max           = constrain((int)doc["feuchte_max"], 0, 100);
+    if (doc["temperatur_enabled"].is<bool>())    notifyConfig.temperatur_enabled    = doc["temperatur_enabled"];
+    if (doc["temperatur_min"].is<int>())         notifyConfig.temperatur_min        = constrain((int)doc["temperatur_min"], 0, 80);
+    if (doc["temperatur_max"].is<int>())         notifyConfig.temperatur_max        = constrain((int)doc["temperatur_max"], 0, 80);
+    if (doc["tank_enabled"].is<bool>())          notifyConfig.tank_enabled          = doc["tank_enabled"];
+    if (doc["tank_min_prozent"].is<int>())       notifyConfig.tank_min_prozent      = constrain((int)doc["tank_min_prozent"], 0, 100);
+    if (doc["lueftmodul_enabled"].is<bool>())    notifyConfig.lueftmodul_enabled    = doc["lueftmodul_enabled"];
+    saveNotifyConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiNotifyTest() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    sendWhatsApp("✅ Testnachricht vom Grow Center — WhatsApp-Benachrichtigung funktioniert!");
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== DS18B20 API (Rollenzuordnung ueber ROM-Adresse statt Bus-Index) ==========
+
+static String ds18b20AddrToHex(const uint8_t* addr) {
+    char buf[17];
+    for (int i = 0; i < 8; i++) snprintf(buf + i * 2, 3, "%02X", addr[i]);
+    return String(buf);
+}
+
+static bool ds18b20HexToAddr(const String& hex, uint8_t* addr) {
+    if (hex.length() != 16) return false;
+    for (int i = 0; i < 8; i++) {
+        char byteStr[3] = { hex[i * 2], hex[i * 2 + 1], '\0' };
+        addr[i] = (uint8_t)strtol(byteStr, nullptr, 16);
+    }
+    return true;
+}
+
+// Listet alle am 1-Wire-Bus gefundenen Sensoren mit Adresse, aktuellem Messwert (zum
+// Identifizieren — Sensor anfassen/erwaermen und beobachten, welcher sich aendert) und
+// ggf. bereits zugewiesener Rolle.
+void handleApiDs18b20Scan() {
+    JsonDocument doc;
+    uint8_t count = sensors.getDeviceCount();
+    JsonArray arr = doc["devices"].to<JsonArray>();
+    for (uint8_t i = 0; i < count; i++) {
+        DeviceAddress addr;
+        if (!sensors.getAddress(addr, i)) continue;
+        JsonObject o = arr.add<JsonObject>();
+        o["addr"] = ds18b20AddrToHex(addr);
+        float t = sensors.getTempC(addr);
+        if (t > -100) o["temp"] = serialized(String(t, 1));
+        if (ds18b20Config.vorrat_set && memcmp(addr, ds18b20Config.vorrat_addr, 8) == 0)
+            o["role"] = "vorrat";
+        else if (ds18b20Config.pflanze_set && memcmp(addr, ds18b20Config.pflanze_addr, 8) == 0)
+            o["role"] = "pflanze";
+        else if (ds18b20Config.innen_set && memcmp(addr, ds18b20Config.innen_addr, 8) == 0)
+            o["role"] = "innen";
+    }
+    doc["count"] = count;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiDs18b20Assign() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+
+    if (!doc["role"].is<const char*>()) { server.send(400, "application/json", "{\"success\":false}"); return; }
+    String role  = (const char*)doc["role"];
+    bool   clear = doc["clear"].is<bool>() ? (bool)doc["clear"] : false;
+
+    bool*    setFlag;
+    uint8_t* addrBuf;
+    if      (role == "vorrat")  { setFlag = &ds18b20Config.vorrat_set;  addrBuf = ds18b20Config.vorrat_addr; }
+    else if (role == "pflanze") { setFlag = &ds18b20Config.pflanze_set; addrBuf = ds18b20Config.pflanze_addr; }
+    else if (role == "innen")   { setFlag = &ds18b20Config.innen_set;   addrBuf = ds18b20Config.innen_addr; }
+    else { server.send(400, "application/json", "{\"success\":false}"); return; }
+
+    if (clear || !doc["addr"].is<const char*>()) {
+        *setFlag = false;
+    } else {
+        uint8_t addr[8];
+        if (!ds18b20HexToAddr(String((const char*)doc["addr"]), addr)) {
+            server.send(400, "application/json", "{\"success\":false}");
+            return;
+        }
+        memcpy(addrBuf, addr, 8);
+        *setFlag = true;
+    }
+    saveDs18b20Config();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
 // ========== Abluftluefter-Steuerung (MARS Hydro, RS485-Adresse 6) ==========
 // Manuell: fester %-Wert. Automodi: linearer Ramp zwischen Mindestdrehzahl (bei/unter Min)
 // und 100% (bei/ueber Max), Quelle Luftfeuchte bzw. Temperatur vom RS485-Multisensor (MS2).
@@ -999,6 +1426,10 @@ static uint8_t fanRampPercent(float value, uint8_t minVal, uint8_t maxVal, uint8
     t = constrain(t, 0.0f, 1.0f);
     return minSpeed + (uint8_t)roundf(t * (100 - minSpeed));
 }
+
+// Zuletzt berechnete Luefter-Ziel-Leistung (fuer Statusanzeige bei Ausgaengen ohne
+// Ruecklesewert wie GP8403). -1 = noch kein Wert.
+static int gFanTargetPct = -1;
 
 void loopFanCtrl() {
     if (!fanConfig.enabled) return;
@@ -1032,14 +1463,21 @@ void loopFanCtrl() {
         }
     }
 
+    gFanTargetPct = target;
     if (target != last_sent) {
-        bool sent = (outputConfig.fan_output == FAN_OUTPUT_ANALOG)
-            ? rs485_set_analog_ch1((uint16_t)roundf(target / 100.0f * 4095))
-            : rs485_set_fan_percent(target);
+        uint16_t raw = (uint16_t)roundf(target / 100.0f * 4095);
+        bool sent;
+        const char* out;
+        if (outputConfig.fan_output == FAN_OUTPUT_GP8403) {
+            sent = gp8403_set_channel(0, raw);  out = "GP8403";
+        } else if (outputConfig.fan_output == FAN_OUTPUT_ANALOG) {
+            sent = rs485_set_analog_ch1(raw);   out = "Analog";
+        } else {
+            sent = rs485_set_fan_percent(target); out = "MARS";
+        }
         if (sent) {
             last_sent = target;
-            Serial.printf("[Fan] Ziel-Leistung=%u%% (Modus=%d, Ausgang=%s)\n", target, fanConfig.mode,
-                          outputConfig.fan_output == FAN_OUTPUT_ANALOG ? "Analog" : "MARS");
+            dbgPrintf("[Fan] Ziel-Leistung=%u%% (Modus=%d, Ausgang=%s)\n", target, fanConfig.mode, out);
         }
     }
 }
@@ -1064,7 +1502,11 @@ void handleApiFanGet() {
     // Status/Ist-Werte kommen vom tatsaechlich aktiven Ausgang — beim jeweils anderen
     // Geraet ist das Pollen ja bewusst abgeschaltet (siehe outputctrl.h) und wuerde immer
     // "offline" liefern.
-    if (outputConfig.fan_output == FAN_OUTPUT_ANALOG) {
+    if (outputConfig.fan_output == FAN_OUTPUT_GP8403) {
+        // GP8403 hat keinen Ruecklesewert — Online = letzter I2C-ACK, Prozent = Sollwert.
+        doc["online"] = gp8403_online();
+        if (gFanTargetPct >= 0) doc["percent"] = gFanTargetPct;
+    } else if (outputConfig.fan_output == FAN_OUTPUT_ANALOG) {
         const Rs485AnalogData& analog = rs485_get_analog();
         doc["online"] = analog.online;
         if (analog.online) doc["percent"] = (int)roundf(analog.ch1_raw / 4095.0f * 100.0f);
@@ -1121,6 +1563,7 @@ void handleApiOutputGet() {
         doc["analog_ch1_raw"] = a.ch1_raw;
         doc["analog_ch2_raw"] = a.ch2_raw;
     }
+    doc["gp8403_online"] = gp8403_online();
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -1130,17 +1573,43 @@ void handleApiOutputSave() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     JsonDocument doc;
     deserializeJson(doc, server.arg("plain"));
-    if (doc["fan_output"].is<int>())   outputConfig.fan_output   = constrain((int)doc["fan_output"],   0, 1);
-    if (doc["light_output"].is<int>()) outputConfig.light_output = constrain((int)doc["light_output"], 0, 1);
+    if (doc["fan_output"].is<int>())   outputConfig.fan_output   = constrain((int)doc["fan_output"],   0, 2);
+    if (doc["light_output"].is<int>()) outputConfig.light_output = constrain((int)doc["light_output"], 0, 2);
     saveOutputConfig();
     applyOutputPollingFlags();
     server.send(200, "application/json", "{\"success\":true}");
 }
 
-// ========== WLAN-Konfiguration ==========
+// ========== System ==========
 
 static bool wifiRestartPending = false;
 static uint32_t wifiRestartAtMs = 0;
+
+// Manueller Neustart-Knopf (Konfigurationsseite) — nutzt denselben verzoegerten Restart wie
+// die WLAN-Speicherung, damit die HTTP-Antwort noch beim Browser ankommt bevor der ESP32
+// tatsaechlich neu startet.
+void handleApiSystemRestart() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    server.send(200, "application/json", "{\"success\":true,\"restarting\":true}");
+    wifiRestartPending = true;
+    wifiRestartAtMs = millis() + 1500;
+}
+
+// Serielle Debug-Aufzeichnung (siehe dbg.h): schreibt fuer 60s alle Serial-Ausgaben
+// zusaetzlich in eine Datei auf der SD-Karte, abrufbar ueber die bestehende
+// Log-Download-UI (Konfiguration -> Daten-Log). Fuers Debuggen ohne Live-Monitor,
+// z.B. wenn das Board schon fest verbaut ist.
+void handleApiDebugCapture() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (!storage_is_ok()) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"keine SD-Karte\"}");
+        return;
+    }
+    dbgStartCapture(60000);
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== WLAN-Konfiguration ==========
 
 void handleApiWifiGet() {
     JsonDocument doc;
@@ -1179,36 +1648,45 @@ void handleApiWifiSave() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n\nESP32 Aeroponik");
+  dbgPrintln("\n\nESP32 Aeroponik");
+
+  bootResetReasonText = resetReasonToText(esp_reset_reason());
+  dbgPrintf("Letzter Neustart: %s\n", bootResetReasonText.c_str());
 
   EEPROM.begin(EEPROM_SIZE);
 
-  // I2C + RTC + Ventile so frueh wie moeglich, VOR SPI/Ethernet/SD/WiFi: der PCF8574AP
-  // (Magnetventile) hat keinen definierten Power-on-Reset-Zustand und liegt bis zum ersten
-  // I2C-Schreibbefehl auf HIGH — je frueher pcf_write(0x00) laeuft, desto kuerzer dieser
-  // ungewollte Zustand. Vorher konnte das durch SPI/ETH/SD-Init und vor allem den bis zu
-  // 30s langen WiFi-Verbindungsversuch mehrere Sekunden dauern.
+  // I2C + RTC + Ventile so frueh wie moeglich, VOR SPI/Ethernet/SD/WiFi: die Ventil-/Pumpen-/
+  // Umwälzpumpen-GPIO haben bis zum ersten pinMode()/digitalWrite() einen undefinierten
+  // Power-on-Zustand — je frueher setupVentile() laeuft, desto kuerzer dieser ungewollte
+  // Zustand. Vorher konnte das durch SPI/ETH/SD-Init und vor allem den bis zu 30s langen
+  // WiFi-Verbindungsversuch mehrere Sekunden dauern.
   Wire.begin(I2C_SDA, I2C_SCL);
   if (rtc.begin()) {
     rtcOK = true;
     if (rtc.lostPower()) {
-      Serial.println("RTC: Strom weg gewesen — Uhrzeit prüfen!");
+      dbgPrintln("RTC: Strom weg gewesen — Uhrzeit prüfen!");
     } else {
       DateTime now = rtc.now();
-      Serial.printf("RTC: %02d.%02d.%04d %02d:%02d:%02d\n",
+      dbgPrintf("RTC: %02d.%02d.%04d %02d:%02d:%02d\n",
                     now.day(), now.month(), now.year(),
                     now.hour(), now.minute(), now.second());
     }
   } else {
-    Serial.println("DS1307 nicht gefunden!");
+    dbgPrintln("DS1307 nicht gefunden!");
   }
   setupVentile();
+
+  gp8403_init();  // I2C-DAC (Haupt-Bus) auf 0-10V setzen — falls nicht verbaut, NACKt es nur
 
   loadTankConfig();
   loadScheduleConfig();
   loadCo2Config();
   loadDwcConfig();
+  loadDs18b20Config();
+  loadGehaeuseFanConfig();
   loadFanConfig();
+  loadLueftmodulConfig();
+  loadNotifyConfig();
   loadWifiConfig();
   loadOutputConfig();
   applyOutputPollingFlags();
@@ -1222,31 +1700,31 @@ void setup() {
   ethPresent = w5500_present();
   if (ethPresent) {
     ETH.begin(ETH_PHY_W5500, 1, SPI_CS_W5500, WSINT, -1, BUS);
-    Serial.println("[ETH] W5500 erkannt, Ethernet wird initialisiert");
+    dbgPrintln("[ETH] W5500 erkannt, Ethernet wird initialisiert");
   } else {
-    Serial.println("[ETH] W5500 nicht gefunden — Ethernet uebersprungen (kein LAN-Modul verbaut?)");
+    dbgPrintln("[ETH] W5500 nicht gefunden — Ethernet uebersprungen (kein LAN-Modul verbaut?)");
   }
 
   // MicroSD (gleicher physischer Bus, anderer CS)
   storage_init(BUS);
 
-  // I2C Bus 2 + AHT21B
-  I2CBus2.begin(I2C2_SDA, I2C2_SCL);
-  aht21Ok = aht21.begin(&I2CBus2);
+  // AHT21B haengt am Haupt-I2C-Bus (Wire), zusammen mit RTC (und optional GP8403).
+  TwoWire& ahtBus = Wire;
+  aht21Ok = aht21.begin(&ahtBus);
   if (aht21Ok) {
     // Adafruit_AHTX0 nutzt CMD_CALIBRATE=0xE1 (AHT10-Befehl), AHT20/AHT21(B)
     // erwarten stattdessen 0xBE — bekannter Library-Bug (siehe
     // github.com/adafruit/Adafruit_CircuitPython_AHTx0 Issue #17). Mit dem
     // korrekten Befehl nachkalibrieren, sonst kann z.B. der Feuchtekanal
     // falsche/gesaettigte Werte liefern, obwohl die Temperatur stimmt.
-    I2CBus2.beginTransmission(AHTX0_I2CADDR_DEFAULT);
-    I2CBus2.write(0xBE);
-    I2CBus2.write(0x08);
-    I2CBus2.write(0x00);
-    I2CBus2.endTransmission();
+    ahtBus.beginTransmission(AHTX0_I2CADDR_DEFAULT);
+    ahtBus.write(0xBE);
+    ahtBus.write(0x08);
+    ahtBus.write(0x00);
+    ahtBus.endTransmission();
     while (aht21.getStatus() & AHTX0_STATUS_BUSY) delay(10);
   }
-  Serial.println(aht21Ok ? "AHT21B gefunden" : "AHT21B nicht gefunden!");
+  dbgPrintln(aht21Ok ? "AHT21B gefunden" : "AHT21B nicht gefunden!");
 
   // WiFi
   bool startFallbackAP = USE_ACCESS_POINT;
@@ -1254,7 +1732,7 @@ void setup() {
     if (strlen(wifiConfig.ssid) == 0) {
       // Kein WLAN konfiguriert (Erststart) — direkt in den Fallback-AP,
       // ohne erst 30s auf eine leere SSID zu warten.
-      Serial.println("Kein WLAN konfiguriert, starte Fallback-AP");
+      dbgPrintln("Kein WLAN konfiguriert, starte Fallback-AP");
       startFallbackAP = true;
     } else {
       WiFi.persistent(false);
@@ -1270,17 +1748,17 @@ void setup() {
       int attempts = 0;
       while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(1000);
-        Serial.print(".");
+        dbgPrint(".");
         attempts++;
       }
       if (WiFi.status() == WL_CONNECTED) {
         esp_wifi_set_ps(WIFI_PS_NONE);  // nach Verbindung: Power-Saving aus (sonst ESP-NOW Broadcasts verpasst)
         wifi_mode_t mode; esp_wifi_get_mode(&mode);
         uint8_t ch = 0; wifi_second_chan_t sec; esp_wifi_get_channel(&ch, &sec);
-        Serial.printf("\nWiFi verbunden: %s  Mode=%d  Kanal=%d\n",
+        dbgPrintf("\nWiFi verbunden: %s  Mode=%d  Kanal=%d\n",
                       WiFi.localIP().toString().c_str(), (int)mode, ch);
       } else {
-        Serial.println("\nWiFi Fehler, Fallback AP");
+        dbgPrintln("\nWiFi Fehler, Fallback AP");
         startFallbackAP = true;
       }
     }
@@ -1295,7 +1773,7 @@ void setup() {
     delay(300);
     bool apCfgOk = WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
     bool apOk    = WiFi.softAP(AP_SSID, AP_PASSWORD, ESPNOW_DEFAULT_CHANNEL);
-    Serial.printf("AP: %s  Kanal %d  (Config=%s, Start=%s)\n",
+    dbgPrintf("AP: %s  Kanal %d  (Config=%s, Start=%s)\n",
                   WiFi.softAPIP().toString().c_str(), ESPNOW_DEFAULT_CHANNEL,
                   apCfgOk ? "OK" : "FEHLER", apOk ? "OK" : "FEHLER");
   }
@@ -1305,7 +1783,7 @@ void setup() {
   pinMode(ULTRASONIC_ECHO, INPUT);
   digitalWrite(ULTRASONIC_TRIG, LOW);
   attachInterrupt(digitalPinToInterrupt(ULTRASONIC_ECHO), ultraEchoISR, CHANGE);
-  Serial.println("Ultraschall Sensor bereit");
+  dbgPrintln("Ultraschall Sensor bereit");
 
   // RS485
   setupRS485();
@@ -1316,10 +1794,17 @@ void setup() {
 
   // DS18B20
   sensors.begin();
-  Serial.printf("DS18B20 gefunden: %d Sensor(en)\n", sensors.getDeviceCount());
+  dbgPrintf("DS18B20 gefunden: %d Sensor(en)\n", sensors.getDeviceCount());
   sensors.setResolution(12);
   sensors.setWaitForConversion(false);  // requestTemperatures() nicht mehr blockierend (sonst bis 750ms)
   tempConversionDelayMs = sensors.millisToWaitForConversion(12);
+
+  // Gehaeuseluefter (An/Aus, kein PWM) — geregelt in loopGehaeuseFan()
+  pinMode(GEHAEUSE_FAN_PIN, OUTPUT);
+  digitalWrite(GEHAEUSE_FAN_PIN, LOW);
+
+  // Netzspannungsueberwachung (HIGH = Netz vorhanden, LOW = USV-Betrieb)
+  pinMode(NETZ_OK_PIN, INPUT);
 
   // Webserver
   server.on("/",         handleRoot);
@@ -1329,25 +1814,37 @@ void setup() {
   server.on("/api/espnow/pwm",      HTTP_POST, handleApiPwmSet);
   server.on("/api/licht",            handleApiLicht);
   server.on("/api/ventile",         handleApiVentilStatus);
-  server.on("/api/pcf/test",        HTTP_POST, handleApiPcfTest);
+  server.on("/api/output/test",     HTTP_POST, handleApiOutputTest);
   server.on("/api/rs485",           handleApiRs485);
   server.on("/api/logs",            HTTP_GET,  handleApiLogsList);
   server.on("/api/logs/download",   HTTP_GET,  handleApiLogsDownload);
   server.on("/api/logs/delete",     HTTP_POST, handleApiLogsDelete);
   server.on("/api/ventile/config",  HTTP_POST, handleApiVentilConfig);
-  server.on("/api/zeltluefter/save", HTTP_POST, handleApiZeltluefterSave);
+  server.on("/api/umwaelz",          HTTP_GET,  handleApiUmwaelzGet);
+  server.on("/api/umwaelz/save",     HTTP_POST, handleApiUmwaelzSave);
   server.on("/api/scheduler",       HTTP_GET,  handleApiSchedulerGet);
   server.on("/api/scheduler/save",  HTTP_POST, handleApiSchedulerSave);
   server.on("/api/co2",             HTTP_GET,  handleApiCo2Get);
   server.on("/api/co2/save",        HTTP_POST, handleApiCo2Save);
   server.on("/api/dwc",             HTTP_GET,  handleApiDwcGet);
   server.on("/api/dwc/save",        HTTP_POST, handleApiDwcSave);
+  server.on("/api/gehaeuse",        HTTP_GET,  handleApiGehaeuseGet);
+  server.on("/api/gehaeuse/save",   HTTP_POST, handleApiGehaeuseSave);
+  server.on("/api/lueftmodul",      HTTP_GET,  handleApiLueftmodulGet);
+  server.on("/api/lueftmodul/save", HTTP_POST, handleApiLueftmodulSave);
+  server.on("/api/notify",          HTTP_GET,  handleApiNotifyGet);
+  server.on("/api/notify/save",     HTTP_POST, handleApiNotifySave);
+  server.on("/api/notify/test",     HTTP_POST, handleApiNotifyTest);
+  server.on("/api/ds18b20/scan",    HTTP_GET,  handleApiDs18b20Scan);
+  server.on("/api/ds18b20/assign",  HTTP_POST, handleApiDs18b20Assign);
   server.on("/api/fan",             HTTP_GET,  handleApiFanGet);
   server.on("/api/fan/save",        HTTP_POST, handleApiFanSave);
   server.on("/api/output",          HTTP_GET,  handleApiOutputGet);
   server.on("/api/output/save",     HTTP_POST, handleApiOutputSave);
   server.on("/api/wifi",            HTTP_GET,  handleApiWifiGet);
   server.on("/api/wifi/save",       HTTP_POST, handleApiWifiSave);
+  server.on("/api/system/restart",  HTTP_POST, handleApiSystemRestart);
+  server.on("/api/debug/capture",   HTTP_POST, handleApiDebugCapture);
   server.on("/api/tank",            handleApiTankConfig);
   server.on("/api/tank/config",     HTTP_POST, handleApiTankConfigSave);
   server.on("/update", HTTP_GET, []() {
@@ -1363,7 +1860,7 @@ void setup() {
   server.on("/api/ota/flash",  HTTP_POST, handleNodeOtaFlash);
   server.on("/ota.bin",        HTTP_GET,  handleNodeOtaBin);
   server.begin();
-  Serial.println("Webserver gestartet");
+  dbgPrintln("Webserver gestartet");
 
   // NTP-Sync erst nach server.begin() — verhindert LWIP-Mutex-Konflikt
   if (WiFi.status() == WL_CONNECTED) {
@@ -1374,6 +1871,20 @@ void setup() {
   memset(nodeData, 0, sizeof(nodeData));
   setupEspNow();
   espnow_set_sensor_callback(onEspNowSensor);
+
+  // Watchdog erst jetzt aktivieren, NACH den teils laengeren blockierenden Schritten oben
+  // (WiFi-Verbindungsversuch bis 30s, SD/ETH-Init) — sonst wuerden die versehentlich einen
+  // Watchdog-Reset ausloesen. Ab hier wird bei jedem loop()-Durchlauf "gefuettert"
+  // (esp_task_wdt_reset()) — bleibt loop() laenger als WDT_TIMEOUT_S haengen (z.B. durch
+  // einen blockierenden Fehler in einer Bibliothek), startet der ESP32 automatisch neu,
+  // statt fuer immer unerreichbar zu bleiben.
+  esp_task_wdt_config_t wdtConfig = {
+      .timeout_ms    = WDT_TIMEOUT_S * 1000,
+      .idle_core_mask = 0,
+      .trigger_panic  = true,
+  };
+  esp_task_wdt_init(&wdtConfig);
+  esp_task_wdt_add(NULL);
 }
 
 // ========== LOOP ==========
@@ -1411,7 +1922,7 @@ void loopDruck() {
   druckBar = druckPSI / 14.5038f;
 
 #ifdef DEBUG_DRUCK
-  Serial.printf("Druck: %.1f PSI / %.2f bar (%d mV)\n", druckPSI, druckBar, mV);
+  dbgPrintf("Druck: %.1f PSI / %.2f bar (%d mV)\n", druckPSI, druckBar, mV);
 #endif
 }
 
@@ -1441,7 +1952,17 @@ void triggerUltraschall() {
   digitalWrite(ULTRASONIC_TRIG, LOW);
 }
 
+// Liest einen DS18B20 ueber seine zugewiesene ROM-Adresse, falls vorhanden — sonst als
+// Fallback ueber die alte Bus-Scan-Reihenfolge (fuer Bestandsinstallationen ohne
+// Rollenzuordnung). DEVICE_DISCONNECTED_C (-127), wenn der Sensor nicht gefunden wird.
+static float readDs18b20(bool addrSet, const uint8_t* addr, uint8_t fallbackIndex) {
+  if (addrSet) return sensors.getTempC(addr);
+  return sensors.getTempCByIndex(fallbackIndex);
+}
+
 void loop() {
+  esp_task_wdt_reset();  // Watchdog "fuettern" — siehe Kommentar bei esp_task_wdt_init() in setup()
+
   if (wifiRestartPending && millis() >= wifiRestartAtMs) {
     ESP.restart();
   }
@@ -1455,19 +1976,49 @@ void loop() {
   }
 
   server.handleClient();
-  loopVentile();
+
+  // Lichtstatus fuer die Bewaesserung (Licht-/Dunkelphase-Zeiten, siehe LPA-Betriebsprotokoll
+  // Punkt 2/3) — RTC-Abfrage gedrosselt, eine Aktualisierung alle paar Sekunden reicht fuer
+  // Bewaesserungsintervalle im Minutenbereich locker aus. lichtAnCached ist file-scope (siehe
+  // oben), damit auch handleApiVentilStatus() den Wert fuer die Statusanzeige lesen kann.
+  static uint32_t lastLichtCheckMs = 0;
+  if (millis() - lastLichtCheckMs >= 5000) {
+    lastLichtCheckMs = millis();
+    if (rtcOK) {
+      DateTime now = rtc.now();
+      lichtAnCached = schedLichtIstAn(now.hour() * 60 + now.minute());
+    }
+  }
+
+  // Netzspannungsueberwachung — kurz entprellt (siehe netzOk oben).
+  {
+    bool raw = digitalRead(NETZ_OK_PIN);
+    if (raw != netzOkRaw) {
+      netzOkRaw       = raw;
+      netzOkChangedMs = millis();
+    } else if (raw != netzOk && millis() - netzOkChangedMs >= NETZ_OK_DEBOUNCE_MS) {
+      netzOk = raw;
+      dbgPrintln(netzOk ? "Netzspannung: wieder vorhanden" : "Netzspannung: AUSGEFALLEN (USV-Betrieb)");
+    }
+  }
+
+  loopVentile(lichtAnCached);
   loopRS485();
   loopEspNow();
   loopScheduler();
   loopCo2Ctrl();
   loopDwcCtrl();
+  loopGehaeuseFan();
   loopFanCtrl();
   loopDruck();
+  loopLueftmodul();
+  loopNotify();
+  dbgLoop();
 
   if (ota_ap_active && millis() - ota_ap_start > OTA_AP_TIMEOUT) {
     WiFi.softAPdisconnect(true);
     ota_ap_active = false;
-    Serial.println("[NODE-OTA] AP Timeout - gestoppt");
+    dbgPrintln("[NODE-OTA] AP Timeout - gestoppt");
   }
 
   unsigned long now = millis();
@@ -1476,7 +2027,7 @@ void loop() {
     lastRtcRetryMs = now;
     if (rtc.begin()) {
       rtcOK = true;
-      Serial.println("RTC: jetzt erkannt (fehlgeschlagener Init-Versuch beim Boot hat sich erholt)");
+      dbgPrintln("RTC: jetzt erkannt (fehlgeschlagener Init-Versuch beim Boot hat sich erholt)");
     }
   }
 
@@ -1496,14 +2047,15 @@ void loop() {
       aht21.getEvent(&humEvt, &tempEvt);
       aht21Temp = tempEvt.temperature;
       aht21Hum  = humEvt.relative_humidity;
-      Serial.printf("[AHT21] %.1f°C  %.1f%% rH\n", aht21Temp, aht21Hum);
+      dbgPrintf("[AHT21] %.1f°C  %.1f%% rH\n", aht21Temp, aht21Hum);
     }
   }
 
   if (tempConversionPending && (now - tempConversionStartMs >= tempConversionDelayMs)) {
     tempConversionPending = false;
-    tempVorrat  = sensors.getTempCByIndex(0);
-    tempPflanze = sensors.getTempCByIndex(1);
+    tempVorrat  = readDs18b20(ds18b20Config.vorrat_set,  ds18b20Config.vorrat_addr,  0);
+    tempPflanze = readDs18b20(ds18b20Config.pflanze_set, ds18b20Config.pflanze_addr, 1);
+    tempInnen   = readDs18b20(ds18b20Config.innen_set,   ds18b20Config.innen_addr,   2);  // optional
 
     if (rtcOK && storage_is_ok() && now - lastLogMs >= LOG_INTERVAL_MS) {
       lastLogMs = now;
@@ -1531,7 +2083,7 @@ void loop() {
       storage_log(rtc.now().unixtime(), e);
     }
     #ifdef DEBUG_DISTANZ
-    Serial.printf("Vorrat: %.1f°C  Pflanze: %.1f°C\n", tempVorrat, tempPflanze);
+    dbgPrintf("Vorrat: %.1f°C  Pflanze: %.1f°C\n", tempVorrat, tempPflanze);
     #endif
   }
 
@@ -1569,7 +2121,7 @@ void loop() {
       }
 
 #ifdef DEBUG_DISTANZ
-      Serial.printf("Distanz: %d mm  Wasser: %d mm  Füllstand: %d%%  Volumen: %.1f L\n",
+      dbgPrintf("Distanz: %d mm  Wasser: %d mm  Füllstand: %d%%  Volumen: %.1f L\n",
                     distanzMM, wasserHoeheMM, fuellstandProzent, volumenLiter);
 #endif
     }

@@ -1,5 +1,6 @@
 #include "espnow_master.h"
 #include "espnow_protocol.h"
+#include "dbg.h"
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
@@ -88,7 +89,7 @@ static void handle_register(const uint8_t* mac, const espnow_packet_t& pkt) {
     espnow_node_t* node = find_by_mac(mac);
     if (!node) {
         node = free_slot();
-        if (!node) { Serial.println("[ESP-NOW] Knotenliste voll"); return; }
+        if (!node) { dbgPrintln("[ESP-NOW] Knotenliste voll"); return; }
         memcpy(node->mac, mac, 6);
         node->node_id    = pkt.node_id;
         node->node_type  = pkt.payload_len > 0 ? pkt.payload[0] : 0;
@@ -100,7 +101,7 @@ static void handle_register(const uint8_t* mac, const espnow_packet_t& pkt) {
         peer.channel = 0;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
-        Serial.printf("[ESP-NOW] Node %d registriert Typ=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+        dbgPrintf("[ESP-NOW] Node %d registriert Typ=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
                       pkt.node_id, node->node_type,
                       mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
     }
@@ -121,7 +122,7 @@ static void handle_heartbeat(const uint8_t* mac, const espnow_packet_t& pkt) {
     if (!node) {
         // Master neu gestartet — Node aus Heartbeat auto-registrieren
         node = free_slot();
-        if (!node) { Serial.println("[ESP-NOW] Knotenliste voll"); return; }
+        if (!node) { dbgPrintln("[ESP-NOW] Knotenliste voll"); return; }
         memcpy(node->mac, mac, 6);
         node->node_id    = pkt.node_id;
         node->node_type  = pkt.payload_len > 0 ? pkt.payload[0] : NODE_TYPE_SENSOR;
@@ -132,7 +133,7 @@ static void handle_heartbeat(const uint8_t* mac, const espnow_packet_t& pkt) {
         peer.channel = 0;
         peer.encrypt = false;
         esp_now_add_peer(&peer);
-        Serial.printf("[ESP-NOW] Node %d aus Heartbeat registriert Typ=0x%02X\n",
+        dbgPrintf("[ESP-NOW] Node %d aus Heartbeat registriert Typ=0x%02X\n",
                       pkt.node_id, node->node_type);
     }
     node->online = true;
@@ -173,7 +174,7 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
             peer.channel = 0;
             peer.encrypt = false;
             esp_now_add_peer(&peer);
-            Serial.printf("[ESP-NOW] Node %d auto-registriert (MSG_REGISTER fehlt)\n", pkt.node_id);
+            dbgPrintf("[ESP-NOW] Node %d auto-registriert (MSG_REGISTER fehlt)\n", pkt.node_id);
         }
     }
 
@@ -185,7 +186,7 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
     if (node) send_pkt(mac, &ack);
 
 #ifdef ESPNOW_DEBUG
-    Serial.printf("[ESP-NOW] Node %d Sensor (Typ=0x%02X len=%d)\n",
+    dbgPrintf("[ESP-NOW] Node %d Sensor (Typ=0x%02X len=%d)\n",
                   pkt.node_id, pkt.payload_len > 0 ? pkt.payload[0] : 0, pkt.payload_len);
 
     if (pkt.payload_len >= 1) {
@@ -195,21 +196,21 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
             int16_t  temp_raw = (int16_t)((pkt.payload[1] << 8) | pkt.payload[2]);
             uint16_t hum_raw  = (uint16_t)((pkt.payload[3] << 8) | pkt.payload[4]);
             uint16_t co2      = (uint16_t)((pkt.payload[5] << 8) | pkt.payload[6]);
-            Serial.printf("  Luft:  %.2f C  %.2f%% rH  %d ppm CO2\n",
+            dbgPrintf("  Luft:  %.2f C  %.2f%% rH  %d ppm CO2\n",
                           temp_raw / 100.0f, hum_raw / 100.0f, co2);
         }
         if (sensor_type == 0x03 && pkt.payload_len >= 9) {
             uint16_t ppfd_raw = (uint16_t)((pkt.payload[7] << 8) | pkt.payload[8]);
-            Serial.printf("  Licht: %.1f umol/m2/s PPFD\n", ppfd_raw / 10.0f);
+            dbgPrintf("  Licht: %.1f umol/m2/s PPFD\n", ppfd_raw / 10.0f);
         } else if (sensor_type == 0x02 && pkt.payload_len >= 3) {
             uint16_t ppfd_raw = (uint16_t)((pkt.payload[1] << 8) | pkt.payload[2]);
-            Serial.printf("  Licht: %.1f umol/m2/s PPFD\n", ppfd_raw / 10.0f);
+            dbgPrintf("  Licht: %.1f umol/m2/s PPFD\n", ppfd_raw / 10.0f);
         }
         if (sensor_type < 0x01 || sensor_type > 0x03) {
-            Serial.print("  Raw: ");
+            dbgPrint("  Raw: ");
             for (int i = 0; i < pkt.payload_len; i++)
-                Serial.printf("%02X ", pkt.payload[i]);
-            Serial.println();
+                dbgPrintf("%02X ", pkt.payload[i]);
+            dbgPrintln();
         }
     }
 #endif
@@ -221,7 +222,7 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
 static void process(const recv_evt_t& evt) {
     const espnow_packet_t& pkt = evt.pkt;
     if (pkt.crc8 != crc8((uint8_t*)&pkt, sizeof(espnow_packet_t) - 1)) {
-        Serial.printf("[ESP-NOW] CRC-Fehler Node %d\n", pkt.node_id);
+        dbgPrintf("[ESP-NOW] CRC-Fehler Node %d\n", pkt.node_id);
         return;
     }
     switch (pkt.msg_type) {
@@ -235,7 +236,7 @@ static void process(const recv_evt_t& evt) {
             break;
         }
         case MSG_ERROR:
-            Serial.printf("[ESP-NOW] Fehler von Node %d: 0x%02X\n",
+            dbgPrintf("[ESP-NOW] Fehler von Node %d: 0x%02X\n",
                           pkt.node_id, pkt.payload_len ? pkt.payload[0] : 0xFF);
             break;
         default:
@@ -252,7 +253,7 @@ void setupEspNow() {
     esp_err_t r;
 
     r = esp_now_init();
-    Serial.printf("[ESP-NOW] esp_now_init: %s\n", esp_err_to_name(r));
+    dbgPrintf("[ESP-NOW] esp_now_init: %s\n", esp_err_to_name(r));
     if (r != ESP_OK) return;
 
     // Power-Saving ausschalten — sonst schläft der Master während DTIM-Intervallen
@@ -260,10 +261,10 @@ void setupEspNow() {
     esp_wifi_set_ps(WIFI_PS_NONE);
 
     r = esp_now_register_recv_cb(on_recv);
-    Serial.printf("[ESP-NOW] register_recv_cb: %s\n", esp_err_to_name(r));
+    dbgPrintf("[ESP-NOW] register_recv_cb: %s\n", esp_err_to_name(r));
 
     r = esp_now_register_send_cb(on_sent);
-    Serial.printf("[ESP-NOW] register_send_cb: %s\n", esp_err_to_name(r));
+    dbgPrintf("[ESP-NOW] register_send_cb: %s\n", esp_err_to_name(r));
 
     // Broadcast-Peer für Register-ACKs (channel=0 → folgt aktuellem WiFi-Kanal)
     esp_now_peer_info_t peer = {};
@@ -271,13 +272,13 @@ void setupEspNow() {
     peer.channel = 0;
     peer.encrypt = false;
     r = esp_now_add_peer(&peer);
-    Serial.printf("[ESP-NOW] add_peer(broadcast): %s\n", esp_err_to_name(r));
+    dbgPrintf("[ESP-NOW] add_peer(broadcast): %s\n", esp_err_to_name(r));
 
     uint8_t primary;
     wifi_second_chan_t second;
     esp_wifi_get_channel(&primary, &second);
-    Serial.printf("[ESP-NOW] Bereit (WiFi-Kanal %d, max %d Nodes)\n", primary, ESPNOW_MAX_NODES);
-    Serial.printf("[ESP-NOW] sizeof(espnow_packet_t)=%d\n", (int)sizeof(espnow_packet_t));
+    dbgPrintf("[ESP-NOW] Bereit (WiFi-Kanal %d, max %d Nodes)\n", primary, ESPNOW_MAX_NODES);
+    dbgPrintf("[ESP-NOW] sizeof(espnow_packet_t)=%d\n", (int)sizeof(espnow_packet_t));
 }
 
 void loopEspNow() {
@@ -296,7 +297,7 @@ void loopEspNow() {
             if (n.registered && n.online &&
                 now - n.last_heartbeat_ms > ESPNOW_HEARTBEAT_TIMEOUT_MS) {
                 n.online = false;
-                Serial.printf("[ESP-NOW] Node %d Timeout (offline)\n", n.node_id);
+                dbgPrintf("[ESP-NOW] Node %d Timeout (offline)\n", n.node_id);
             }
         }
     }
@@ -378,6 +379,6 @@ bool espnow_trigger_ota(uint8_t node_id, const char* ap_pass) {
     pkt.seq         = master_seq++;
     pkt.payload_len = 8;
     memcpy(pkt.payload, ap_pass, 8);
-    Serial.printf("[ESP-NOW] OTA-Befehl an Node %d\n", node_id);
+    dbgPrintf("[ESP-NOW] OTA-Befehl an Node %d\n", node_id);
     return send_pkt(node->mac, &pkt);
 }

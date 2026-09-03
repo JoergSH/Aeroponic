@@ -47,7 +47,7 @@ static as7341_data_t result;
 bool as7341_init() {
     initialized = as7341.begin();
     if (!initialized) {
-        Serial.println("[AS7341] nicht gefunden -> Pseudo-Daten aktiv");
+        Serial.println("[AS7341] nicht gefunden");
         return false;
     }
     as7341.setATIME(35);
@@ -57,24 +57,30 @@ bool as7341_init() {
     return true;
 }
 
-static void fill_fake_data() {
-    // Plausible Testwerte — leicht variierend damit das Web-Interface lebt
-    uint32_t t = millis() / 1000;
-    result.ppfd_dppfd = 2500 + (t % 20) * 10;  // 250.0 – 269.0 µmol/m²/s
-    result.ch_415nm   = 1200 + (t % 15) * 8;
-    result.ch_445nm   = 1850 + (t % 12) * 10;
-    result.ch_480nm   = 2100 + (t % 18) * 7;
-    result.ch_515nm   = 1950 + (t % 10) * 12;
-    result.ch_555nm   = 1700 + (t % 14) * 9;
-    result.ch_590nm   = 1400 + (t % 16) * 8;
-    result.ch_630nm   = 2200 + (t % 11) * 11;
-    result.ch_680nm   = 2450 + (t % 13) * 9;
-    result.gain       = GAIN_DEFAULT_IDX;
+bool as7341_is_ok() { return initialized; }
+
+static void fill_invalid_data() {
+    // Sensor nicht vorhanden/defekt: alles 0, keine erfundenen Werte mehr. Gueltigkeit
+    // wird primaer ueber as7341_is_ok() / RS485_REG_STATUS Bit1 signalisiert; gain=0xFF
+    // (kein echter Gain-Index, gueltig sind nur 0-10) dient zusaetzlich als Sentinel fuer
+    // Master-Seiten, die nur das ESP-NOW-Lichtpaket sehen (kein eigenes Status-Feld dort).
+    result.ppfd_dppfd = 0;
+    result.ch_415nm   = 0;
+    result.ch_445nm   = 0;
+    result.ch_480nm   = 0;
+    result.ch_515nm   = 0;
+    result.ch_555nm   = 0;
+    result.ch_590nm   = 0;
+    result.ch_630nm   = 0;
+    result.ch_680nm   = 0;
+    result.gain       = 0xFF;
 }
 
 void as7341_start() {
     if (!initialized) {
-        fill_fake_data();
+        // Kein Sensor: Zyklus nicht blockieren, sofort mit ungueltigen (0er) Werten
+        // "fertig" melden, damit die SCD41-Daten trotzdem gesendet werden.
+        fill_invalid_data();
         as_state = AS_DONE;
         return;
     }
@@ -143,7 +149,7 @@ static bool process_reading() {
 }
 
 bool as7341_update() {
-    if (!initialized) return as_state == AS_DONE;  // Fake-Daten: Zustand auswerten
+    if (!initialized) return as_state == AS_DONE;  // kein Sensor: sofort "fertig" mit 0er-Werten
     if (as_state == AS_IDLE || as_state == AS_DONE) return as_state == AS_DONE;
 
     if (as7341.checkReadingProgress()) {

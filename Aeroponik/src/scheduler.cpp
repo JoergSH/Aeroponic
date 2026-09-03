@@ -83,3 +83,8 @@ uint8_t schedComputeBrightnessPercent(uint16_t now_min) {
     if (frac > 1.0f) frac = 1.0f;
     return (uint8_t)roundf(frac * 100.0f);
 }
+
+bool schedLichtIstAn(uint16_t now_min) {
+    if (!schedConfig.enabled) return schedConfig.manual_percent > 0;
+    return now_min >= schedConfig.dawn_start && now_min < schedConfig.dusk_end;
+}

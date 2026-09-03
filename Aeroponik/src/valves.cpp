@@ -1,72 +1,140 @@
 #include "valves.h"
 #include "config.h"
 #include "pinout.h"
+#include "dbg.h"
 #include <EEPROM.h>
-#include <Wire.h>
 
 VentilConfig     ventilConfig;
 BehaelterZustand behaelterZustand[3];
+UmwaelzConfig    umwaelzConfig;
 
-// PCF8574AP Zustand (Bit=1 → Ventil AN, Bit=0 → Ventil AUS)
-static uint8_t pcf_state = 0x00;
-static bool    testMode  = false;
+static bool testMode = false;
 
-static void pcf_write() {
-    Wire.beginTransmission(PCF8574_ADDR);
-#if PCF8574_ACTIVE_LOW
-    Wire.write((uint8_t)~pcf_state);  // Treiber invertiert: Bit=1 (Ventil AN) -> Pin LOW
+// Alle Ausgaenge (Ventile, Pumpe, Umwälzpumpe) sind direkte GPIO, kein I2C-Expander
+// (PCF8574) mehr — siehe OUTPUT_ACTIVE_LOW in pinout.h fuer die Treiber-Polaritaet.
+static void setOut(uint8_t pin, bool on) {
+#if OUTPUT_ACTIVE_LOW
+    digitalWrite(pin, on ? LOW : HIGH);
 #else
-    Wire.write(pcf_state);
+    digitalWrite(pin, on ? HIGH : LOW);
 #endif
-    Wire.endTransmission();
 }
 
-static void setVentil(uint8_t mv_bit, bool on) {
-    if (on) pcf_state |=  (1 << mv_bit);
-    else    pcf_state &= ~(1 << mv_bit);
-    pcf_write();
+static const uint8_t VENTIL_PIN[3] = { VENTIL1_PIN, VENTIL2_PIN, VENTIL3_PIN };
+
+static bool rueckOffenState = false;
+static bool pumpeState      = false;
+static bool umwaelzState    = false;
+
+static void setVentil(uint8_t pin, bool on) {
+    if (pin == VENTIL4_PIN) rueckOffenState = on;
+    setOut(pin, on);
 }
 
-static const uint8_t VENTIL_MV[3] = {
-    MV_BEHAELTER_1, MV_BEHAELTER_2, MV_BEHAELTER_3
-};
+static void setPumpeOut(bool on)   { pumpeState = on;   setOut(PUMPE_GPIO, on); }
+static void setUmwaelzOut(bool on) { umwaelzState = on; setOut(UMWAELZPUMPE_GPIO, on); }
 
-bool ventilRueckOffen() {
-    return (pcf_state & (1 << MV_RUECKLAUF)) != 0;
-}
+bool ventilRueckOffen()   { return rueckOffenState; }
+bool pumpeAktiv()         { return pumpeState; }
+bool umwaelzpumpeAktiv()  { return umwaelzState; }
 
-bool pumpeAktiv() {
-    return (pcf_state & (1 << MV_PUMPE)) != 0;
-}
+// ========== Umwälzpumpe (Vorratsbehälter-Zirkulation) ==========
+// Lauf-/Pausenzyklus im konfigurierten Takt; pausiert (Zyklus haelt an, Timer wird beim
+// Wiederanlaufen neu gestartet), solange KEIN Behälter aktiviert (in der Konfiguration
+// eingeschaltet) ist — unabhaengig davon, ob dieser Behälter gerade tatsaechlich waessert
+// oder nur zwischen zwei Zyklen pausiert.
+enum UmwaelzZustand { U_PAUSE, U_LAUF };
+static UmwaelzZustand umwaelzZustand    = U_PAUSE;
+static unsigned long  umwaelzTimerStart = 0;
 
-bool zeltLuefterAktiv() {
-    return (pcf_state & (1 << MV_ZELTLUEFTER)) != 0;
-}
+static void loopUmwaelzpumpe(bool behaelterEnabled) {
+    unsigned long now = millis();
 
-void zeltLuefterSetzen(bool an) {
-    setVentil(MV_ZELTLUEFTER, an);
-    EEPROM.write(EEPROM_ZELTLUEFTER_ADDR, (uint8_t)an);
-    EEPROM.write(EEPROM_ZELTLUEFTER_MAGIC_ADDR, EEPROM_ZELTLUEFTER_MAGIC_BYTE);
-    EEPROM.commit();
-}
+    if (!umwaelzConfig.aktiv || !behaelterEnabled) {
+        if (umwaelzState) setUmwaelzOut(false);
+        umwaelzZustand    = U_PAUSE;
+        umwaelzTimerStart = now;
+        return;
+    }
 
-void pcf_test_mode(bool enable) {
-    testMode = enable;
-    if (!enable) {
-        pcf_state = 0x00;
-        pcf_write();
+    unsigned long vergangen = now - umwaelzTimerStart;
+    switch (umwaelzZustand) {
+        case U_PAUSE:
+            if (vergangen >= (unsigned long)umwaelzConfig.pausenzeit_min * 60000UL) {
+                umwaelzZustand    = U_LAUF;
+                umwaelzTimerStart = now;
+                setUmwaelzOut(true);
+            }
+            break;
+        case U_LAUF:
+            if (vergangen >= (unsigned long)umwaelzConfig.laufzeit_s * 1000UL) {
+                umwaelzZustand    = U_PAUSE;
+                umwaelzTimerStart = now;
+                setUmwaelzOut(false);
+            }
+            break;
     }
 }
 
-void pcf_test_set(uint8_t pin, bool on) {
-    if (pin > 7) return;
-    if (on) pcf_state |=  (1 << pin);
-    else    pcf_state &= ~(1 << pin);
-    pcf_write();
+void saveUmwaelzConfig() {
+    EEPROM.put(EEPROM_UMWAELZ_BASE,     (uint8_t)umwaelzConfig.aktiv);
+    EEPROM.put(EEPROM_UMWAELZ_BASE + 1, umwaelzConfig.laufzeit_s);
+    EEPROM.put(EEPROM_UMWAELZ_BASE + 2, umwaelzConfig.pausenzeit_min);
+    EEPROM.write(EEPROM_UMWAELZ_MAGIC_ADDR, EEPROM_UMWAELZ_MAGIC_BYTE);
+    EEPROM.commit();
 }
 
-bool    pcf_test_active() { return testMode; }
-uint8_t pcf_get_state()   { return pcf_state; }
+void loadUmwaelzConfig() {
+    if (EEPROM.read(EEPROM_UMWAELZ_MAGIC_ADDR) == EEPROM_UMWAELZ_MAGIC_BYTE) {
+        uint8_t ak;
+        EEPROM.get(EEPROM_UMWAELZ_BASE,     ak);
+        EEPROM.get(EEPROM_UMWAELZ_BASE + 1, umwaelzConfig.laufzeit_s);
+        EEPROM.get(EEPROM_UMWAELZ_BASE + 2, umwaelzConfig.pausenzeit_min);
+        umwaelzConfig.aktiv = (bool)ak;
+    } else {
+        umwaelzConfig.aktiv          = UMWAELZ_AKTIV_DEFAULT;
+        umwaelzConfig.laufzeit_s     = UMWAELZ_LAUFZEIT_DEFAULT_S;
+        umwaelzConfig.pausenzeit_min = UMWAELZ_PAUSE_DEFAULT_MIN;
+        saveUmwaelzConfig();
+    }
+    umwaelzZustand    = U_PAUSE;
+    umwaelzTimerStart = millis();
+}
+
+// ========== Ausgangs-Direkttest (Verkabelungspruefung) ==========
+static const uint8_t OUTPUT_TEST_PINS[OUTPUT_TEST_COUNT] = {
+    VENTIL1_PIN, VENTIL2_PIN, VENTIL3_PIN, VENTIL4_PIN, UMWAELZPUMPE_GPIO, PUMPE_GPIO
+};
+static const char* OUTPUT_TEST_NAMES[OUTPUT_TEST_COUNT] = {
+    "Ventil 1 (Beh. 1)", "Ventil 2 (Beh. 2)", "Ventil 3 (Beh. 3)", "Rücklaufventil",
+    "Umwälzpumpe", "Pumpe"
+};
+static uint8_t testState = 0x00;
+
+void output_test_mode(bool enable) {
+    testMode = enable;
+    if (!enable) {
+        for (uint8_t i = 0; i < OUTPUT_TEST_COUNT; i++) setOut(OUTPUT_TEST_PINS[i], false);
+        testState        = 0x00;
+        rueckOffenState   = false;
+        pumpeState        = false;
+        umwaelzState      = false;
+    }
+}
+
+void output_test_set(uint8_t index, bool on) {
+    if (index >= OUTPUT_TEST_COUNT) return;
+    if (on) testState |=  (1 << index);
+    else    testState &= ~(1 << index);
+    setOut(OUTPUT_TEST_PINS[index], on);
+}
+
+bool        output_test_active()        { return testMode; }
+uint8_t     output_test_get_state()     { return testState; }
+const char* output_test_name(uint8_t index) {
+    if (index >= OUTPUT_TEST_COUNT) return "?";
+    return OUTPUT_TEST_NAMES[index];
+}
 
 const char* ventilZustandText(VentilZustand z) {
     switch (z) {
@@ -78,8 +146,10 @@ const char* ventilZustandText(VentilZustand z) {
 }
 
 void setupVentile() {
-    pcf_state = 0x00;
-    pcf_write();  // alle Ventile aus
+    for (uint8_t i = 0; i < OUTPUT_TEST_COUNT; i++) {
+        pinMode(OUTPUT_TEST_PINS[i], OUTPUT);
+        setOut(OUTPUT_TEST_PINS[i], false);
+    }
     loadVentilConfig();
     for (int i = 0; i < 3; i++) {
         behaelterZustand[i].zustand    = V_PAUSE;
@@ -87,17 +157,9 @@ void setupVentile() {
         behaelterZustand[i].timerStart -= (unsigned long)i * 30000UL;
     }
 
-    // Zeltluefter: zuletzt gespeicherten Zustand wiederherstellen (rein manueller
-    // Schalter, keine Automatik — unabhaengig von der Ventil-Config oben).
-    if (EEPROM.read(EEPROM_ZELTLUEFTER_MAGIC_ADDR) == EEPROM_ZELTLUEFTER_MAGIC_BYTE) {
-        if (EEPROM.read(EEPROM_ZELTLUEFTER_ADDR)) setVentil(MV_ZELTLUEFTER, true);
-    } else {
-        EEPROM.write(EEPROM_ZELTLUEFTER_ADDR, 0);
-        EEPROM.write(EEPROM_ZELTLUEFTER_MAGIC_ADDR, EEPROM_ZELTLUEFTER_MAGIC_BYTE);
-        EEPROM.commit();
-    }
+    loadUmwaelzConfig();
 
-    Serial.println("Ventile bereit (PCF8574AP 0x38)");
+    dbgPrintln("Ventile bereit (direkte GPIO, kein PCF8574)");
 }
 
 // ========== Batch-Modus ("Gleiche Zeiten fuer alle") ==========
@@ -116,13 +178,13 @@ static int8_t findNextActive(int8_t fromIdx) {
     return -1;
 }
 
-static void loopVentileBatch() {
+static void loopVentileBatch(bool lichtAn) {
     unsigned long now = millis();
 
     // Sicherheits-Sweep: alles ausser dem gerade laufenden Behaelter explizit aus
     // (deckt sowohl inaktive Behaelter als auch bereits abgearbeitete im Batch ab).
     for (int i = 0; i < 3; i++)
-        if (i != batchActiveIdx) setVentil(VENTIL_MV[i], false);
+        if (i != batchActiveIdx) setVentil(VENTIL_PIN[i], false);
 
     if (batchActiveIdx < 0) {
         // Gemeinsame Pause-Phase — alle (aktiven) Behaelter zeigen denselben Timer.
@@ -130,9 +192,11 @@ static void loopVentileBatch() {
             behaelterZustand[i].zustand    = V_PAUSE;
             behaelterZustand[i].timerStart = batchPauseStart;
         }
-        setVentil(MV_RUECKLAUF, false);
+        setVentil(VENTIL4_PIN, false);
 
-        uint32_t pause_ms = (uint32_t)ventilConfig.behaelter[0].pausenzeit_min * 60000UL;
+        uint8_t pause_min = lichtAn ? ventilConfig.behaelter[0].pausenzeit_min
+                                     : ventilConfig.behaelter[0].pausenzeit_min_dunkel;
+        uint32_t pause_ms = (uint32_t)pause_min * 60000UL;
         if (now - batchPauseStart >= pause_ms) {
             int8_t first = findNextActive(0);
             if (first < 0) { batchPauseStart = now; return; }  // kein Behaelter aktiv
@@ -141,13 +205,13 @@ static void loopVentileBatch() {
                 batchInVorlauf = true;
                 behaelterZustand[batchActiveIdx].zustand    = V_VORLAUF;
                 behaelterZustand[batchActiveIdx].timerStart = now;
-                Serial.printf("Behälter %d: Vorlauf (Batch)\n", batchActiveIdx + 1);
+                dbgPrintf("Behälter %d: Vorlauf (Batch)\n", batchActiveIdx + 1);
             } else {
                 batchInVorlauf = false;
                 behaelterZustand[batchActiveIdx].zustand    = V_AKTIV;
                 behaelterZustand[batchActiveIdx].timerStart = now;
-                setVentil(VENTIL_MV[batchActiveIdx], true);
-                Serial.printf("Behälter %d: Aktiv (Batch)\n", batchActiveIdx + 1);
+                setVentil(VENTIL_PIN[batchActiveIdx], true);
+                dbgPrintf("Behälter %d: Aktiv (Batch)\n", batchActiveIdx + 1);
             }
         }
         return;
@@ -157,39 +221,41 @@ static void loopVentileBatch() {
     unsigned long vergangen = now - bz.timerStart;
 
     if (batchInVorlauf) {
-        setVentil(MV_RUECKLAUF, true);
+        setVentil(VENTIL4_PIN, true);
         if (vergangen >= (unsigned long)ventilConfig.vorlaufzeit_s * 1000UL) {
             batchInVorlauf = false;
             bz.zustand     = V_AKTIV;
             bz.timerStart  = now;
-            setVentil(VENTIL_MV[batchActiveIdx], true);
-            Serial.printf("Behälter %d: Aktiv (Batch)\n", batchActiveIdx + 1);
+            setVentil(VENTIL_PIN[batchActiveIdx], true);
+            dbgPrintf("Behälter %d: Aktiv (Batch)\n", batchActiveIdx + 1);
         }
         return;
     }
 
     // V_AKTIV: kein erneuter Ruecklauf-Vorlauf zwischen den Behaeltern desselben Batches.
-    setVentil(MV_RUECKLAUF, false);
-    if (vergangen >= (unsigned long)ventilConfig.behaelter[batchActiveIdx].oeffnungszeit_s * 1000UL) {
-        setVentil(VENTIL_MV[batchActiveIdx], false);
+    setVentil(VENTIL4_PIN, false);
+    uint8_t oeffnung_s = lichtAn ? ventilConfig.behaelter[batchActiveIdx].oeffnungszeit_s
+                                  : ventilConfig.behaelter[batchActiveIdx].oeffnungszeit_s_dunkel;
+    if (vergangen >= (unsigned long)oeffnung_s * 1000UL) {
+        setVentil(VENTIL_PIN[batchActiveIdx], false);
         int8_t next = findNextActive(batchActiveIdx + 1);
         if (next < 0) {
             batchActiveIdx  = -1;
             batchPauseStart = now;
-            Serial.println("Batch fertig -> gemeinsame Pause");
+            dbgPrintln("Batch fertig -> gemeinsame Pause");
         } else {
             batchActiveIdx = next;
             behaelterZustand[batchActiveIdx].zustand    = V_AKTIV;
             behaelterZustand[batchActiveIdx].timerStart = now;
-            setVentil(VENTIL_MV[batchActiveIdx], true);
-            Serial.printf("Behälter %d: Aktiv (Batch, direkt weiter)\n", batchActiveIdx + 1);
+            setVentil(VENTIL_PIN[batchActiveIdx], true);
+            dbgPrintf("Behälter %d: Aktiv (Batch, direkt weiter)\n", batchActiveIdx + 1);
         }
     }
 }
 
 void resetVentilRuntimeState() {
-    pcf_state = 0x00;
-    pcf_write();
+    for (int i = 0; i < 3; i++) setVentil(VENTIL_PIN[i], false);
+    setVentil(VENTIL4_PIN, false);
     unsigned long now = millis();
     for (int i = 0; i < 3; i++) {
         behaelterZustand[i].zustand    = V_PAUSE;
@@ -200,23 +266,25 @@ void resetVentilRuntimeState() {
     batchPauseStart = now;
 }
 
-static void loopVentileNormal() {
+static void loopVentileNormal(bool lichtAn) {
     unsigned long now = millis();
     bool rueckOffen = false;
 
     for (int i = 0; i < 3; i++) {
         if (!ventilConfig.behaelter[i].aktiv) {
-            setVentil(VENTIL_MV[i], false);
+            setVentil(VENTIL_PIN[i], false);
             continue;
         }
 
         BehaelterZustand& bz  = behaelterZustand[i];
         BehaelterConfig&  cfg = ventilConfig.behaelter[i];
+        uint8_t oeffnung_s  = lichtAn ? cfg.oeffnungszeit_s  : cfg.oeffnungszeit_s_dunkel;
+        uint8_t pausen_min  = lichtAn ? cfg.pausenzeit_min   : cfg.pausenzeit_min_dunkel;
         unsigned long vergangen = now - bz.timerStart;
 
         switch (bz.zustand) {
             case V_PAUSE:
-                if (vergangen >= (unsigned long)cfg.pausenzeit_min * 60000UL) {
+                if (vergangen >= (unsigned long)pausen_min * 60000UL) {
                     bool andererAktiv = false;
                     for (int j = 0; j < 3; j++) {
                         if (j != i && ventilConfig.behaelter[j].aktiv &&
@@ -231,12 +299,12 @@ static void loopVentileNormal() {
                     if (ventilConfig.vorlauf_aktiv && ventilConfig.vorlaufzeit_s > 0) {
                         bz.zustand    = V_VORLAUF;
                         bz.timerStart = now;
-                        Serial.printf("Behälter %d: Vorlauf\n", i + 1);
+                        dbgPrintf("Behälter %d: Vorlauf\n", i + 1);
                     } else {
                         bz.zustand    = V_AKTIV;
                         bz.timerStart = now;
-                        setVentil(VENTIL_MV[i], true);
-                        Serial.printf("Behälter %d: Aktiv\n", i + 1);
+                        setVentil(VENTIL_PIN[i], true);
+                        dbgPrintf("Behälter %d: Aktiv\n", i + 1);
                     }
                 }
                 break;
@@ -246,41 +314,44 @@ static void loopVentileNormal() {
                 if (vergangen >= (unsigned long)ventilConfig.vorlaufzeit_s * 1000UL) {
                     bz.zustand    = V_AKTIV;
                     bz.timerStart = now;
-                    setVentil(VENTIL_MV[i], true);
-                    Serial.printf("Behälter %d: Aktiv\n", i + 1);
+                    setVentil(VENTIL_PIN[i], true);
+                    dbgPrintf("Behälter %d: Aktiv\n", i + 1);
                 }
                 break;
 
             case V_AKTIV:
-                if (vergangen >= (unsigned long)cfg.oeffnungszeit_s * 1000UL) {
-                    setVentil(VENTIL_MV[i], false);
+                if (vergangen >= (unsigned long)oeffnung_s * 1000UL) {
+                    setVentil(VENTIL_PIN[i], false);
                     bz.zustand    = V_PAUSE;
                     bz.timerStart = now;
-                    Serial.printf("Behälter %d: Pause\n", i + 1);
+                    dbgPrintf("Behälter %d: Pause\n", i + 1);
                 }
                 break;
         }
     }
 
-    setVentil(MV_RUECKLAUF, rueckOffen);
+    setVentil(VENTIL4_PIN, rueckOffen);
 }
 
-void loopVentile() {
+void loopVentile(bool lichtAn) {
     if (testMode) return;
-    if (ventilConfig.gleiche_zeiten) loopVentileBatch();
-    else                             loopVentileNormal();
+    if (ventilConfig.gleiche_zeiten) loopVentileBatch(lichtAn);
+    else                             loopVentileNormal(lichtAn);
 
     // Pumpe: automatisch an, sobald irgendein Behaelter gerade aktiv waessert (Ventil
     // offen) — unabhaengig vom Zeitmodus (normal oder Batch), da beide behaelterZustand[]
-    // konsistent pflegen.
-    bool anyAktiv = false;
+    // konsistent pflegen. Umwaelzpumpe: laeuft, sobald irgendein Behaelter ueberhaupt
+    // aktiviert ist (Konfig-Haken), unabhaengig vom aktuellen Bewaesserungstakt.
+    bool anyAktiv   = false;
+    bool anyEnabled = false;
     for (int i = 0; i < 3; i++) {
-        if (ventilConfig.behaelter[i].aktiv && behaelterZustand[i].zustand == V_AKTIV) {
-            anyAktiv = true;
-            break;
+        if (ventilConfig.behaelter[i].aktiv) {
+            anyEnabled = true;
+            if (behaelterZustand[i].zustand == V_AKTIV) anyAktiv = true;
         }
     }
-    setVentil(MV_PUMPE, anyAktiv);
+    setPumpeOut(anyAktiv);
+    loopUmwaelzpumpe(anyEnabled);
 }
 
 void saveVentilConfig() {
@@ -289,14 +360,17 @@ void saveVentilConfig() {
         EEPROM.put(base,     ventilConfig.behaelter[i].oeffnungszeit_s);
         EEPROM.put(base + 1, ventilConfig.behaelter[i].pausenzeit_min);
         EEPROM.put(base + 2, (uint8_t)ventilConfig.behaelter[i].aktiv);
+        EEPROM.put(base + 3, ventilConfig.behaelter[i].oeffnungszeit_s_dunkel);
+        EEPROM.put(base + 4, ventilConfig.behaelter[i].pausenzeit_min_dunkel);
     }
     EEPROM.put(EEPROM_VORLAUF_ADDR,    ventilConfig.vorlaufzeit_s);
     EEPROM.put(EEPROM_VORLAUF_AK_ADDR, (uint8_t)ventilConfig.vorlauf_aktiv);
     EEPROM.put(EEPROM_MAGIC_ADDR,      (uint32_t)EEPROM_MAGIC_NUMBER);
     EEPROM.write(EEPROM_VENTIL_GLEICH_ADDR, (uint8_t)ventilConfig.gleiche_zeiten);
     EEPROM.write(EEPROM_VENTIL_GLEICH_MAGIC_ADDR, EEPROM_VENTIL_GLEICH_MAGIC_BYTE);
+    EEPROM.write(EEPROM_VENTIL_DUNKEL_MAGIC_ADDR, EEPROM_VENTIL_DUNKEL_MAGIC_BYTE);
     EEPROM.commit();
-    Serial.println("Ventilkonfig gespeichert");
+    dbgPrintln("Ventilkonfig gespeichert");
 }
 
 void loadVentilConfig() {
@@ -319,7 +393,7 @@ void loadVentilConfig() {
         EEPROM.get(EEPROM_VORLAUF_AK_ADDR, va);
         ventilConfig.vorlaufzeit_s = vz;
         ventilConfig.vorlauf_aktiv = (bool)va;
-        Serial.println("Ventilkonfig geladen");
+        dbgPrintln("Ventilkonfig geladen");
     } else {
         for (int i = 0; i < 3; i++) {
             ventilConfig.behaelter[i].oeffnungszeit_s = VENTIL_OEFFNUNG_DEFAULT_S;
@@ -329,8 +403,12 @@ void loadVentilConfig() {
         ventilConfig.vorlaufzeit_s = VENTIL_VORLAUF_DEFAULT_S;
         ventilConfig.vorlauf_aktiv = VENTIL_VORLAUF_AKTIV;
         ventilConfig.gleiche_zeiten = false;
+        for (int i = 0; i < 3; i++) {
+            ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = VENTIL_OEFFNUNG_DEFAULT_S;
+            ventilConfig.behaelter[i].pausenzeit_min_dunkel  = VENTIL_PAUSE_DEFAULT_MIN;
+        }
         saveVentilConfig();
-        Serial.println("Ventilkonfig: Standardwerte");
+        dbgPrintln("Ventilkonfig: Standardwerte");
         return;
     }
 
@@ -343,5 +421,25 @@ void loadVentilConfig() {
         EEPROM.write(EEPROM_VENTIL_GLEICH_ADDR, (uint8_t)0);
         EEPROM.write(EEPROM_VENTIL_GLEICH_MAGIC_ADDR, EEPROM_VENTIL_GLEICH_MAGIC_BYTE);
         EEPROM.commit();
+    }
+
+    // Dunkelphase-Zeiten (Bytes 3/4 jedes Behaelter-Blocks) — eigener Magic-Bereich, siehe
+    // config.h. Bei Bestandsinstallationen (Magic noch nicht gesetzt) auf die Lichtphase-
+    // Werte initialisieren, damit sich am Verhalten erstmal nichts aendert.
+    if (EEPROM.read(EEPROM_VENTIL_DUNKEL_MAGIC_ADDR) == EEPROM_VENTIL_DUNKEL_MAGIC_BYTE) {
+        for (int i = 0; i < 3; i++) {
+            int base = EEPROM_BEHAELTER_BASE + i * 5;
+            uint8_t oeD, paD;
+            EEPROM.get(base + 3, oeD);
+            EEPROM.get(base + 4, paD);
+            ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = oeD;
+            ventilConfig.behaelter[i].pausenzeit_min_dunkel  = paD;
+        }
+    } else {
+        for (int i = 0; i < 3; i++) {
+            ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = ventilConfig.behaelter[i].oeffnungszeit_s;
+            ventilConfig.behaelter[i].pausenzeit_min_dunkel  = ventilConfig.behaelter[i].pausenzeit_min;
+        }
+        saveVentilConfig();
     }
 }

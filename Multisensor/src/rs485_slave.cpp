@@ -24,12 +24,25 @@ static uint16_t crc16(const uint8_t* d, size_t n) {
     return crc;
 }
 
+// Sendet und wartet danach aktiv, bis der Auto-Direction-Transceiver zurueck auf Empfang
+// geschaltet hat -- verwirft dabei das eigene TX-Echo (RE haengt am Modul offenbar fest auf
+// "immer empfangen"), das sonst im naechsten rx_buf landet. Ohne diesen Schutz wuerde das
+// Echo der eigenen Antwort (gueltige eigene Adresse+FC+CRC) faelschlich als neue Anfrage
+// verarbeitet, mit Registerwerten statt echten start/count-Feldern -- fast immer ausserhalb
+// des gueltigen Bereichs, also eine unaufgeforderte Exception-Antwort auf den Bus.
+static void send_response(const uint8_t* buf, uint8_t len) {
+    RS485.write(buf, len);
+    RS485.flush();
+    delay(1);  // Turnaround-Reserve fuer den Transceiver
+    while (RS485.available()) RS485.read();
+}
+
 static void send_exception(uint8_t func, uint8_t code) {
     uint8_t r[5] = {RS485_SLAVE_ADDR, (uint8_t)(func | 0x80), code, 0, 0};
     uint16_t c = crc16(r, 3);
     r[3] = c & 0xFF;
     r[4] = c >> 8;
-    RS485.write(r, 5);
+    send_response(r, 5);
 }
 
 static void handle_frame() {
@@ -68,7 +81,7 @@ static void handle_frame() {
     uint16_t c    = crc16(resp, rlen);
     resp[rlen]     = c & 0xFF;
     resp[rlen + 1] = c >> 8;
-    RS485.write(resp, rlen + 2);
+    send_response(resp, rlen + 2);
 }
 
 bool rs485_slave_got_request() { return request_received; }

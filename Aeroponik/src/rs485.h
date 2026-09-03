@@ -26,6 +26,11 @@
 #define RS485_REG_ANALOG_CH1  0    // Kanal 1 (Luefter), Wertebereich 0-4095 (12-bit)
 #define RS485_REG_ANALOG_CH2  1    // Kanal 2 (Licht),   Wertebereich 0-4095 (12-bit)
 
+#define RS485_ADDR_LUEFT      0x51 // Lueftermodul (RP2040-Zero, 4x PWM-Zeltluefter + Tacho)
+#define RS485_LUEFT_COUNT     4
+#define RS485_LUEFT_REG_PWM_BASE 0 // Reg 0-3, FC06 schreiben: PWM-Sollwert 0-100%
+#define RS485_LUEFT_REG_RPM_BASE 4 // Reg 4-7, FC03 lesen: Ist-Drehzahl U/min
+
 struct Rs485SensorData {
     bool     online;
     uint32_t last_update_ms;
@@ -58,6 +63,13 @@ struct Rs485AnalogData {
     uint32_t last_update_ms;
 };
 
+struct Rs485LueftData {
+    bool     online;
+    uint16_t rpm[RS485_LUEFT_COUNT];       // zuletzt gelesene Ist-Drehzahl je Kanal
+    uint8_t  percent[RS485_LUEFT_COUNT];   // zuletzt bestaetigter PWM-Sollwert je Kanal
+    uint32_t last_update_ms;
+};
+
 void setupRS485();
 void loopRS485();
 
@@ -79,11 +91,17 @@ bool rs485_set_analog_ch1(uint16_t value);
 bool rs485_set_analog_ch2(uint16_t value);
 const Rs485AnalogData& rs485_get_analog();
 
+// Setzt den PWM-Sollwert (0-100%) eines Zeltluefter-Kanals (0-3) am Lueftermodul.
+// Nicht-blockierend, siehe rs485_set_licht_mask().
+bool rs485_set_lueft_percent(uint8_t channel, uint8_t percent);
+const Rs485LueftData& rs485_get_lueft();
+
 // Schaltet das Pollen einzelner RS485-Geraete ab/an (Standard: alle an). Wird von
 // main.cpp anhand der Geraete-Auswahl (outputctrl.h) gesetzt, damit nicht angeschlossene
 // Hardware nicht sinnlos abgefragt wird. Ausstehende Schreibbefehle sind davon unabhaengig.
 void rs485_set_licht_polling(bool enabled);
 void rs485_set_fan_polling(bool enabled);
 void rs485_set_analog_polling(bool enabled);
+void rs485_set_lueft_polling(bool enabled);
 
 #endif

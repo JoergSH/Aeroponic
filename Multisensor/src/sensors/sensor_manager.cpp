@@ -57,8 +57,7 @@ sm_init_result_t sensor_manager_init(uint8_t sda_pin, uint8_t scl_pin) {
     g_scl = scl_pin;
     bool scd_ok = scd41_init();
     bool as_ok  = as7341_init();
-    Serial.printf("[SM] Sensor-Init: SCD41=%d AS7341=%d%s\n",
-                  scd_ok, as_ok, as_ok ? "" : " (PSEUDO)");
+    Serial.printf("[SM] Sensor-Init: SCD41=%d AS7341=%d\n", scd_ok, as_ok);
     sensors_ok = scd_ok;
     return sensors_ok ? SM_OK : SM_INIT_FAILED;
 }
@@ -155,3 +154,5 @@ bool sensor_manager_send_raw_next() {
     send_raw_next = false;
     return v;
 }
+
+bool sensor_manager_as7341_ok() { return as7341_is_ok(); }

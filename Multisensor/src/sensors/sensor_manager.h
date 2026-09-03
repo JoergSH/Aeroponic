@@ -40,5 +40,6 @@ void             sensor_manager_on_command(const uint8_t* payload, uint8_t len);
 bool             sensor_manager_data_ready();
 void             sensor_manager_get_data(sensor_data_t* out);
 bool             sensor_manager_send_raw_next();
+bool             sensor_manager_as7341_ok();   // false = AS7341 nicht gefunden/defekt, Lichtwerte ungueltig
 
 #endif
