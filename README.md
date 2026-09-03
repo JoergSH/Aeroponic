@@ -23,6 +23,8 @@ Multi-Root-Workspace, öffnen über `Aeroponik.code-workspace` (VSCode + [pioard
 | `Lichtx4` | ESP32 | RS485 | 4× Relais-Lichtsteuerung, vom Master über den Beleuchtungs-Scheduler angesteuert |
 | `Multisensor` | ESP32-C3 | RS485 oder ESP-NOW | Zelt-Klima (SCD41: CO₂/Temp/Feuchte) + PPFD/Spektrum (AS7341) |
 | `Steckdosen` | ESP32 | ESP-NOW | Allgemeine Relais-Nodes (u. a. Ziel der CO2-Steuerung) |
+| `Lueftermodul` | RP2040-Zero | RS485 | 4× Zeltlüfter-PWM/Tacho-Steuerung |
+| `Multimodul` | RP2040-Zero | RS485 | Lueftermodul-Basis + optional Zelt-Klima (SCD41/AS7341) und/oder 0-10V-Ausgang (GP8403) über einen zweiten I2C-Bus, Hardware-Erkennung beim Boot |
 | `ProtoRS485` | ESP32-C3 | RS485 | Generischer Modbus-RTU-Slave-Simulator mit WS2812-Anzeige zum Testen ohne echte Hardware — aktuell das Analog-Ausgangsmodul emulierend, für andere Geräte anpassbar |
 | `shared/espnow_common` | — | — | Gemeinsam genutzte ESP-NOW-Protokoll-Library für Master/Multisensor/Steckdosen |
 
@@ -44,13 +46,13 @@ Multi-Root-Workspace, öffnen über `Aeroponik.code-workspace` (VSCode + [pioard
 
 ### Dokumentation
 
-Ausführliche technische Dokumentation (Hardware/Pinouts, RS485- und ESP-NOW-Protokoll, Register, Konfigurationsparameter, Erststart, Serial-Kommandos) liegt unter [`Aeroponik/docs/index.html`](Aeroponik/docs/index.html) — lokal im Browser öffnen. Die Seite ist deutsch/englisch umschaltbar. Auch die Weboberfläche des Masters selbst ist zweisprachig (DE/EN-Umschalter im Header).
+Ausführliche technische Dokumentation (Hardware/Pinouts, RS485- und ESP-NOW-Protokoll, Register, Konfigurationsparameter, Erststart, Serial-Kommandos) liegt unter [`Aeroponik/docs/dokumentation.md`](Aeroponik/docs/dokumentation.md). Auch die Weboberfläche des Masters selbst ist zweisprachig (DE/EN-Umschalter im Header).
 
 ### Ersteinrichtung
 
 1. Firmware der gewünschten Projekte per pioarduino flashen.
 2. Der Master startet ohne gespeichertes WLAN automatisch als Access Point (SSID `ESP32-Aeroponik`, Standardpasswort `12345678`) — verbinden und über die Weboberfläche unter *Konfiguration → WLAN* die Zugangsdaten des Heim-WLANs setzen. Der Master startet danach automatisch neu und verbindet sich.
-3. Weitere Details siehe HTML-Dokumentation.
+3. Weitere Details siehe [Dokumentation](Aeroponik/docs/dokumentation.md).
 
 ---
 
@@ -70,6 +72,8 @@ Multi-root workspace, open via `Aeroponik.code-workspace` (VSCode + [pioarduino]
 | `Lichtx4` | ESP32 | RS485 | 4× relay light control, driven by the master's lighting scheduler |
 | `Multisensor` | ESP32-C3 | RS485 or ESP-NOW | Tent climate (SCD41: CO₂/temp/humidity) + PPFD/spectrum (AS7341) |
 | `Steckdosen` | ESP32 | ESP-NOW | General-purpose relay nodes (e.g. target of CO2 control) |
+| `Lueftermodul` | RP2040-Zero | RS485 | 4× tent fan PWM/tacho control |
+| `Multimodul` | RP2040-Zero | RS485 | Lueftermodul base + optional tent climate (SCD41/AS7341) and/or 0-10V output (GP8403) on a second I2C bus, hardware auto-detected at boot |
 | `ProtoRS485` | ESP32-C3 | RS485 | Generic Modbus RTU slave simulator with a WS2812 display for testing without real hardware — currently emulates the analog output module, adaptable for other devices |
 | `shared/espnow_common` | — | — | Shared ESP-NOW protocol library used by master/Multisensor/Steckdosen |
 
@@ -91,10 +95,10 @@ Multi-root workspace, open via `Aeroponik.code-workspace` (VSCode + [pioarduino]
 
 ### Documentation
 
-Detailed technical documentation (hardware/pinouts, RS485 and ESP-NOW protocol, registers, configuration parameters, first boot, serial commands) lives at [`Aeroponik/docs/index.html`](Aeroponik/docs/index.html) — open locally in a browser. The page has a German/English toggle. The master's own web interface is bilingual too (DE/EN switch in the header).
+Detailed technical documentation (hardware/pinouts, RS485 and ESP-NOW protocol, registers, configuration parameters, first boot, serial commands) lives at [`Aeroponik/docs/dokumentation.md`](Aeroponik/docs/dokumentation.md). The master's own web interface is bilingual too (DE/EN switch in the header).
 
 ### First-time setup
 
 1. Flash the firmware of the desired projects via pioarduino.
 2. Without a saved WiFi network, the master automatically starts as an access point (SSID `ESP32-Aeroponik`, default password `12345678`) — connect to it and set your home WiFi credentials via the web interface under *Configuration → WiFi*. The master then restarts automatically and connects.
-3. See the HTML documentation for further details.
+3. See the [documentation](Aeroponik/docs/dokumentation.md) for further details.
