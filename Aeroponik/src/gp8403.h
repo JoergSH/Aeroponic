@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 // GP8403: 2-Kanal I2C-DAC (12-bit) mit 0-10V-Ausgang, Alternative zum RS485-Analogmodul.
-// Haengt am Haupt-I2C-Bus (Wire). Adresse via GP8403_ADDR (pinout.h). Reines Schreibgeraet
+// Haengt am Haupt-I2C-Bus (Wire). Adresse via I2C_ADDR_GP8403 (pinout.h). Reines Schreibgeraet
 // (kein Ruecklesewert) — online() spiegelt nur, ob der letzte I2C-Zugriff bestaetigt wurde.
 
 // Einmalig aufrufen (nach Wire.begin()): setzt beide Kanaele auf 0-10V-Bereich.

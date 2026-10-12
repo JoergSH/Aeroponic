@@ -30,6 +30,11 @@
 #define RS485_LUEFT_COUNT     4
 #define RS485_LUEFT_REG_PWM_BASE 0 // Reg 0-3, FC06 schreiben: PWM-Sollwert 0-100%
 #define RS485_LUEFT_REG_RPM_BASE 4 // Reg 4-7, FC03 lesen: Ist-Drehzahl U/min
+#define RS485_LUEFT_REG_BOOTID  8 // Reg 8, FC03 lesen: zufaellige Boot-ID -- aendert sie sich
+                                  // gegenueber dem letzten Poll, hat der Slave neu gestartet und
+                                  // seine PWM-Sollwerte verloren (siehe parse_lueft_read() in
+                                  // rs485.cpp), auch wenn der Reset zu kurz war um als
+                                  // Bus-Unterbrechung aufzufallen.
 
 struct Rs485SensorData {
     bool     online;

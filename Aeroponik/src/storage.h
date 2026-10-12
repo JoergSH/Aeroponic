@@ -21,6 +21,9 @@ struct LogEntry {
     uint8_t  fanPercent;
     uint16_t fanRpm;
     bool     co2Ausgang;
+    bool     humidAusgang;
+    float    flowBehaelter1Ml, flowBehaelter2Ml, flowBehaelter3Ml;  // Summe seit Neustart
+    float    flowGesamtMl;                                          // Summe aller Behaelter seit Neustart
 };
 
 bool storage_init(SPIClass &spi);

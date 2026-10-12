@@ -353,6 +353,18 @@ const char* htmlPage = R"rawliteral(
                     </div>
                 </div>
 
+                <!-- Luftbefeuchtung-Steuerung — eigene Statuskarte, gleiches Muster wie CO2 -->
+                <div class="status-box-info" id="humidStatusCard" style="display:none;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <strong>💧 <span class="de">Luftbefeuchtung</span><span class="en">Humidification</span></strong>
+                        <span id="humidOutputBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
+                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="humidStatusNow">--</div><div class="sensor-unit">% <span class="de">Feuchte</span><span class="en">Humidity</span></div></div>
+                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="humidStatusRange">--</div><div class="sensor-unit">Min / Max</div></div>
+                    </div>
+                </div>
+
                 <!-- DWC-Beleuchtungstimer (separates System, eigener Steckdosen-Ausgang) -->
                 <div class="status-box-info" id="dwcStatusCard" style="display:none;">
                     <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -404,30 +416,110 @@ const char* htmlPage = R"rawliteral(
                 </div>
             </div>
 
-            <!-- WhatsApp-Benachrichtigungen -->
-            <h3 class="section-heading">🔔 <span class="de">Benachrichtigungen (WhatsApp)</span><span class="en">Notifications (WhatsApp)</span></h3>
+            <!-- Benachrichtigungen: WhatsApp/Telegram/E-Mail, unabhaengig voneinander aktivierbar
+                 (CallMeBot/WhatsApp ist erfahrungsgemaess oefter mal down) -->
+            <h3 class="section-heading">🔔 <span class="de">Benachrichtigungen</span><span class="en">Notifications</span></h3>
             <div class="status-box-info">
-                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
-                    <span class="de">Nutzt CallMeBot (kostenlos). Einmalig einrichten: dem CallMeBot-Kontakt auf WhatsApp eine Aktivierungsnachricht schicken (siehe callmebot.com/blog/free-api-whatsapp-messages), dann Telefonnummer und den per WhatsApp erhaltenen API-Key hier eintragen.</span>
-                    <span class="en">Uses CallMeBot (free). One-time setup: send the CallMeBot contact an activation message on WhatsApp (see callmebot.com/blog/free-api-whatsapp-messages), then enter your phone number and the API key you receive here.</span>
-                </div>
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
                     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <span style="font-size:0.9em;"><span class="de">Benachrichtigungen aktiv</span><span class="en">Notifications active</span></span>
+                        <span style="font-size:0.9em;"><span class="de">Benachrichtigungen aktiv (Hauptschalter)</span><span class="en">Notifications active (master switch)</span></span>
                         <input type="checkbox" id="notifyGlobalEnabled" style="width:18px;height:18px;">
                     </label>
-                    <button onclick="sendNotifyTest()"
-                        style="background:#25D366;color:white;border:none;padding:7px 16px;border-radius:5px;cursor:pointer;font-size:0.85em;">
-                        📱 <span class="de">Test senden</span><span class="en">Send test</span></button>
                 </div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;max-width:500px;">
-                    <div>
-                        <div class="status-label"><span class="de">Telefonnummer</span><span class="en">Phone number</span></div>
-                        <input type="text" id="notifyPhone" placeholder="+491701234567" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+
+                <div style="font-size:0.85em;color:#555;font-weight:bold;margin-bottom:8px;"><span class="de">Kanäle</span><span class="en">Channels</span></div>
+                <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:20px;">
+                    <!-- WhatsApp (CallMeBot) -->
+                    <div style="padding:10px;background:#f8f9fa;border-radius:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="notifyWhatsappEnabled" style="width:16px;height:16px;">
+                                <span style="font-size:0.9em;">📱 WhatsApp (CallMeBot)</span>
+                            </label>
+                            <button onclick="sendNotifyTest()"
+                                style="background:#25D366;color:white;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:0.82em;">
+                                <span class="de">Test senden</span><span class="en">Send test</span></button>
+                        </div>
+                        <div style="font-size:0.78em;color:#888;margin-bottom:8px;">
+                            <span class="de">Kostenlos. Einmalig einrichten: dem CallMeBot-Kontakt auf WhatsApp eine Aktivierungsnachricht schicken (siehe callmebot.com/blog/free-api-whatsapp-messages), dann Telefonnummer und den per WhatsApp erhaltenen API-Key hier eintragen.</span>
+                            <span class="en">Free. One-time setup: send the CallMeBot contact an activation message on WhatsApp (see callmebot.com/blog/free-api-whatsapp-messages), then enter your phone number and the API key you receive here.</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:500px;">
+                            <div>
+                                <div class="status-label"><span class="de">Telefonnummer</span><span class="en">Phone number</span></div>
+                                <input type="text" id="notifyPhone" placeholder="+491701234567" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                            <div>
+                                <div class="status-label">API-Key (CallMeBot)</div>
+                                <input type="text" id="notifyApikey" placeholder="unverändert lassen" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                        </div>
                     </div>
-                    <div>
-                        <div class="status-label">API-Key (CallMeBot)</div>
-                        <input type="text" id="notifyApikey" placeholder="unverändert lassen" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+
+                    <!-- Telegram -->
+                    <div style="padding:10px;background:#f8f9fa;border-radius:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="notifyTelegramEnabled" style="width:16px;height:16px;">
+                                <span style="font-size:0.9em;">✈️ Telegram</span>
+                            </label>
+                            <button onclick="sendNotifyTestTelegram()"
+                                style="background:#26A5E4;color:white;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:0.82em;">
+                                <span class="de">Test senden</span><span class="en">Send test</span></button>
+                        </div>
+                        <div style="font-size:0.78em;color:#888;margin-bottom:8px;">
+                            <span class="de">Kostenlos. Einmalig einrichten: mit @BotFather einen Bot anlegen (liefert den Token), dann dem Bot in Telegram schreiben und die eigene Chat-ID ermitteln (z.B. über @userinfobot).</span>
+                            <span class="en">Free. One-time setup: create a bot with @BotFather (gives you the token), message the bot on Telegram, and find your own chat ID (e.g. via @userinfobot).</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:500px;">
+                            <div>
+                                <div class="status-label">Bot-Token</div>
+                                <input type="text" id="notifyTelegramToken" placeholder="unverändert lassen" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                            <div>
+                                <div class="status-label">Chat-ID</div>
+                                <input type="text" id="notifyTelegramChatId" placeholder="123456789" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- E-Mail (SMTP) -->
+                    <div style="padding:10px;background:#f8f9fa;border-radius:6px;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="notifyEmailEnabled" style="width:16px;height:16px;">
+                                <span style="font-size:0.9em;">✉️ <span class="de">E-Mail</span><span class="en">Email</span></span>
+                            </label>
+                            <button onclick="sendNotifyTestEmail()"
+                                style="background:#6c757d;color:white;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:0.82em;">
+                                <span class="de">Test senden</span><span class="en">Send test</span></button>
+                        </div>
+                        <div style="font-size:0.78em;color:#888;margin-bottom:8px;">
+                            <span class="de">Versand per SMTP über ein eigenes Postfach (z.B. Gmail mit App-Passwort — <strong>nicht</strong> das normale Kontopasswort). Port meist 465 (SSL/TLS).</span>
+                            <span class="en">Sent via SMTP through your own mailbox (e.g. Gmail with an app password — <strong>not</strong> your regular account password). Port is usually 465 (SSL/TLS).</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:600px;margin-bottom:10px;">
+                            <div>
+                                <div class="status-label">SMTP-Host</div>
+                                <input type="text" id="notifySmtpHost" placeholder="smtp.gmail.com" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                            <div>
+                                <div class="status-label">Port</div>
+                                <input type="number" id="notifySmtpPort" placeholder="465" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                            <div>
+                                <div class="status-label"><span class="de">Absender (Login)</span><span class="en">Sender (login)</span></div>
+                                <input type="text" id="notifySmtpUser" placeholder="you@gmail.com" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                            <div>
+                                <div class="status-label"><span class="de">App-Passwort</span><span class="en">App password</span></div>
+                                <input type="text" id="notifySmtpPass" placeholder="unverändert lassen" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            </div>
+                        </div>
+                        <div style="max-width:300px;">
+                            <div class="status-label"><span class="de">Empfänger</span><span class="en">Recipient</span></div>
+                            <input type="text" id="notifySmtpTo" placeholder="you@example.com" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        </div>
                     </div>
                 </div>
 
@@ -536,6 +628,19 @@ const char* htmlPage = R"rawliteral(
             <!-- Tank-Konfiguration -->
             <h3 class="section-heading">🪣 <span class="de">Tank-Konfiguration</span><span class="en">Tank Configuration</span></h3>
             <div id="tankConfigSection">
+                <h4><span class="de">Füllstandssensor</span><span class="en">Level Sensor</span></h4>
+                <div style="margin-bottom:20px;">
+                    <div class="status-label"><span class="de">Sensor-Typ</span><span class="en">Sensor Type</span></div>
+                    <select id="tankSensorTyp" onchange="toggleTankSensorUI()" style="width:100%;max-width:300px;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <option value="0">Ultraschall (HC-SR04/JSN-SR04T)</option>
+                        <option value="1">Drucksensor (HX710B)</option>
+                    </select>
+                    <div style="font-size:0.78em;color:#d9822b;margin-top:3px;">
+                        <span class="de">⚠️ Nach Wechsel + Speichern ist ein Neustart nötig (Reiter System → Neustart).</span>
+                        <span class="en">⚠️ Requires a restart after changing + saving (System tab → Restart).</span>
+                    </div>
+                </div>
+
                 <h4><span class="de">Tank Geometrie</span><span class="en">Tank Geometry</span></h4>
                 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px;">
                     <div>
@@ -555,35 +660,60 @@ const char* htmlPage = R"rawliteral(
                     </div>
                 </div>
 
-                <h4><span class="de">Sensor Kalibrierung</span><span class="en">Sensor Calibration</span></h4>
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px;">
-                    <div>
-                        <div class="status-label"><span class="de">Leer-Abstand (mm)</span><span class="en">Empty Distance (mm)</span></div>
-                        <input type="number" id="sensorLeer" min="50" max="5000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Sensor → Boden bei leerem Tank</span><span class="en">Sensor → bottom when tank is empty</span></div>
+                <div id="ultraschallKalibrierung">
+                    <h4><span class="de">Sensor Kalibrierung — Ultraschall</span><span class="en">Sensor Calibration — Ultrasonic</span></h4>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px;">
+                        <div>
+                            <div class="status-label"><span class="de">Leer-Abstand (mm)</span><span class="en">Empty Distance (mm)</span></div>
+                            <input type="number" id="sensorLeer" min="50" max="5000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Sensor → Boden bei leerem Tank</span><span class="en">Sensor → bottom when tank is empty</span></div>
+                        </div>
+                        <div>
+                            <div class="status-label"><span class="de">Min-Reichweite (mm)</span><span class="en">Min Range (mm)</span></div>
+                            <input type="number" id="sensorMin" min="20" max="500" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter = Tank voll (100%)</span><span class="en">Below = tank full (100%)</span></div>
+                        </div>
+                        <div>
+                            <div class="status-label"><span class="de">Max-Reichweite (mm)</span><span class="en">Max Range (mm)</span></div>
+                            <input type="number" id="sensorMax" min="100" max="10000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber = Messfehler, ignorieren</span><span class="en">Above = measurement error, ignore</span></div>
+                        </div>
+                        <div>
+                            <div class="status-label"><span class="de">Offset (mm)</span><span class="en">Offset (mm)</span></div>
+                            <input type="number" id="sensorOffset" min="-200" max="200" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Korrektur (+ = weiter, - = näher)</span><span class="en">Correction (+ = farther, - = closer)</span></div>
+                        </div>
                     </div>
-                    <div>
-                        <div class="status-label"><span class="de">Min-Reichweite (mm)</span><span class="en">Min Range (mm)</span></div>
-                        <input type="number" id="sensorMin" min="20" max="500" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter = Tank voll (100%)</span><span class="en">Below = tank full (100%)</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Max-Reichweite (mm)</span><span class="en">Max Range (mm)</span></div>
-                        <input type="number" id="sensorMax" min="100" max="10000" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber = Messfehler, ignorieren</span><span class="en">Above = measurement error, ignore</span></div>
-                    </div>
-                    <div>
-                        <div class="status-label"><span class="de">Offset (mm)</span><span class="en">Offset (mm)</span></div>
-                        <input type="number" id="sensorOffset" min="-200" max="200" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Korrektur (+ = weiter, - = näher)</span><span class="en">Correction (+ = farther, - = closer)</span></div>
+
+                    <div style="background:#e8f4fd;border-radius:8px;padding:12px;margin-bottom:20px;font-size:0.88em;border-left:4px solid #17a2b8;">
+                        <strong><span class="de">Tipp:</span><span class="en">Tip:</span></strong>
+                        <span class="de">Leer-Abstand = Min-Reichweite + Tankhöhe (wenn Sensor direkt am Tankrand sitzt).</span>
+                        <span class="en">Empty distance = min range + tank height (if the sensor sits directly at the tank rim).</span><br>
+                        <span class="de">Aktuell gemessener Sensorabstand:</span><span class="en">Currently measured sensor distance:</span> <strong id="tankSensorLive">-- mm</strong>
                     </div>
                 </div>
 
-                <div style="background:#e8f4fd;border-radius:8px;padding:12px;margin-bottom:20px;font-size:0.88em;border-left:4px solid #17a2b8;">
-                    <strong><span class="de">Tipp:</span><span class="en">Tip:</span></strong>
-                    <span class="de">Leer-Abstand = Min-Reichweite + Tankhöhe (wenn Sensor direkt am Tankrand sitzt).</span>
-                    <span class="en">Empty distance = min range + tank height (if the sensor sits directly at the tank rim).</span><br>
-                    <span class="de">Aktuell gemessener Sensorabstand:</span><span class="en">Currently measured sensor distance:</span> <strong id="tankSensorLive">-- mm</strong>
+                <div id="druckKalibrierung" hidden>
+                    <h4><span class="de">Sensor Kalibrierung — Drucksensor</span><span class="en">Sensor Calibration — Pressure</span></h4>
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px;">
+                        <div>
+                            <div class="status-label"><span class="de">Null-Rohwert (leer)</span><span class="en">Zero Raw Value (empty)</span></div>
+                            <input type="number" id="druckNull" step="1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Rohwert bei leerem Tank (0mm)</span><span class="en">Raw value with tank empty (0mm)</span></div>
+                        </div>
+                        <div>
+                            <div class="status-label"><span class="de">Rohwert pro mm</span><span class="en">Raw Value per mm</span></div>
+                            <input type="number" id="druckProMm" step="0.001" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Änderung des Rohwerts pro mm Wasserhöhe</span><span class="en">Raw value change per mm of water height</span></div>
+                        </div>
+                    </div>
+
+                    <div style="background:#e8f4fd;border-radius:8px;padding:12px;margin-bottom:20px;font-size:0.88em;border-left:4px solid #17a2b8;">
+                        <strong><span class="de">Tipp:</span><span class="en">Tip:</span></strong>
+                        <span class="de">Bei leerem Tank "Null-Rohwert" auf den unten angezeigten Live-Rohwert setzen. Danach mit bekannter Menge auffüllen und "Rohwert pro mm" = (neuer Rohwert − Null-Rohwert) / Wasserhöhe(mm) berechnen.</span>
+                        <span class="en">With the tank empty, set "Zero Raw Value" to the live raw value shown below. Then fill with a known amount and compute "Raw Value per mm" = (new raw value − zero raw value) / water height(mm).</span><br>
+                        <span class="de">Aktuell gemessener Roh-Druckwert:</span><span class="en">Currently measured raw pressure value:</span> <strong id="tankDruckLive">-- </strong>
+                    </div>
                 </div>
 
                 <div style="text-align:center;">
@@ -666,6 +796,7 @@ const char* htmlPage = R"rawliteral(
                     <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1em;" id="chipRevision">--</div><div class="sensor-unit"><span class="de">Rev.</span><span class="en">Rev.</span></div></div>
                     <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1em;" id="flashSize">--</div><div class="sensor-unit">Flash</div></div>
                     <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1em;" id="sketchSize">--</div><div class="sensor-unit">Sketch</div></div>
+                    <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1em;" id="fwVersion">--</div><div class="sensor-unit"><span class="de">FW-Version</span><span class="en">FW version</span></div></div>
                 </div>
                 <div style="margin-top:10px;font-size:0.85em;color:#555;">
                     <span class="de">Letzter Neustart:</span><span class="en">Last restart:</span> <strong id="lastResetReason">--</strong>
@@ -759,6 +890,125 @@ const char* htmlPage = R"rawliteral(
                     <button id="pcf_btn_4" onclick="pcfToggle(4)" class="pcf-btn"><small><span class="de">Umwälzpumpe</span><span class="en">Circulation Pump</span></small><br><span>AUS</span></button>
                     <button id="pcf_btn_5" onclick="pcfToggle(5)" class="pcf-btn"><small><span class="de">Pumpe</span><span class="en">Pump</span></small><br><span>AUS</span></button>
                 </div>
+            </div>
+
+            <!-- Durchflussmesser-Kalibrierung: Pumpe an -> Druck beobachten -> Start (Ventil 4
+                 auf, Pulse zaehlen) -> Stop -> Menge in ml eingeben -> Pulse/Liter berechnen.
+                 Nutzt denselben Ausgangs-Direkttest wie oben (Pumpe=Index 5, Ventil 4=Index 3). -->
+            <div style="margin-top:20px;padding:16px;background:#e8f4fd;border-radius:8px;border-left:4px solid #17a2b8;">
+                <h4 style="margin:0 0 12px 0;">💧 <span class="de">Durchflussmesser-Kalibrierung</span><span class="en">Flow Sensor Calibration</span></h4>
+
+                <div id="flowcalCurrent" style="display:none;margin-bottom:10px;font-size:0.85em;color:#555;">
+                    <span class="de">Aktuelle Kalibrierung:</span><span class="en">Current calibration:</span>
+                    <strong id="flowcalCurrentValue">--</strong> Pulse/L
+                </div>
+
+                <div id="flowcalIdle">
+                    <button onclick="flowcalStart()" style="background:#17a2b8;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
+                        <span class="de">Kalibrierung starten (Pumpe an)</span><span class="en">Start calibration (pump on)</span>
+                    </button>
+                </div>
+
+                <div id="flowcalRunning" style="display:none;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;max-width:300px;">
+                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.3em;" id="flowcalDruck">--</div><div class="sensor-unit">bar</div></div>
+                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.3em;" id="flowcalPulses">--</div><div class="sensor-unit"><span class="de">Impulse</span><span class="en">Pulses</span></div></div>
+                    </div>
+                    <div style="display:flex;gap:8px;">
+                        <button id="flowcalBeginBtn" onclick="flowcalBegin()" style="background:#28a745;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
+                            <span class="de">Start (Ventil öffnen)</span><span class="en">Start (open valve)</span>
+                        </button>
+                        <button id="flowcalStopBtn" style="display:none;background:#dc3545;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;" onclick="flowcalStop()">
+                            <span class="de">Stop</span><span class="en">Stop</span>
+                        </button>
+                        <button onclick="flowcalCancel()" style="background:#6c757d;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
+                            <span class="de">Abbrechen</span><span class="en">Cancel</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="flowcalVolumeInput" style="display:none;">
+                    <div style="font-size:0.9em;margin-bottom:8px;">
+                        <span class="de">Gezählte Impulse:</span><span class="en">Counted pulses:</span>
+                        <strong id="flowcalPulsesResult">--</strong>
+                    </div>
+                    <div style="font-size:0.85em;color:#555;margin-bottom:8px;">
+                        <span class="de">Jetzt die aufgefangene Menge abmessen und hier eintragen:</span>
+                        <span class="en">Now measure the collected amount and enter it here:</span>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <input type="number" id="flowcalMl" placeholder="ml" style="width:120px;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <button onclick="flowcalCalc()" style="background:#28a745;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
+                            <span class="de">Berechnen</span><span class="en">Calculate</span></button>
+                        <button onclick="flowcalCancel()" style="background:#6c757d;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
+                            <span class="de">Abbrechen</span><span class="en">Cancel</span></button>
+                    </div>
+                </div>
+
+                <div id="flowcalResult" style="display:none;margin-top:10px;padding:8px;background:#d4edda;border-radius:4px;font-size:0.9em;color:#155724;">
+                    <span class="de">Kalibriert:</span><span class="en">Calibrated:</span> <strong id="flowcalResultValue">--</strong> Pulse/L
+                </div>
+            </div>
+
+            <!-- Duesen-Ueberwachung: misst pro Giesszyklus die verspruehte Menge (ueber den
+                 kalibrierten Durchflussmesser) und vergleicht sie optional gegen einen erwarteten
+                 Durchfluss je Behaelter -- bei zu grosser Abweichung (verstopfte Duese oder Leck)
+                 geht eine Benachrichtigung ueber die konfigurierten Kanaele raus. -->
+            <div style="margin-top:20px;padding:16px;background:#fff3e0;border-radius:8px;border-left:4px solid #fb8c00;">
+                <h4 style="margin:0 0 12px 0;">🚿 <span class="de">Düsen-Überwachung</span><span class="en">Nozzle Monitoring</span></h4>
+
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Erfasst die verspritzte Menge je Behälter automatisch bei jedem Gießzyklus (braucht die Kalibrierung oben). Soll/Ist-Vergleich + Alarm sind optional.</span>
+                    <span class="en">Automatically measures the sprayed amount per reservoir on every watering cycle (needs the calibration above). Target/actual comparison + alert are optional.</span>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast1">--</div><div class="sensor-unit">ml <span class="de">Beh. 1 (letzter Zyklus)</span><span class="en">Res. 1 (last cycle)</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast2">--</div><div class="sensor-unit">ml <span class="de">Beh. 2 (letzter Zyklus)</span><span class="en">Res. 2 (last cycle)</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast3">--</div><div class="sensor-unit">ml <span class="de">Beh. 3 (letzter Zyklus)</span><span class="en">Res. 3 (last cycle)</span></div></div>
+                </div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotal1">--</div><div class="sensor-unit">ml <span class="de">Beh. 1 gesamt</span><span class="en">Res. 1 total</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotal2">--</div><div class="sensor-unit">ml <span class="de">Beh. 2 gesamt</span><span class="en">Res. 2 total</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotal3">--</div><div class="sensor-unit">ml <span class="de">Beh. 3 gesamt</span><span class="en">Res. 3 total</span></div></div>
+                    <div class="sensor-box" style="padding:8px;background:#ffe0b2;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotalAll">--</div><div class="sensor-unit">ml <span class="de">Gesamt (seit Neustart)</span><span class="en">Total (since restart)</span></div></div>
+                </div>
+
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <input type="checkbox" id="flowmonEnabled" style="width:18px;height:18px;">
+                        <span class="de">Soll/Ist-Vergleich + Alarm aktiv</span><span class="en">Target/actual comparison + alert active</span>
+                    </label>
+                </div>
+
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:12px;">
+                    <div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 1 (ml/s)</span><span class="en">Expected Res. 1 (ml/s)</span></div>
+                        <input type="number" id="flowmonSoll1" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 2 (ml/s)</span><span class="en">Expected Res. 2 (ml/s)</span></div>
+                        <input type="number" id="flowmonSoll2" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 3 (ml/s)</span><span class="en">Expected Res. 3 (ml/s)</span></div>
+                        <input type="number" id="flowmonSoll3" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Toleranz (%)</span><span class="en">Tolerance (%)</span></div>
+                        <input type="number" id="flowmonToleranz" min="1" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                </div>
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Steht für einen Behälter noch kein Sollwert (0), wird er automatisch vom nächsten Gießzyklus übernommen — manuelles Eintragen ist nur zum Überschreiben nötig.</span>
+                    <span class="en">If a reservoir has no target yet (0), it is learned automatically from the next watering cycle — manual entry is only needed to override it.</span>
+                </div>
+
+                <button onclick="saveFlowMonConfig()" style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                    <span class="de">Speichern</span><span class="en">Save</span></button>
+                <button onclick="resetFlowMonSollwerte()" style="background:#6c757d;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                    <span class="de">Sollwerte löschen</span><span class="en">Clear targets</span></button>
+                <span id="flowmonSaveStatus" style="font-size:0.85em;color:#888;margin-left:8px;"></span>
             </div>
 
             <!-- Umwälzpumpe-Steuerung (Vorratsbehälter-Zirkulation) -->
@@ -893,6 +1143,56 @@ const char* htmlPage = R"rawliteral(
                         style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
                         <span class="de">Speichern</span><span class="en">Save</span></button>
                     <span id="co2SaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+            </div>
+
+            <!-- Luftbefeuchtung-Steuerung — 1:1 Kopie der CO2-Steuerung, Feuchte statt CO2 -->
+            <h3 class="section-heading">💧 <span class="de">Luftbefeuchtung</span><span class="en">Humidification</span></h3>
+            <div class="status-box-info">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
+                        <input type="checkbox" id="humidEnabled" style="width:18px;height:18px;">
+                    </label>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Steckdose (Node)</span><span class="en">Socket (Node)</span></div>
+                        <select id="humidNode" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="">— keine —</option>
+                        </select>
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Nur online erkannte Steckdosen-Nodes</span><span class="en">Only sockets currently detected online</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Ausgang</span><span class="en">Output</span></div>
+                        <select id="humidRelayBit" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <option value="0">R1</option>
+                            <option value="1">R2</option>
+                            <option value="2">R3</option>
+                            <option value="3">R4</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Feuchte Min (%)</span><span class="en">Humidity Min (%)</span></div>
+                        <input type="number" id="humidMin" min="0" max="100" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Ausgang EIN (befeuchten)</span><span class="en">Below: output ON (humidify)</span></div>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Feuchte Max (%)</span><span class="en">Humidity Max (%)</span></div>
+                        <input type="number" id="humidMax" min="0" max="100" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Ausgang AUS</span><span class="en">Above: output OFF</span></div>
+                    </div>
+                </div>
+
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button onclick="saveHumidConfigForm()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        <span class="de">Speichern</span><span class="en">Save</span></button>
+                    <span id="humidSaveStatus" style="font-size:0.85em;color:#888;"></span>
                 </div>
             </div>
 
@@ -1232,6 +1532,7 @@ const char* htmlPage = R"rawliteral(
                 phaseLicht: 'Lichtphase',
                 phaseDunkel: 'Dunkelphase',
                 noCo2Value: 'Kein CO2-Wert',
+                noHumidValue: 'Kein Feuchte-Wert',
                 fanModeManual: 'Manuell',
                 fanModeAutoHum: 'Automatik Feuchte',
                 fanModeAutoTemp: 'Automatik Temperatur',
@@ -1244,6 +1545,8 @@ const char* htmlPage = R"rawliteral(
                 notConnected: 'Nicht verbunden',
                 loadError: 'Fehler beim Laden',
                 ssidEmptyAlert: 'SSID darf nicht leer sein',
+                flowcalInvalidVolume: 'Bitte eine gültige Menge in ml eingeben',
+                flowmonResetConfirm: 'Alle Sollwerte wirklich löschen?',
                 confirmRestart: 'Steuerung wirklich neu starten? Laufende Zyklen werden unterbrochen.',
                 debugCaptureRunning: (s) => 'Zeichnet auf … noch ' + s + ' s',
                 debugCaptureDone: 'Aufzeichnung fertig, siehe Dateiliste',
@@ -1309,6 +1612,7 @@ const char* htmlPage = R"rawliteral(
                 phaseLicht: 'Light phase',
                 phaseDunkel: 'Dark phase',
                 noCo2Value: 'No CO2 value',
+                noHumidValue: 'No humidity value',
                 fanModeManual: 'Manual',
                 fanModeAutoHum: 'Auto Humidity',
                 fanModeAutoTemp: 'Auto Temperature',
@@ -1321,6 +1625,8 @@ const char* htmlPage = R"rawliteral(
                 notConnected: 'Not connected',
                 loadError: 'Error loading',
                 ssidEmptyAlert: 'SSID must not be empty',
+                flowcalInvalidVolume: 'Please enter a valid amount in ml',
+                flowmonResetConfirm: 'Really clear all target values?',
                 confirmRestart: 'Really restart the controller? Running cycles will be interrupted.',
                 debugCaptureRunning: (s) => 'Recording… ' + s + ' s left',
                 debugCaptureDone: 'Capture done, see file list',
@@ -1371,8 +1677,8 @@ const char* htmlPage = R"rawliteral(
             if (ncc) ncc.innerHTML = '<div id="nodes_control_loading" style="text-align:center;color:#888;padding:30px;grid-column:1/-1;">' + t('loading') + '</div>';
             ventilKonfigGeladen = false;
             updateData(); updateVentile(); updateNodes(); updateRs485(); updateLicht();
-            updateCo2Status(); updateFanStatus(); updateDwcStatus(); updateGehaeuseFanStatus(); updateLueftmodulStatus();
-            loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadDwcConfig(); loadGehaeuseFanConfig(); loadUmwaelzConfig(); loadFanConfig(); loadLueftmodulConfig();
+            updateCo2Status(); updateHumidStatus(); updateFanStatus(); updateDwcStatus(); updateGehaeuseFanStatus(); updateLueftmodulStatus();
+            loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadHumidConfig(); loadDwcConfig(); loadGehaeuseFanConfig(); loadUmwaelzConfig(); loadFanConfig(); loadLueftmodulConfig();
             loadWifiConfigForm(); loadLogFileList(); loadOutputConfig(); loadNotifyConfigForm();
             updateSchedPhase();
             updatePcfUi();
@@ -1393,6 +1699,7 @@ const char* htmlPage = R"rawliteral(
             } else if (tabName === 'parameter') {
                 loadZeitplan();
                 loadCo2Config();
+                loadHumidConfig();
                 loadDwcConfig();
                 loadGehaeuseFanConfig();
                 loadUmwaelzConfig();
@@ -1423,9 +1730,11 @@ const char* htmlPage = R"rawliteral(
                     document.getElementById('druckBar').textContent   = d.druckBar;
                     document.getElementById('tempVorrat').textContent  = d.tempVorrat.toFixed(1);
                     document.getElementById('tempPflanze').textContent = d.tempPflanze.toFixed(1);
-                    document.getElementById('volumenLiter').textContent     = d.volumenLiter;
+                    document.getElementById('volumenLiter').textContent = d.volumenLiter;
                     const tsl = document.getElementById('tankSensorLive');
-                    if (tsl) tsl.textContent = d.distanzMM + ' mm';
+                    if (tsl && d.distanzMM !== undefined) tsl.textContent = d.distanzMM + ' mm';
+                    const tdl = document.getElementById('tankDruckLive');
+                    if (tdl && d.tankDruckRoh !== undefined) tdl.textContent = d.tankDruckRoh;
 
                     const ahtRow = document.getElementById('ahtRow');
                     if (ahtRow) {
@@ -1450,6 +1759,7 @@ const char* htmlPage = R"rawliteral(
                     if (d.freeHeap !== undefined) {
                         document.getElementById('freeHeap').textContent    = Math.round(d.freeHeap / 1024) + ' KB';
                         document.getElementById('uptime').textContent      = Math.round(d.uptime / 60) + ' Min';
+                        document.getElementById('fwVersion').textContent  = d.fwVersion || '--';
                         document.getElementById('chipModel').textContent   = d.chipModel;
                         document.getElementById('chipRevision').textContent = d.chipRevision;
                         document.getElementById('flashSize').textContent   = Math.round(d.flashSize / (1024 * 1024)) + ' MB';
@@ -1724,6 +2034,7 @@ const char* htmlPage = R"rawliteral(
                 }
                 updateLichtVisibility();
                 updateCo2NodeOptions((d.nodes || []).filter(n => n.type === 3));
+                updateHumidNodeOptions((d.nodes || []).filter(n => n.type === 3));
                 updateDwcNodeOptions((d.nodes || []).filter(n => n.type === 3));
                 updateEspnowBadges(d.nodes || []);
             }).catch(() => {});
@@ -1813,6 +2124,12 @@ const char* htmlPage = R"rawliteral(
         // ===== Tank =====
         let tankKonfigGeladen = false;
 
+        function toggleTankSensorUI() {
+            const istDruck = document.getElementById('tankSensorTyp').value === '1';
+            document.getElementById('ultraschallKalibrierung').hidden = istDruck;
+            document.getElementById('druckKalibrierung').hidden       = !istDruck;
+        }
+
         function loadTankKonfig() {
             if (tankKonfigGeladen) return;
             fetch('/api/tank').then(r => r.json()).then(d => {
@@ -1823,6 +2140,10 @@ const char* htmlPage = R"rawliteral(
                 document.getElementById('sensorMin').value       = d.min_mm;
                 document.getElementById('sensorMax').value       = d.max_mm;
                 document.getElementById('sensorOffset').value    = d.offset_mm;
+                document.getElementById('tankSensorTyp').value   = d.sensor_type;
+                document.getElementById('druckNull').value       = d.druck_null_raw;
+                document.getElementById('druckProMm').value      = d.druck_counts_pro_mm;
+                toggleTankSensorUI();
                 tankKonfigGeladen = true;
             }).catch(() => {});
         }
@@ -1835,7 +2156,10 @@ const char* htmlPage = R"rawliteral(
                 leer_abstand_mm: parseInt(document.getElementById('sensorLeer').value),
                 min_mm:          parseInt(document.getElementById('sensorMin').value),
                 max_mm:          parseInt(document.getElementById('sensorMax').value),
-                offset_mm:       parseInt(document.getElementById('sensorOffset').value)
+                offset_mm:       parseInt(document.getElementById('sensorOffset').value),
+                sensor_type:         parseInt(document.getElementById('tankSensorTyp').value),
+                druck_null_raw:      parseInt(document.getElementById('druckNull').value),
+                druck_counts_pro_mm: parseFloat(document.getElementById('druckProMm').value)
             };
             fetch('/api/tank/config', {
                 method: 'POST',
@@ -2184,6 +2508,82 @@ const char* htmlPage = R"rawliteral(
                 if (nowEl) nowEl.textContent = d.co2_online ? d.co2_now : '--';
                 const rangeEl = document.getElementById('co2StatusRange');
                 if (rangeEl) rangeEl.textContent = d.co2_min + ' / ' + d.co2_max;
+            }).catch(() => {});
+        }
+
+        // ===== Luftbefeuchtung-Steuerung — 1:1 Kopie der CO2-Steuerung =====
+        let humidConfigLoaded = false;
+        let humidPendingNodeId = null;  // aus Config geladen, aber Dropdown evtl. noch leer
+
+        // Wird aus updateNodes() mit der aktuellen Liste der Steckdosen-Nodes (type===3)
+        // aufgerufen, damit das Dropdown immer die tatsaechlich verfuegbaren Ziele zeigt.
+        function updateHumidNodeOptions(steckdosenNodes) {
+            const sel = document.getElementById('humidNode');
+            if (!sel) return;
+            const prevValue = sel.value;
+            let html = '<option value="">' + t('noneOption') + '</option>';
+            for (const n of steckdosenNodes) {
+                html += `<option value="${n.id}">Node ${n.id}${n.online ? '' : ' (' + t('offlineSuffix') + ')'}</option>`;
+            }
+            sel.innerHTML = html;
+            if (humidPendingNodeId !== null) {
+                sel.value = String(humidPendingNodeId);
+                humidPendingNodeId = null;
+            } else if (prevValue) {
+                sel.value = prevValue;
+            }
+        }
+
+        // humid_min/humid_max kommen vom Geraet als %*10 (Ganzzahl ohne Float im EEPROM) --
+        // im UI wird mit einer Nachkommastelle in echten Prozent gearbeitet.
+        function loadHumidConfig() {
+            if (humidConfigLoaded) return;
+            fetch('/api/humid').then(r => r.json()).then(d => {
+                document.getElementById('humidEnabled').checked = d.enabled;
+                document.getElementById('humidRelayBit').value  = d.target_relay_bit;
+                document.getElementById('humidMin').value       = (d.humid_min / 10).toFixed(1);
+                document.getElementById('humidMax').value       = (d.humid_max / 10).toFixed(1);
+                humidPendingNodeId = d.target_node_id || null;
+                document.getElementById('humidNode').value = humidPendingNodeId !== null ? String(humidPendingNodeId) : '';
+                humidConfigLoaded = true;
+            }).catch(() => {});
+        }
+
+        function saveHumidConfigForm() {
+            const body = {
+                enabled:          document.getElementById('humidEnabled').checked,
+                target_node_id:   parseInt(document.getElementById('humidNode').value) || 0,
+                target_relay_bit: parseInt(document.getElementById('humidRelayBit').value),
+                humid_min:        Math.round(parseFloat(document.getElementById('humidMin').value) * 10),
+                humid_max:        Math.round(parseFloat(document.getElementById('humidMax').value) * 10),
+            };
+            const st = document.getElementById('humidSaveStatus');
+            fetch('/api/humid/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body)
+            }).then(r => r.json()).then(d => {
+                st.style.color = d.success ? '#27ae60' : '#dc3545';
+                st.textContent = d.success ? t('saved') : t('error');
+                if (d.success) setTimeout(()=>st.textContent='',2000);
+            }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
+        }
+
+        function updateHumidStatus() {
+            fetch('/api/humid').then(r => r.json()).then(d => {
+                const card = document.getElementById('humidStatusCard');
+                if (!card) return;
+                card.style.display = d.enabled ? 'block' : 'none';
+                if (!d.enabled) return;
+                const badge = document.getElementById('humidOutputBadge');
+                if (badge) {
+                    if (!d.humid_online) { badge.textContent = t('noHumidValue'); badge.style.background = '#dc3545'; }
+                    else { badge.textContent = d.output_on ? t('on') : t('off'); badge.style.background = d.output_on ? '#28a745' : '#6c757d'; }
+                }
+                const nowEl = document.getElementById('humidStatusNow');
+                if (nowEl) nowEl.textContent = d.humid_online ? d.humid_now : '--';
+                const rangeEl = document.getElementById('humidStatusRange');
+                if (rangeEl) rangeEl.textContent = (d.humid_min / 10).toFixed(1) + ' / ' + (d.humid_max / 10).toFixed(1);
             }).catch(() => {});
         }
 
@@ -2686,11 +3086,10 @@ const char* htmlPage = R"rawliteral(
             }).catch(() => { st.style.color = '#dc3545'; st.textContent = t('connectionError'); });
         }
 
-        // WhatsApp-Benachrichtigungen (CallMeBot)
+        // Benachrichtigungen: WhatsApp (CallMeBot) / Telegram / E-Mail (SMTP)
         function loadNotifyConfigForm() {
             fetch('/api/notify').then(r => r.json()).then(d => {
                 document.getElementById('notifyGlobalEnabled').checked = d.global_enabled;
-                document.getElementById('notifyPhone').value           = d.phone || '';
                 document.getElementById('notifyNetzEnabled').checked      = d.netzausfall_enabled;
                 document.getElementById('notifySensorEnabled').checked    = d.sensorausfall_enabled;
                 document.getElementById('notifyFeuchteEnabled').checked   = d.feuchte_enabled;
@@ -2704,14 +3103,31 @@ const char* htmlPage = R"rawliteral(
                 document.getElementById('notifyLueftmodulEnabled').checked = d.lueftmodul_enabled;
                 const hint = document.getElementById('notifyMs2Hint');
                 if (hint) hint.textContent = d.ms2_online ? '' : t('notifyMs2Offline');
+
+                // WhatsApp
+                document.getElementById('notifyWhatsappEnabled').checked = d.whatsapp_enabled;
+                document.getElementById('notifyPhone').value = d.phone || '';
+
+                // Telegram
+                document.getElementById('notifyTelegramEnabled').checked = d.telegram_enabled;
+                document.getElementById('notifyTelegramChatId').value    = d.telegram_chat_id || '';
+                document.getElementById('notifyTelegramToken').placeholder =
+                    d.has_telegram_token ? 'unverändert lassen' : '123456789:AAExxx...';
+
+                // E-Mail (SMTP)
+                document.getElementById('notifyEmailEnabled').checked = d.email_enabled;
+                document.getElementById('notifySmtpHost').value = d.smtp_host || '';
+                document.getElementById('notifySmtpPort').value = d.smtp_port || 465;
+                document.getElementById('notifySmtpUser').value = d.smtp_user || '';
+                document.getElementById('notifySmtpTo').value   = d.email_to || '';
+                document.getElementById('notifySmtpPass').placeholder =
+                    d.has_smtp_pass ? 'unverändert lassen' : 'App-Passwort';
             }).catch(() => {});
         }
 
         function saveNotifyForm() {
             const body = {
                 global_enabled:      document.getElementById('notifyGlobalEnabled').checked,
-                phone:               document.getElementById('notifyPhone').value.trim(),
-                apikey:              document.getElementById('notifyApikey').value.trim(),
                 netzausfall_enabled: document.getElementById('notifyNetzEnabled').checked,
                 sensorausfall_enabled: document.getElementById('notifySensorEnabled').checked,
                 feuchte_enabled:     document.getElementById('notifyFeuchteEnabled').checked,
@@ -2723,6 +3139,21 @@ const char* htmlPage = R"rawliteral(
                 tank_enabled:        document.getElementById('notifyTankEnabled').checked,
                 tank_min_prozent:    parseInt(document.getElementById('notifyTankMin').value),
                 lueftmodul_enabled:  document.getElementById('notifyLueftmodulEnabled').checked,
+
+                whatsapp_enabled:    document.getElementById('notifyWhatsappEnabled').checked,
+                phone:               document.getElementById('notifyPhone').value.trim(),
+                apikey:              document.getElementById('notifyApikey').value.trim(),
+
+                telegram_enabled:    document.getElementById('notifyTelegramEnabled').checked,
+                telegram_chat_id:    document.getElementById('notifyTelegramChatId').value.trim(),
+                telegram_token:      document.getElementById('notifyTelegramToken').value.trim(),
+
+                email_enabled:       document.getElementById('notifyEmailEnabled').checked,
+                smtp_host:           document.getElementById('notifySmtpHost').value.trim(),
+                smtp_port:           parseInt(document.getElementById('notifySmtpPort').value) || 465,
+                smtp_user:           document.getElementById('notifySmtpUser').value.trim(),
+                smtp_pass:           document.getElementById('notifySmtpPass').value.trim(),
+                email_to:            document.getElementById('notifySmtpTo').value.trim(),
             };
             const st = document.getElementById('notifySaveStatus');
             fetch('/api/notify/save', {
@@ -2731,20 +3162,25 @@ const char* htmlPage = R"rawliteral(
                 body: JSON.stringify(body)
             }).then(r => r.json()).then(d => {
                 document.getElementById('notifyApikey').value = '';
+                document.getElementById('notifyTelegramToken').value = '';
+                document.getElementById('notifySmtpPass').value = '';
                 st.style.color = d.success ? '#27ae60' : '#dc3545';
                 st.textContent = d.success ? t('saved') : t('error');
-                if (d.success) setTimeout(()=>st.textContent='',2000);
+                if (d.success) { setTimeout(()=>st.textContent='',2000); loadNotifyConfigForm(); }
             }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
         }
 
-        function sendNotifyTest() {
+        function sendNotifyTestChannel(url) {
             const st = document.getElementById('notifySaveStatus');
-            fetch('/api/notify/test', { method: 'POST' }).then(r => r.json()).then(d => {
+            fetch(url, { method: 'POST' }).then(r => r.json()).then(d => {
                 st.style.color = d.success ? '#27ae60' : '#dc3545';
                 st.textContent = d.success ? t('notifyTestSent') : t('error');
                 setTimeout(()=>st.textContent='',3000);
             }).catch(() => { st.style.color='#dc3545'; st.textContent=t('connectionError'); });
         }
+        function sendNotifyTest()         { sendNotifyTestChannel('/api/notify/test'); }
+        function sendNotifyTestTelegram() { sendNotifyTestChannel('/api/notify/test-telegram'); }
+        function sendNotifyTestEmail()    { sendNotifyTestChannel('/api/notify/test-email'); }
 
         // Daten-Log (SD-Karte): Dateiliste laden + Download anstossen
         function loadLogFileList() {
@@ -3185,6 +3621,121 @@ const char* htmlPage = R"rawliteral(
             }
         }
 
+        // ===== Durchflussmesser-Kalibrierung =====
+        // state: 0=idle 1=Pumpe an (vor Start) 2=zaehlt (Ventil offen) 3=gestoppt (Menge eingeben)
+        function updateFlowCalStatus() {
+            fetch('/api/flowcal/status').then(r => r.json()).then(d => {
+                document.getElementById('flowcalIdle').style.display        = d.state === 0 ? 'block' : 'none';
+                document.getElementById('flowcalRunning').style.display     = (d.state === 1 || d.state === 2) ? 'block' : 'none';
+                document.getElementById('flowcalBeginBtn').style.display    = d.state === 1 ? 'inline-block' : 'none';
+                document.getElementById('flowcalStopBtn').style.display     = d.state === 2 ? 'inline-block' : 'none';
+                document.getElementById('flowcalVolumeInput').style.display = d.state === 3 ? 'block' : 'none';
+
+                document.getElementById('flowcalDruck').textContent  = d.druckBar;
+                document.getElementById('flowcalPulses').textContent = d.pulses_live;
+                if (d.state === 3) document.getElementById('flowcalPulsesResult').textContent = d.pulses_result;
+
+                const cur = document.getElementById('flowcalCurrent');
+                if (d.pulses_per_liter > 0 && d.state === 0) {
+                    cur.style.display = 'block';
+                    document.getElementById('flowcalCurrentValue').textContent = d.pulses_per_liter;
+                } else {
+                    cur.style.display = 'none';
+                }
+            }).catch(() => {});
+        }
+
+        function flowcalStart() {
+            fetch('/api/flowcal/start', { method: 'POST' }).then(updateFlowCalStatus);
+        }
+        function flowcalBegin() {
+            fetch('/api/flowcal/begin', { method: 'POST' }).then(updateFlowCalStatus);
+        }
+        function flowcalStop() {
+            fetch('/api/flowcal/stop', { method: 'POST' }).then(updateFlowCalStatus);
+        }
+        function flowcalCalc() {
+            const ml = parseFloat(document.getElementById('flowcalMl').value);
+            if (!ml || ml <= 0) { alert(t('flowcalInvalidVolume')); return; }
+            fetch('/api/flowcal/calc', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({volume_ml: ml})
+            }).then(r => r.json()).then(d => {
+                document.getElementById('flowcalMl').value = '';
+                const resultDiv = document.getElementById('flowcalResult');
+                if (d.success) {
+                    resultDiv.style.display = 'block';
+                    document.getElementById('flowcalResultValue').textContent = d.pulses_per_liter;
+                    setTimeout(() => resultDiv.style.display = 'none', 8000);
+                }
+                updateFlowCalStatus();
+            });
+        }
+        function flowcalCancel() {
+            fetch('/api/flowcal/cancel', { method: 'POST' }).then(updateFlowCalStatus);
+        }
+
+        // ===== Duesen-Ueberwachung =====
+        let flowmonConfigLoaded = false;
+
+        function updateFlowMonStatus() {
+            fetch('/api/flowmon').then(r => r.json()).then(d => {
+                document.getElementById('flowmonLast1').textContent  = d.last_cycle_ml[0];
+                document.getElementById('flowmonLast2').textContent  = d.last_cycle_ml[1];
+                document.getElementById('flowmonLast3').textContent  = d.last_cycle_ml[2];
+                document.getElementById('flowmonTotal1').textContent = d.total_ml[0];
+                document.getElementById('flowmonTotal2').textContent = d.total_ml[1];
+                document.getElementById('flowmonTotal3').textContent = d.total_ml[2];
+                document.getElementById('flowmonTotalAll').textContent = d.total_ml_all;
+
+                // Config nur einmal uebernehmen (nicht bei jedem Poll ueberschreiben, sonst
+                // tippt man gegen staendig zurueckgesetzte Eingabefelder)
+                if (!flowmonConfigLoaded) {
+                    document.getElementById('flowmonEnabled').checked = d.enabled;
+                    document.getElementById('flowmonSoll1').value     = d.erwarteter_durchfluss_ml_s[0];
+                    document.getElementById('flowmonSoll2').value     = d.erwarteter_durchfluss_ml_s[1];
+                    document.getElementById('flowmonSoll3').value     = d.erwarteter_durchfluss_ml_s[2];
+                    document.getElementById('flowmonToleranz').value  = d.toleranz_prozent;
+                    flowmonConfigLoaded = true;
+                }
+            }).catch(() => {});
+        }
+
+        function saveFlowMonConfig() {
+            const body = {
+                enabled: document.getElementById('flowmonEnabled').checked,
+                toleranz_prozent: parseInt(document.getElementById('flowmonToleranz').value) || 30,
+                erwarteter_durchfluss_ml_s: [
+                    parseFloat(document.getElementById('flowmonSoll1').value) || 0,
+                    parseFloat(document.getElementById('flowmonSoll2').value) || 0,
+                    parseFloat(document.getElementById('flowmonSoll3').value) || 0,
+                ]
+            };
+            const st = document.getElementById('flowmonSaveStatus');
+            fetch('/api/flowmon/save', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(body)
+            }).then(r => r.json()).then(d => {
+                st.style.color = d.success ? '#27ae60' : '#dc3545';
+                st.textContent = d.success ? t('saved') : t('error');
+                if (d.success) setTimeout(() => st.textContent = '', 2000);
+            }).catch(() => { st.style.color = '#dc3545'; st.textContent = t('connectionError'); });
+        }
+
+        // Setzt alle drei Sollwerte auf 0 (= Vergleich fuer den jeweiligen Behaelter deaktiviert)
+        // und speichert direkt -- praktisch nach dem Duesenreinigen, um spaeter mit frisch
+        // ermittelten Werten neu zu kalibrieren statt die alten (jetzt wieder gueltigen) Werte
+        // faelschlich als Abweichung zu werten.
+        function resetFlowMonSollwerte() {
+            if (!confirm(t('flowmonResetConfirm'))) return;
+            document.getElementById('flowmonSoll1').value = 0;
+            document.getElementById('flowmonSoll2').value = 0;
+            document.getElementById('flowmonSoll3').value = 0;
+            saveFlowMonConfig();
+        }
+
         // ===== RS485 Sensoren =====
 
         function updateRs485() {
@@ -3235,7 +3786,10 @@ const char* htmlPage = R"rawliteral(
                 updateRs485();
                 updateLicht();
                 updateCo2Status();
+                updateHumidStatus();
                 updateFanStatus();
+                updateFlowCalStatus();
+                updateFlowMonStatus();
                 updateOutputStatus();
                 updateSchedManualStatus();
                 updateDwcStatus();
@@ -3252,7 +3806,10 @@ const char* htmlPage = R"rawliteral(
         updateRs485();
         updateLicht();
         updateCo2Status();
+        updateHumidStatus();
         updateFanStatus();
+        updateFlowCalStatus();
+        updateFlowMonStatus();
         loadZeitplan();
         loadOutputConfig();
         updateSchedManualStatus();

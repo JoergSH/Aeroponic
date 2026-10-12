@@ -23,11 +23,14 @@
 #include "config.h"
 #include "page.h"
 #include "valves.h"
+#include "flowsensor.h"
+#include "flowmonitor.h"
 #include "tank.h"
 #include "rs485.h"
 #include "scheduler.h"
 #include "storage.h"
 #include "co2ctrl.h"
+#include "humidctrl.h"
 #include "dwcctrl.h"
 #include "ds18b20cfg.h"
 #include "gehaeusefan.h"
@@ -69,10 +72,11 @@ float druckPSI  = 0.0;
 float druckBar  = 0.0;
 
 // Füllstand
-int   distanzMM         = -1;
-int   wasserHoeheMM     = 0;
-int   fuellstandProzent = 0;
-float volumenLiter      = 0.0;
+int     distanzMM         = -1;   // nur bei Sensortyp Ultraschall gueltig
+int32_t tankDruckRoh      = 0;    // nur bei Sensortyp Drucksensor gueltig (HX710B-Rohwert)
+int     wasserHoeheMM     = 0;
+int     fuellstandProzent = 0;
+float   volumenLiter      = 0.0;
 
 // RTC
 RTC_DS3231 rtc;
@@ -223,6 +227,36 @@ static volatile bool     ultraEchoReady      = false;
 static bool     ultraWaitingEcho = false;
 static uint32_t ultraTriggerMs   = 0;
 constexpr uint32_t ULTRA_ECHO_TIMEOUT_MS = 30;
+
+// Median statt Mittelwert: einzelne Ausreisser (Fehlechos springen mal kurz, mal weit)
+// werden dadurch komplett verworfen statt nur verduennt — bei einem simplen Mittelwert
+// wuerde ein Ausreisser bei N=5 trotzdem noch mit 20% ins Ergebnis einfliessen.
+constexpr int  ULTRA_FILTER_N = 5;
+static int     ultraFilterBuf[ULTRA_FILTER_N];
+static uint8_t ultraFilterLen = 0;
+static uint8_t ultraFilterIdx = 0;
+
+int ultraFilterMedian(int neuerWert) {
+    ultraFilterBuf[ultraFilterIdx] = neuerWert;
+    ultraFilterIdx = (ultraFilterIdx + 1) % ULTRA_FILTER_N;
+    if (ultraFilterLen < ULTRA_FILTER_N) ultraFilterLen++;
+
+    int sortiert[ULTRA_FILTER_N];
+    memcpy(sortiert, ultraFilterBuf, ultraFilterLen * sizeof(int));
+    for (int i = 1; i < ultraFilterLen; i++) {
+        int key = sortiert[i], j = i - 1;
+        while (j >= 0 && sortiert[j] > key) { sortiert[j + 1] = sortiert[j]; j--; }
+        sortiert[j + 1] = key;
+    }
+    return sortiert[ultraFilterLen / 2];
+}
+
+// ========== Durchflussmesser (Test — zaehlt nur und gibt auf Serial aus) ==========
+static volatile uint32_t flowPulseCount = 0;
+
+void IRAM_ATTR flowSensorISR() {
+    flowPulseCount++;
+}
 
 void IRAM_ATTR ultraEchoISR() {
     portENTER_CRITICAL_ISR(&ultraMux);
@@ -415,6 +449,176 @@ void handleApiOutputTest() {
     server.send(200, "application/json", response);
 }
 
+// ========== Durchflussmesser-Kalibrierung ==========
+// Ablauf: Pumpe an (Druck beobachten) -> Start (Ventil 4 auf, Pulse zaehlen) -> Stop (Ventil
+// zu, Pulszahl einfrieren) -> gemessene Menge in ml eingeben -> Pulse/Liter berechnen+speichern.
+// Nutzt den bestehenden Ausgangs-Direkttest (valves.h: output_test_*) fuer Pumpe (Index 5) und
+// Ruecklaufventil (Index 3) -- das pausiert automatisch die normale Ventil-/Pumpensteuerung
+// (output_test_mode(true)), genau wie beim manuellen Verkabelungstest.
+enum FlowCalState { FLOWCAL_IDLE, FLOWCAL_PUMP_ON, FLOWCAL_COUNTING, FLOWCAL_STOPPED };
+static FlowCalState flowCalState          = FLOWCAL_IDLE;
+static uint32_t      flowCalResultPulses  = 0;   // eingefroren nach Stop
+static float          flowCalPulsesPerLiter = 0.0f;
+
+void loadFlowCalConfig() {
+    if (EEPROM.read(EEPROM_FLOWCAL_MAGIC_ADDR) == EEPROM_FLOWCAL_MAGIC_BYTE) {
+        EEPROM.get(EEPROM_FLOWCAL_BASE, flowCalPulsesPerLiter);
+    } else {
+        flowCalPulsesPerLiter = 0.0f;
+    }
+}
+
+void saveFlowCalConfig() {
+    EEPROM.put(EEPROM_FLOWCAL_BASE, flowCalPulsesPerLiter);
+    EEPROM.write(EEPROM_FLOWCAL_MAGIC_ADDR, EEPROM_FLOWCAL_MAGIC_BYTE);
+    EEPROM.commit();
+}
+
+// Bricht die Kalibrierung aus jedem Zustand sauber ab: Ventil zu, Pumpe aus, Testmodus
+// verlassen (gibt die normale Ventil-/Pumpensteuerung wieder frei).
+static void flowCalAbort() {
+    output_test_set(3, false);  // Ruecklaufventil zu
+    output_test_set(5, false);  // Pumpe aus
+    output_test_mode(false);
+    flowCalState = FLOWCAL_IDLE;
+}
+
+void handleApiFlowCalStatus() {
+    JsonDocument doc;
+    doc["state"] = (int)flowCalState;
+    noInterrupts();
+    uint32_t live = flowPulseCount;
+    interrupts();
+    doc["pulses_live"]      = live;
+    doc["pulses_result"]    = flowCalResultPulses;
+    doc["druckBar"]         = serialized(String(druckBar, 2));
+    doc["pulses_per_liter"] = serialized(String(flowCalPulsesPerLiter, 1));
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiFlowCalStart() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    output_test_mode(true);
+    output_test_set(5, true);   // Pumpe an
+    flowCalState = FLOWCAL_PUMP_ON;
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiFlowCalBegin() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (flowCalState != FLOWCAL_PUMP_ON) {
+        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
+        return;
+    }
+    noInterrupts(); flowPulseCount = 0; interrupts();
+    output_test_set(3, true);   // Ruecklaufventil auf
+    flowCalState = FLOWCAL_COUNTING;
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiFlowCalStop() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (flowCalState != FLOWCAL_COUNTING) {
+        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
+        return;
+    }
+    output_test_set(3, false);  // Ruecklaufventil zu
+    noInterrupts(); flowCalResultPulses = flowPulseCount; interrupts();
+    flowCalState = FLOWCAL_STOPPED;
+    JsonDocument doc;
+    doc["success"]       = true;
+    doc["pulses_result"] = flowCalResultPulses;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiFlowCalCalc() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (flowCalState != FLOWCAL_STOPPED) {
+        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
+        return;
+    }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    float volume_ml = doc["volume_ml"] | 0.0f;
+    if (volume_ml <= 0 || flowCalResultPulses == 0) {
+        server.send(400, "application/json", "{\"error\":\"Ungueltige Menge\"}");
+        return;
+    }
+    flowCalPulsesPerLiter = flowCalResultPulses / (volume_ml / 1000.0f);
+    saveFlowCalConfig();
+    flowCalAbort();  // Pumpe aus, Ventil zu, Testmodus verlassen, state=IDLE
+
+    JsonDocument resp;
+    resp["success"]         = true;
+    resp["pulses_per_liter"] = serialized(String(flowCalPulsesPerLiter, 1));
+    String response;
+    serializeJson(resp, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiFlowCalCancel() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    flowCalAbort();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// Zugriffsschicht fuer flowmonitor.cpp (siehe flowsensor.h) -- Zaehler/ISR bleiben hier, damit
+// die Kalibrierroutine oben unveraendert bleibt.
+uint32_t flowsensor_take_pulses() {
+    noInterrupts();
+    uint32_t p = flowPulseCount;
+    flowPulseCount = 0;
+    interrupts();
+    return p;
+}
+
+float flowsensor_pulses_per_liter() {
+    return flowCalPulsesPerLiter;
+}
+
+// ========== Duesen-Ueberwachung API (siehe flowmonitor.h) ==========
+
+void handleApiFlowMonGet() {
+    JsonDocument doc;
+    doc["enabled"]          = flowMonitorConfig.enabled;
+    doc["toleranz_prozent"] = flowMonitorConfig.toleranz_prozent;
+    JsonArray soll = doc["erwarteter_durchfluss_ml_s"].to<JsonArray>();
+    for (uint8_t i = 0; i < 3; i++) soll.add(serialized(String(flowMonitorConfig.erwarteter_durchfluss_ml_s[i], 2)));
+
+    JsonArray letzte = doc["last_cycle_ml"].to<JsonArray>();
+    JsonArray summe   = doc["total_ml"].to<JsonArray>();
+    for (uint8_t i = 0; i < 3; i++) {
+        letzte.add(serialized(String(flowMonitorState.last_cycle_ml[i], 0)));
+        summe.add(serialized(String(flowMonitorState.total_ml[i], 0)));
+    }
+    doc["total_ml_all"]     = serialized(String(flowMonitorState.total_ml_all, 0));
+    doc["pulses_per_liter"] = serialized(String(flowsensor_pulses_per_liter(), 1));
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiFlowMonSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>()) flowMonitorConfig.enabled = doc["enabled"];
+    if (doc["toleranz_prozent"].is<int>())
+        flowMonitorConfig.toleranz_prozent = (uint8_t)constrain((int)doc["toleranz_prozent"], 1, 100);
+    if (doc["erwarteter_durchfluss_ml_s"].is<JsonArray>()) {
+        JsonArray arr = doc["erwarteter_durchfluss_ml_s"];
+        for (uint8_t i = 0; i < 3 && i < arr.size(); i++)
+            flowMonitorConfig.erwarteter_durchfluss_ml_s[i] = constrain((float)arr[i], 0.0f, 1000.0f);
+    }
+    saveFlowMonitorConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
 void handleRoot() {
   server.send(200, "text/html", htmlPage);
 }
@@ -431,7 +635,12 @@ void handleApiData() {
   doc["netzOk"]            = netzOk;
   doc["lastResetReason"]   = bootResetReasonText;
   doc["druckBar"]          = serialized(String(druckBar, 2));
-  doc["distanzMM"]         = distanzMM;
+  doc["sensorTyp"]         = tankSensorConfig.sensor_type;
+  if (tankSensorConfig.sensor_type == TANK_SENSOR_ULTRASCHALL) {
+    doc["distanzMM"]       = distanzMM;
+  } else {
+    doc["tankDruckRoh"]    = tankDruckRoh;
+  }
   doc["wasserHoeheMM"]     = wasserHoeheMM;
   doc["fuellstandProzent"] = fuellstandProzent;
   doc["volumenLiter"]      = serialized(String(volumenLiter, 1));
@@ -446,6 +655,7 @@ void handleApiData() {
   } else {
     doc["datetime"] = "RTC fehlt";
   }
+  doc["fwVersion"]   = FW_VERSION;
   doc["freeHeap"]    = ESP.getFreeHeap();
   doc["uptime"]      = millis() / 1000;
   doc["chipModel"]   = ESP.getChipModel();
@@ -625,6 +835,9 @@ void handleApiTankConfig() {
   doc["min_mm"]          = tankConfig.min_mm;
   doc["max_mm"]          = tankConfig.max_mm;
   doc["offset_mm"]       = tankConfig.offset_mm;
+  doc["sensor_type"]         = tankSensorConfig.sensor_type;
+  doc["druck_null_raw"]      = tankSensorConfig.druck_null_raw;
+  doc["druck_counts_pro_mm"] = serialized(String(tankSensorConfig.druck_counts_pro_mm, 3));
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
@@ -645,6 +858,15 @@ void handleApiTankConfigSave() {
   if (doc["max_mm"].is<int>())          tankConfig.max_mm          = constrain((int)doc["max_mm"],         100, 10000);
   if (doc["offset_mm"].is<int>())       tankConfig.offset_mm       = constrain((int)doc["offset_mm"],     -200,  200);
   saveTankConfig();
+
+  if (doc["sensor_type"].is<int>())
+    tankSensorConfig.sensor_type = (uint8_t)constrain((int)doc["sensor_type"], 0, 1);
+  if (doc["druck_null_raw"].is<long>())
+    tankSensorConfig.druck_null_raw = (int32_t)(long)doc["druck_null_raw"];
+  if (doc["druck_counts_pro_mm"].is<float>())
+    tankSensorConfig.druck_counts_pro_mm = (float)doc["druck_counts_pro_mm"];
+  saveTankSensorConfig();
+
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -786,14 +1008,20 @@ void handleOTAUpdate() {
   if (upload.status == UPLOAD_FILE_START) {
     dbgPrintf("OTA Start: %s\n", upload.filename.c_str());
     otaInProgress = true;
+    esp_task_wdt_reset();
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       Update.printError(Serial);
     }
   } else if (upload.status == UPLOAD_FILE_WRITE) {
+    // Der Upload wird komplett innerhalb eines einzigen loop()-Durchlaufs verarbeitet
+    // (blockierendes Lesen in handleClient()) und dauert bei ~1.6MB oft laenger als
+    // WDT_TIMEOUT_S -- hier pro empfangenem Chunk fuettern, sonst Watchdog-Reset mitten im Update.
+    esp_task_wdt_reset();
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
       Update.printError(Serial);
     }
   } else if (upload.status == UPLOAD_FILE_END) {
+    esp_task_wdt_reset();
     if (Update.end(true)) {
       dbgPrintf("OTA OK: %u bytes\n", upload.totalSize);
       delay(2000);
@@ -1014,6 +1242,70 @@ void handleApiCo2Save() {
     server.send(200, "application/json", "{\"success\":true}");
 }
 
+// ========== Luftbefeuchtung-Steuerung ==========
+// 1:1 Kopie der CO2-Steuerung (siehe oben), nur mit Luftfeuchte statt CO2 als Regelgroesse.
+// Hysterese: Feuchte <= humid_min -> Ausgang EIN, Feuchte >= humid_max -> Ausgang AUS,
+// dazwischen bleibt der Zustand erhalten. Feuchte-Quelle ist der RS485-Multisensor (MS2).
+
+static bool humidOutputOn = false;
+
+void loopHumidCtrl() {
+    if (!humidConfig.enabled) return;
+    static uint32_t last_check = 0;
+    if (millis() - last_check < 5000) return;
+    last_check = millis();
+
+    const Rs485SensorData& ms2 = rs485_get_ms2();
+    if (!ms2.online) return;  // keine verlaessliche Feuchte-Messung
+
+    uint16_t humNow = (uint16_t)roundf(ms2.hum_pct * 10.0f);
+    if (humNow <= humidConfig.humid_min)      humidOutputOn = true;
+    else if (humNow >= humidConfig.humid_max) humidOutputOn = false;
+    // sonst: Zustand halten (Hysterese-Band)
+
+    int idx = findNodeIndex(humidConfig.target_node_id);
+    if (idx < 0 || !espnow_nodes[idx].online) return;
+    uint8_t bit  = humidConfig.target_relay_bit & 0x03;
+    uint8_t mask = nodeData[idx].relay_mask;
+    uint8_t want = humidOutputOn ? (mask | (1 << bit)) : (mask & ~(1 << bit));
+    if (want != mask) {
+        if (espnow_send_relay_mask(humidConfig.target_node_id, want))
+            dbgPrintf("[HUMID] Node %d Bit %d -> %s (Feuchte=%.1f%%)\n",
+                          humidConfig.target_node_id, bit, humidOutputOn ? "EIN" : "AUS", ms2.hum_pct);
+    }
+}
+
+// ========== Luftbefeuchtung API ==========
+
+void handleApiHumidGet() {
+    JsonDocument doc;
+    doc["enabled"]          = humidConfig.enabled;
+    doc["target_node_id"]   = humidConfig.target_node_id;
+    doc["target_relay_bit"] = humidConfig.target_relay_bit;
+    doc["humid_min"]        = humidConfig.humid_min;
+    doc["humid_max"]        = humidConfig.humid_max;
+    doc["output_on"]        = humidOutputOn;
+    const Rs485SensorData& ms2 = rs485_get_ms2();
+    doc["humid_online"]     = ms2.online;
+    if (ms2.online) doc["humid_now"] = serialized(String(ms2.hum_pct, 1));
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiHumidSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>())          humidConfig.enabled          = doc["enabled"];
+    if (doc["target_node_id"].is<int>())    humidConfig.target_node_id   = constrain((int)doc["target_node_id"],   0, 254);
+    if (doc["target_relay_bit"].is<int>())  humidConfig.target_relay_bit = constrain((int)doc["target_relay_bit"], 0, 3);
+    if (doc["humid_min"].is<int>())         humidConfig.humid_min        = constrain((int)doc["humid_min"], 0, 1000);
+    if (doc["humid_max"].is<int>())         humidConfig.humid_max        = constrain((int)doc["humid_max"], 0, 1000);
+    saveHumidConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
 // ========== DWC-Beleuchtungstimer ==========
 // Einfacher Ein/Aus-Timer (kein Dawn/Dusk-Ramp wie beim Haupt-Scheduler) fuer ein separates
 // DWC-System, geschaltet ueber einen Ausgang eines ESP-NOW-Steckdosen-Nodes.
@@ -1186,10 +1478,11 @@ void handleApiLueftmodulSave() {
     server.send(200, "application/json", "{\"success\":true}");
 }
 
-// ========== WhatsApp-Benachrichtigungen (CallMeBot, siehe notify.h) ==========
+// ========== Benachrichtigungen (WhatsApp/Telegram/E-Mail, siehe notify.h) ==========
 // Zustandswechsel-basiert: sendet eine Nachricht, sobald ein Alarm neu auftritt, danach in
 // festem Abstand eine Erinnerung solange er anhaelt, und eine Entwarnung sobald er sich
-// wieder loest. sendWhatsApp() selbst hat zusaetzlich ein knappes Rate-Limit (siehe notify.cpp).
+// wieder loest. sendNotification() faechert auf alle aktivierten Kanaele auf und hat je Kanal
+// zusaetzlich ein knappes Rate-Limit (siehe notify.cpp).
 #define NOTIFY_REMINDER_MS (30UL * 60000UL)   // Erinnerung alle 30 Minuten, solange ein Alarm aktiv bleibt
 
 struct NotifyAlertState { bool aktiv = false; unsigned long lastSentMs = 0; };
@@ -1202,11 +1495,11 @@ static void checkAlert(NotifyAlertState& st, bool enabled, bool problemNow, cons
         if (!st.aktiv || (now - st.lastSentMs >= NOTIFY_REMINDER_MS)) {
             st.aktiv      = true;
             st.lastSentMs = now;
-            sendWhatsApp(onMsg);
+            sendNotification(onMsg);
         }
     } else if (st.aktiv) {
         st.aktiv = false;
-        sendWhatsApp(offMsg);
+        sendNotification(offMsg);
     }
 }
 
@@ -1299,6 +1592,18 @@ void handleApiNotifyGet() {
     doc["tank_min_prozent"]     = notifyConfig.tank_min_prozent;
     doc["lueftmodul_enabled"]   = notifyConfig.lueftmodul_enabled;
     doc["ms2_online"]           = rs485_get_ms2().online;
+
+    doc["whatsapp_enabled"]     = notifyExtra.whatsapp_enabled;
+    doc["telegram_enabled"]     = notifyExtra.telegram_enabled;
+    doc["telegram_chat_id"]     = notifyExtra.telegram_chat_id;
+    doc["has_telegram_token"]   = strlen(notifyExtra.telegram_token) > 0;
+    doc["email_enabled"]        = notifyExtra.email_enabled;
+    doc["smtp_host"]            = notifyExtra.smtp_host;
+    doc["smtp_port"]            = notifyExtra.smtp_port;
+    doc["smtp_user"]            = notifyExtra.smtp_user;
+    doc["email_to"]             = notifyExtra.email_to;
+    doc["has_smtp_pass"]        = strlen(notifyExtra.smtp_pass) > 0;
+
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -1331,12 +1636,59 @@ void handleApiNotifySave() {
     if (doc["tank_min_prozent"].is<int>())       notifyConfig.tank_min_prozent      = constrain((int)doc["tank_min_prozent"], 0, 100);
     if (doc["lueftmodul_enabled"].is<bool>())    notifyConfig.lueftmodul_enabled    = doc["lueftmodul_enabled"];
     saveNotifyConfig();
+
+    if (doc["whatsapp_enabled"].is<bool>()) notifyExtra.whatsapp_enabled = doc["whatsapp_enabled"];
+    if (doc["telegram_enabled"].is<bool>()) notifyExtra.telegram_enabled = doc["telegram_enabled"];
+    if (doc["telegram_chat_id"].is<const char*>()) {
+        strncpy(notifyExtra.telegram_chat_id, doc["telegram_chat_id"] | "", sizeof(notifyExtra.telegram_chat_id) - 1);
+        notifyExtra.telegram_chat_id[sizeof(notifyExtra.telegram_chat_id) - 1] = '\0';
+    }
+    // Token/Passwort nur ueberschreiben, wenn mitgeschickt (leer = vorhandenes behalten) — gleiches
+    // Muster wie beim CallMeBot-API-Key oben.
+    const char* telegramToken = doc["telegram_token"] | "";
+    if (strlen(telegramToken) > 0) {
+        strncpy(notifyExtra.telegram_token, telegramToken, sizeof(notifyExtra.telegram_token) - 1);
+        notifyExtra.telegram_token[sizeof(notifyExtra.telegram_token) - 1] = '\0';
+    }
+    if (doc["email_enabled"].is<bool>()) notifyExtra.email_enabled = doc["email_enabled"];
+    if (doc["smtp_host"].is<const char*>()) {
+        strncpy(notifyExtra.smtp_host, doc["smtp_host"] | "", sizeof(notifyExtra.smtp_host) - 1);
+        notifyExtra.smtp_host[sizeof(notifyExtra.smtp_host) - 1] = '\0';
+    }
+    if (doc["smtp_port"].is<int>()) notifyExtra.smtp_port = (uint16_t)constrain((int)doc["smtp_port"], 1, 65535);
+    if (doc["smtp_user"].is<const char*>()) {
+        strncpy(notifyExtra.smtp_user, doc["smtp_user"] | "", sizeof(notifyExtra.smtp_user) - 1);
+        notifyExtra.smtp_user[sizeof(notifyExtra.smtp_user) - 1] = '\0';
+    }
+    if (doc["email_to"].is<const char*>()) {
+        strncpy(notifyExtra.email_to, doc["email_to"] | "", sizeof(notifyExtra.email_to) - 1);
+        notifyExtra.email_to[sizeof(notifyExtra.email_to) - 1] = '\0';
+    }
+    const char* smtpPass = doc["smtp_pass"] | "";
+    if (strlen(smtpPass) > 0) {
+        strncpy(notifyExtra.smtp_pass, smtpPass, sizeof(notifyExtra.smtp_pass) - 1);
+        notifyExtra.smtp_pass[sizeof(notifyExtra.smtp_pass) - 1] = '\0';
+    }
+    saveNotifyExtraConfig();
+
     server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleApiNotifyTest() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     sendWhatsApp("✅ Testnachricht vom Grow Center — WhatsApp-Benachrichtigung funktioniert!");
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiNotifyTestTelegram() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    sendTelegram("✅ Testnachricht vom Grow Center — Telegram-Benachrichtigung funktioniert!");
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiNotifyTestEmail() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    sendEmailSmtp("✅ Testnachricht vom Grow Center — E-Mail-Benachrichtigung funktioniert!");
     server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -1681,12 +2033,16 @@ void setup() {
   loadTankConfig();
   loadScheduleConfig();
   loadCo2Config();
+  loadFlowCalConfig();
+  loadFlowMonitorConfig();
+  loadHumidConfig();
   loadDwcConfig();
   loadDs18b20Config();
   loadGehaeuseFanConfig();
   loadFanConfig();
   loadLueftmodulConfig();
   loadNotifyConfig();
+  loadNotifyExtraConfig();
   loadWifiConfig();
   loadOutputConfig();
   applyOutputPollingFlags();
@@ -1778,12 +2134,26 @@ void setup() {
                   apCfgOk ? "OK" : "FEHLER", apOk ? "OK" : "FEHLER");
   }
 
-  // Ultraschall Trigger/Echo (Echo per Interrupt, nicht-blockierend)
-  pinMode(ULTRASONIC_TRIG, OUTPUT);
-  pinMode(ULTRASONIC_ECHO, INPUT);
-  digitalWrite(ULTRASONIC_TRIG, LOW);
-  attachInterrupt(digitalPinToInterrupt(ULTRASONIC_ECHO), ultraEchoISR, CHANGE);
-  dbgPrintln("Ultraschall Sensor bereit");
+  // Durchflussmesser (Test — nur Impulse zaehlen, Ausgabe auf Serial siehe loop())
+  pinMode(FLOW_SENSOR_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), flowSensorISR, RISING);
+  dbgPrintln("Durchflussmesser-Test bereit (GPIO3)");
+
+  // Tank-Fuellstandssensor: Ultraschall (Interrupt-Echo) ODER Drucksensor (HX710B,
+  // Bit-Banging) auf denselben zwei GPIOs — je nach tankSensorConfig.sensor_type.
+  loadTankSensorConfig();
+  if (tankSensorConfig.sensor_type == TANK_SENSOR_ULTRASCHALL) {
+    pinMode(ULTRASONIC_TRIG, OUTPUT);
+    pinMode(ULTRASONIC_ECHO, INPUT);
+    digitalWrite(ULTRASONIC_TRIG, LOW);
+    attachInterrupt(digitalPinToInterrupt(ULTRASONIC_ECHO), ultraEchoISR, CHANGE);
+    dbgPrintln("Tanksensor: Ultraschall bereit");
+  } else {
+    pinMode(HX710_SCK, OUTPUT);
+    pinMode(HX710_DOUT, INPUT);
+    digitalWrite(HX710_SCK, LOW);
+    dbgPrintln("Tanksensor: Drucksensor (HX710B) bereit");
+  }
 
   // RS485
   setupRS485();
@@ -1815,6 +2185,14 @@ void setup() {
   server.on("/api/licht",            handleApiLicht);
   server.on("/api/ventile",         handleApiVentilStatus);
   server.on("/api/output/test",     HTTP_POST, handleApiOutputTest);
+  server.on("/api/flowcal/status",  HTTP_GET,  handleApiFlowCalStatus);
+  server.on("/api/flowcal/start",   HTTP_POST, handleApiFlowCalStart);
+  server.on("/api/flowcal/begin",   HTTP_POST, handleApiFlowCalBegin);
+  server.on("/api/flowcal/stop",    HTTP_POST, handleApiFlowCalStop);
+  server.on("/api/flowcal/calc",    HTTP_POST, handleApiFlowCalCalc);
+  server.on("/api/flowcal/cancel",  HTTP_POST, handleApiFlowCalCancel);
+  server.on("/api/flowmon",         HTTP_GET,  handleApiFlowMonGet);
+  server.on("/api/flowmon/save",    HTTP_POST, handleApiFlowMonSave);
   server.on("/api/rs485",           handleApiRs485);
   server.on("/api/logs",            HTTP_GET,  handleApiLogsList);
   server.on("/api/logs/download",   HTTP_GET,  handleApiLogsDownload);
@@ -1826,6 +2204,8 @@ void setup() {
   server.on("/api/scheduler/save",  HTTP_POST, handleApiSchedulerSave);
   server.on("/api/co2",             HTTP_GET,  handleApiCo2Get);
   server.on("/api/co2/save",        HTTP_POST, handleApiCo2Save);
+  server.on("/api/humid",           HTTP_GET,  handleApiHumidGet);
+  server.on("/api/humid/save",      HTTP_POST, handleApiHumidSave);
   server.on("/api/dwc",             HTTP_GET,  handleApiDwcGet);
   server.on("/api/dwc/save",        HTTP_POST, handleApiDwcSave);
   server.on("/api/gehaeuse",        HTTP_GET,  handleApiGehaeuseGet);
@@ -1835,6 +2215,8 @@ void setup() {
   server.on("/api/notify",          HTTP_GET,  handleApiNotifyGet);
   server.on("/api/notify/save",     HTTP_POST, handleApiNotifySave);
   server.on("/api/notify/test",     HTTP_POST, handleApiNotifyTest);
+  server.on("/api/notify/test-telegram", HTTP_POST, handleApiNotifyTestTelegram);
+  server.on("/api/notify/test-email",    HTTP_POST, handleApiNotifyTestEmail);
   server.on("/api/ds18b20/scan",    HTTP_GET,  handleApiDs18b20Scan);
   server.on("/api/ds18b20/assign",  HTTP_POST, handleApiDs18b20Assign);
   server.on("/api/fan",             HTTP_GET,  handleApiFanGet);
@@ -1952,6 +2334,30 @@ void triggerUltraschall() {
   digitalWrite(ULTRASONIC_TRIG, LOW);
 }
 
+// Liest einen 24-Bit-Messwert vom HX710B (2-Draht Bit-Banging, kein I2C) — nur aufrufen,
+// wenn DOUT bereits LOW ist (Daten bereit), siehe Aufrufer in loop(). Die eigentliche
+// Taktfolge dauert nur ~60us und blockiert daher unkritisch, im Gegensatz zum Warten auf
+// DOUT=LOW, das bis zu 100ms dauern kann und deshalb nicht-blockierend gepollt wird.
+int32_t hx710Read() {
+  uint32_t value = 0;
+  for (int i = 0; i < 24; i++) {
+    digitalWrite(HX710_SCK, HIGH);
+    delayMicroseconds(1);
+    value = (value << 1) | digitalRead(HX710_DOUT);
+    digitalWrite(HX710_SCK, LOW);
+    delayMicroseconds(1);
+  }
+  // 25. Puls: waehlt Modus fuer die naechste Konvertierung (Default-Kanal) und
+  // setzt DOUT wieder auf HIGH, bis der naechste Messwert bereit ist.
+  digitalWrite(HX710_SCK, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(HX710_SCK, LOW);
+  delayMicroseconds(1);
+
+  if (value & 0x800000) value |= 0xFF000000UL;  // 24-Bit Zweierkomplement vorzeichenrichtig auf 32 Bit erweitern
+  return (int32_t)value;
+}
+
 // Liest einen DS18B20 ueber seine zugewiesene ROM-Adresse, falls vorhanden — sonst als
 // Fallback ueber die alte Bus-Scan-Reihenfolge (fuer Bestandsinstallationen ohne
 // Rollenzuordnung). DEVICE_DISCONNECTED_C (-127), wenn der Sensor nicht gefunden wird.
@@ -2003,10 +2409,12 @@ void loop() {
   }
 
   loopVentile(lichtAnCached);
+  loopFlowMonitor();
   loopRS485();
   loopEspNow();
   loopScheduler();
   loopCo2Ctrl();
+  loopHumidCtrl();
   loopDwcCtrl();
   loopGehaeuseFan();
   loopFanCtrl();
@@ -2079,7 +2487,12 @@ void loop() {
       e.fanOk       = fan.online;
       e.fanPercent  = fan.percent;
       e.fanRpm      = fan.rpm;
-      e.co2Ausgang  = co2OutputOn;
+      e.co2Ausgang    = co2OutputOn;
+      e.humidAusgang  = humidOutputOn;
+      e.flowBehaelter1Ml = flowMonitorState.total_ml[0];
+      e.flowBehaelter2Ml = flowMonitorState.total_ml[1];
+      e.flowBehaelter3Ml = flowMonitorState.total_ml[2];
+      e.flowGesamtMl     = flowMonitorState.total_ml_all;
       storage_log(rtc.now().unixtime(), e);
     }
     #ifdef DEBUG_DISTANZ
@@ -2087,45 +2500,70 @@ void loop() {
     #endif
   }
 
-  if (now - lastUltraRead >= 500) {
-    lastUltraRead    = now;
-    ultraEchoReady   = false;
-    ultraWaitingEcho = true;
-    ultraTriggerMs   = now;
-    triggerUltraschall();
-  }
+  if (tankSensorConfig.sensor_type == TANK_SENSOR_ULTRASCHALL) {
+    if (now - lastUltraRead >= 2000) {  // an das Poll-Intervall der Weboberfläche angeglichen (page.h)
+      lastUltraRead    = now;
+      ultraEchoReady   = false;
+      ultraWaitingEcho = true;
+      ultraTriggerMs   = now;
+      triggerUltraschall();
+    }
 
-  if (ultraWaitingEcho && ultraEchoReady) {
-    portENTER_CRITICAL(&ultraMux);
-    uint32_t durUs = ultraEchoDurationUs;
-    ultraEchoReady = false;
-    portEXIT_CRITICAL(&ultraMux);
-    ultraWaitingEcho = false;
+    if (ultraWaitingEcho && ultraEchoReady) {
+      portENTER_CRITICAL(&ultraMux);
+      uint32_t durUs = ultraEchoDurationUs;
+      ultraEchoReady = false;
+      portEXIT_CRITICAL(&ultraMux);
+      ultraWaitingEcho = false;
 
-    int distCm = (int)(durUs * 0.03557f / 2);
-    if (distCm > 0) {
-      int rohmm = distCm * 10 + tankConfig.offset_mm;
+      int distCm = (int)(durUs * 0.03557f / 2);
+      if (distCm > 0) {
+        int rohmmGemessen = distCm * 10 + tankConfig.offset_mm;
+        int rohmm = ultraFilterMedian(rohmmGemessen);
 
-      if (rohmm < tankConfig.min_mm) {
-        distanzMM         = tankConfig.min_mm;
-        wasserHoeheMM     = tankConfig.hoehe_mm;
-        fuellstandProzent = 100;
-        volumenLiter      = berechneVolumen(tankConfig.hoehe_mm);
-      } else if (rohmm > tankConfig.max_mm) {
-        // ungültiger Wert, ignorieren
-      } else {
-        distanzMM         = rohmm;
-        wasserHoeheMM     = constrain((int)tankConfig.leer_abstand_mm - distanzMM, 0, (int)tankConfig.hoehe_mm);
-        fuellstandProzent = wasserHoeheMM * 100 / tankConfig.hoehe_mm;
-        volumenLiter      = berechneVolumen(wasserHoeheMM);
-      }
+        if (rohmm < tankConfig.min_mm) {
+          distanzMM         = tankConfig.min_mm;
+          wasserHoeheMM     = tankConfig.hoehe_mm;
+          fuellstandProzent = 100;
+          volumenLiter      = berechneVolumen(tankConfig.hoehe_mm);
+        } else if (rohmm > tankConfig.max_mm) {
+          // ungültiger Wert, ignorieren
+        } else {
+          distanzMM         = rohmm;
+          wasserHoeheMM     = constrain((int)tankConfig.leer_abstand_mm - distanzMM, 0, (int)tankConfig.hoehe_mm);
+          fuellstandProzent = wasserHoeheMM * 100 / tankConfig.hoehe_mm;
+          volumenLiter      = berechneVolumen(wasserHoeheMM);
+        }
 
 #ifdef DEBUG_DISTANZ
-      dbgPrintf("Distanz: %d mm  Wasser: %d mm  Füllstand: %d%%  Volumen: %.1f L\n",
-                    distanzMM, wasserHoeheMM, fuellstandProzent, volumenLiter);
+        dbgPrintf("Distanz: %d mm  Wasser: %d mm  Füllstand: %d%%  Volumen: %.1f L\n",
+                      distanzMM, wasserHoeheMM, fuellstandProzent, volumenLiter);
+#endif
+      }
+    } else if (ultraWaitingEcho && (now - ultraTriggerMs > ULTRA_ECHO_TIMEOUT_MS)) {
+      ultraWaitingEcho = false;  // kein Echo erhalten - naechster Versuch in 500ms
+    }
+  } else {
+    // Drucksensor (HX710B): DOUT wird nicht-blockierend gepollt (kann bis zu ~100ms bis
+    // "bereit" brauchen), erst wenn LOW ansteht wird die kurze Taktfolge ausgeloest.
+    static bool druckWaitingReady = false;
+    if (!druckWaitingReady && now - lastUltraRead >= 2000) {
+      lastUltraRead      = now;
+      druckWaitingReady  = true;
+    }
+    if (druckWaitingReady && digitalRead(HX710_DOUT) == LOW) {
+      druckWaitingReady = false;
+      tankDruckRoh      = hx710Read();
+
+      int h = (int)lroundf((tankDruckRoh - tankSensorConfig.druck_null_raw) / tankSensorConfig.druck_counts_pro_mm);
+      wasserHoeheMM     = constrain(h, 0, (int)tankConfig.hoehe_mm);
+      fuellstandProzent = wasserHoeheMM * 100 / tankConfig.hoehe_mm;
+      volumenLiter      = berechneVolumen(wasserHoeheMM);
+
+#ifdef DEBUG_DISTANZ
+      dbgPrintf("Druck-Rohwert: %ld  Wasser: %d mm  Füllstand: %d%%  Volumen: %.1f L\n",
+                    (long)tankDruckRoh, wasserHoeheMM, fuellstandProzent, volumenLiter);
 #endif
     }
-  } else if (ultraWaitingEcho && (now - ultraTriggerMs > ULTRA_ECHO_TIMEOUT_MS)) {
-    ultraWaitingEcho = false;  // kein Echo erhalten - naechster Versuch in 500ms
   }
 }

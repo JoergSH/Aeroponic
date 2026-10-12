@@ -14,7 +14,7 @@
 static bool gp8403_ok = false;
 
 static bool write_reg(uint8_t reg, const uint8_t* data, uint8_t len) {
-    Wire.beginTransmission(GP8403_ADDR);
+    Wire.beginTransmission(I2C_ADDR_GP8403);
     Wire.write(reg);
     for (uint8_t i = 0; i < len; i++) Wire.write(data[i]);
     gp8403_ok = (Wire.endTransmission() == 0);

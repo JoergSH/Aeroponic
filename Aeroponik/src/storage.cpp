@@ -31,13 +31,15 @@ void storage_log(time_t ts, const LogEntry &e) {
 
     if (!isNew) {
         // Bereits vorhandene Tagesdatei kann noch das alte, kuerzere Spaltenformat haben
-        // (vor Erweiterung um Raum/Zelt/Luefter/CO2). In dem Fall beiseitelegen statt
-        // Zeilen mit unterschiedlicher Spaltenzahl zu mischen.
+        // (vor Erweiterung um Raum/Zelt/Luefter/CO2/Luftbefeuchtung/Duesen-Durchfluss). In dem
+        // Fall beiseitelegen statt Zeilen mit unterschiedlicher Spaltenzahl zu mischen. Pruefung
+        // auf die jeweils neueste Spalte (aktuell FlowGesamt_ml) faengt automatisch auch alle
+        // aelteren Formate.
         File check = SD.open(filename, FILE_READ);
         if (check) {
             String firstLine = check.readStringUntil('\n');
             check.close();
-            if (firstLine.indexOf("RaumTemp_C") < 0) {
+            if (firstLine.indexOf("FlowGesamt_ml") < 0) {
                 char oldName[28];
                 snprintf(oldName, sizeof(oldName), "/%04d-%02d-%02d_alt.csv",
                          t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
@@ -56,7 +58,8 @@ void storage_log(time_t ts, const LogEntry &e) {
     if (isNew) {
         f.println("Zeit,TempVorrat_C,TempPflanze_C,Druck_bar,Fuellstand_%,Volumen_L,"
                    "RaumTemp_C,RaumFeuchte_%,ZeltTemp_C,ZeltFeuchte_%,ZeltCO2_ppm,ZeltVPD_kPa,"
-                   "LichtMaske,LuefterLeistung_%,LuefterRPM,CO2Ausgang");
+                   "LichtMaske,LuefterLeistung_%,LuefterRPM,CO2Ausgang,HumidAusgang,"
+                   "FlowBehaelter1_ml,FlowBehaelter2_ml,FlowBehaelter3_ml,FlowGesamt_ml");
     }
 
     char zeit[9];
@@ -77,7 +80,12 @@ void storage_log(time_t ts, const LogEntry &e) {
                   String(e.lichtMaske) + "," +
                   (e.fanOk ? String(e.fanPercent) : String("")) + "," +
                   (e.fanOk ? String(e.fanRpm) : String("")) + "," +
-                  String(e.co2Ausgang ? 1 : 0);
+                  String(e.co2Ausgang ? 1 : 0) + "," +
+                  String(e.humidAusgang ? 1 : 0) + "," +
+                  String(e.flowBehaelter1Ml, 0) + "," +
+                  String(e.flowBehaelter2Ml, 0) + "," +
+                  String(e.flowBehaelter3Ml, 0) + "," +
+                  String(e.flowGesamtMl, 0);
 
     f.println(line);
     f.close();

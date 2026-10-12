@@ -13,7 +13,11 @@
 #define RS485_ADDR_MS2     0x20   // aktiv, wenn SCD41 beim Boot gefunden wurde
 #define RS485_ADDR_ANALOG  0x50   // aktiv, wenn GP8403 beim Boot gefunden wurde
 
-#define RS485_LUEFT_NUM_REGS    8   // 0-3 PWM% (FC06 schreiben/FC03 lesen), 4-7 RPM (read-only)
+#define RS485_LUEFT_NUM_REGS    9   // 0-3 PWM% (FC06/FC03), 4-7 RPM (read-only), 8 Boot-ID (read-only)
+// Reg 8: zufaellige Boot-ID (siehe main.cpp) -- der Master erkennt daran jeden Neustart dieses
+// Slaves zuverlaessig, auch wenn er zu kurz war um als Bus-Unterbrechung aufzufallen, und
+// schreibt die PWM-Sollwerte automatisch neu.
+#define RS485_LUEFT_REG_BOOTID  8
 #define RS485_MS2_NUM_REGS      14  // CO2,Temp,Humi,PPFD,8xKanal,Gain,Status — read-only (FC03)
 #define RS485_ANALOG_NUM_REGS   2   // Ch1/Ch2 0-4095 — FC06 schreiben / FC03 lesen
 

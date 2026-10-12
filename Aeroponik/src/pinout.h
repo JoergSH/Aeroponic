@@ -39,9 +39,15 @@
 #define SPI_MISO    13
 #define SPI_CS_W5500   14
 
-// ========== Ultraschall Füllstandssensor (HC-SR04 / RCWL-1670) ==========
-#define ULTRASONIC_TRIG  15   // → TRIG
-#define ULTRASONIC_ECHO  16   // ← ECHO  (HC-SR04 an 3.3V betreiben → ECHO direkt anschließbar)
+// ========== Tank-Füllstandssensor — Ultraschall ODER Drucksensor, per Konfiguration ==========
+// Beide Sensortypen nutzen dieselben zwei GPIOs (nie gleichzeitig aktiv, siehe
+// tankSensorConfig.sensor_type in tank.h) — keine Platinenänderung beim Wechsel nötig.
+//   Ultraschall (HC-SR04 / RCWL-1670 / JSN-SR04T): TRIG/ECHO
+//   Drucksensor (HX710B-basierte 0-40kPa-Module):  SCK/DOUT (2-Draht, kein I2C)
+#define ULTRASONIC_TRIG  16   // → TRIG
+#define ULTRASONIC_ECHO  15   // ← ECHO  (HC-SR04 an 3.3V betreiben → ECHO direkt anschließbar)
+#define HX710_SCK        ULTRASONIC_TRIG   // → PD_SCK (HX710B ebenfalls an 3.3V betreiben)
+#define HX710_DOUT       ULTRASONIC_ECHO   // ← DOUT
 
 // ========== I2C Bus (RTC + AHT21 + optional GP8403) ==========
 #define I2C_SDA          18
@@ -49,11 +55,22 @@
 
 // ========== GP8403 (I2C-DAC, 2x 0-10V) — optionaler Analogausgang ==========
 // Alternative zum RS485-Analogmodul. A0-A2 auf GND -> Adresse 0x58. Am I2C-Bus (Wire).
-#define GP8403_ADDR      0x58
+// Name an Multimodul angeglichen (dort I2C_ADDR_GP8403, gleiches Register-Layout).
+#define I2C_ADDR_GP8403  0x58
 
 // ========== RS485 (MAX13487 — Auto-Direction) ==========
-#define RS485_RO          1   // ← Receive Output  (UART1 RX) — Modul "RX"
-#define RS485_DI          2   // → Data Input       (UART1 TX) — Modul "TX"
+// Namen an Multimodul angeglichen (dort RS485_TX/RS485_RX aus MCU-Sicht) — vorher hier nach
+// Transceiver-Pinnamen RO/DI benannt, funktional identisch: RS485_RX = MCU-RX = Transceiver RO,
+// RS485_TX = MCU-TX = Transceiver DI.
+#define RS485_TX          2   // → an RXD vom Modul
+#define RS485_RX          1   // ← an TXD vom Modul
+
+// ========== Durchflussmesser (YF-S401-aehnlich, Hall-Impulsgeber) ==========
+// GPIO3 statt GPIO46: beides Strapping-Pins, aber GPIO3s Strapping-Rolle (JTAG-Signalquelle)
+// greift nur, wenn ein bestimmtes eFuse-Bit gesetzt ist (Standard: nein) und der Pin ist beim
+// Reset floating. GPIO46 wirkt dagegen zusammen mit GPIO0 an der Boot-Modus-Auswahl -- ein
+// Sensor, der den Pin aktiv treibt, koennte das beim Reset verfaelschen.
+#define FLOW_SENSOR_PIN   3
 
 #define WSINT       21
 

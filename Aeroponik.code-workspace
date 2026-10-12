@@ -24,12 +24,6 @@
 			"path": "ProtoRS485"
 		},
 		{
-			"path": "Analogmodul"
-		},
-		{
-			"path": "Lueftermodul"
-		},
-		{
 			"name": "test rs485",
 			"path": "../test rs485"
 		},

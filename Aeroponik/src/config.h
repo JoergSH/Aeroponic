@@ -4,6 +4,11 @@
 #include <IPAddress.h>
 #include "pinout.h"
 
+// ========== Firmware-Version ==========
+// Bei jeder Änderung hochzählen — wird im Webinterface unter System angezeigt,
+// damit erkennbar ist ob ein Upload tatsächlich angekommen ist.
+#define FW_VERSION "1.6.2"
+
 // ========== WiFi Konfiguration ==========
 // SSID/Passwort des Heim-WLANs liegen NICHT mehr im Quellcode — siehe wifictrl.h.
 // Sie werden über das Webinterface (Konfiguration → WLAN) gesetzt und im EEPROM
@@ -85,7 +90,7 @@ extern bool USE_ACCESS_POINT;
 //           Aktivierungen [inkl. Lueftermodul] + je min/max fuer Feuchte/Temperatur/Tank)
 //  276:    Lueftermodul (Zeltluefter) Magic Byte
 //  277–284: LueftmodulConfig (8 Bytes)
-#define EEPROM_SIZE             290
+#define EEPROM_SIZE             570
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
 #define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter
@@ -155,6 +160,34 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_LUEFTMODUL_MAGIC_BYTE    0x5E
 #define EEPROM_LUEFTMODUL_BASE          277   // 8 Bytes, siehe LueftmodulConfig in lueftmodul.h
 
+// Tanksensor-Typ (Ultraschall/Drucksensor) + Drucksensor-Kalibrierung, siehe TankSensorConfig
+// in tank.h. Eigener Block ans Ende angehaengt statt in TankConfig integriert, damit die
+// bestehenden Adressen ab EEPROM_SCHED_MAGIC_ADDR (39) nicht verschoben werden muessen.
+#define EEPROM_TANKSENSOR_MAGIC_ADDR    285
+#define EEPROM_TANKSENSOR_MAGIC_BYTE    0x9A
+#define EEPROM_TANKSENSOR_BASE          286   // 9 Bytes, siehe TankSensorConfig in tank.h
+
+// Luftbefeuchtung-Steuerung — eigener Block, gleiches Muster wie CO2 (siehe humidctrl.h/.cpp)
+#define EEPROM_HUMID_MAGIC_ADDR         296
+#define EEPROM_HUMID_MAGIC_BYTE         0x44
+#define EEPROM_HUMID_BASE               297   // 8 Bytes, siehe HumidConfig in humidctrl.h
+
+// Telegram + E-Mail (SMTP) — zusaetzliche Benachrichtigungskanaele neben WhatsApp/CallMeBot,
+// eigener Block damit das bestehende NotifyConfig-Layout oben unveraendert bleibt.
+#define EEPROM_NOTIFY2_MAGIC_ADDR       305
+#define EEPROM_NOTIFY2_MAGIC_BYTE       0x71
+#define EEPROM_NOTIFY2_BASE             306   // ~220 Bytes, siehe NotifyExtraConfig in notify.h
+
+// Durchflussmesser-Kalibrierung (Pulse pro Liter, per Kalibrierroutine ermittelt)
+#define EEPROM_FLOWCAL_MAGIC_ADDR       526
+#define EEPROM_FLOWCAL_MAGIC_BYTE       0x2E
+#define EEPROM_FLOWCAL_BASE             527   // 4 Bytes (float pulses_per_liter)
+
+// Duesen-Ueberwachung (erwarteter Durchfluss je Behaelter + Toleranz), siehe flowmonitor.h
+#define EEPROM_FLOWMON_MAGIC_ADDR       531
+#define EEPROM_FLOWMON_MAGIC_BYTE       0x8C
+#define EEPROM_FLOWMON_BASE             532   // ~17 Bytes, siehe FlowMonitorConfig in flowmonitor.h
+
 // Gehaeuseluefter-Config: eigener Magic-Bereich. Magic-Byte geaendert (0x4D -> 0x51), da
 // min_speed mit dem Wechsel von PWM auf reines An/Aus entfallen ist (dieser Lueftertyp
 // kommt mit PWM-Drosselung nicht klar).
@@ -180,6 +213,12 @@ extern bool USE_ACCESS_POINT;
 // ========== CO2-Steuerung Defaults ==========
 #define CO2_MIN_DEFAULT           800   // ppm — darunter: Ausgang EIN
 #define CO2_MAX_DEFAULT          1200   // ppm — darüber: Ausgang AUS
+
+// ========== Luftbefeuchtung-Steuerung Defaults ==========
+// Gleiche Hysterese-Logik wie CO2 (siehe humidctrl.h/.cpp): Luftfeuchte <= Min -> Ausgang
+// EIN (befeuchten), >= Max -> AUS. Werte in %*10 (ein Nachkommastelle ohne Float im EEPROM).
+#define HUMID_MIN_DEFAULT         500   // 50.0% — darunter: Ausgang EIN
+#define HUMID_MAX_DEFAULT         650   // 65.0% — darüber: Ausgang AUS
 
 // ========== Abluftluefter-Steuerung Defaults ==========
 #define FAN_MIN_SPEED_DEFAULT      30   // % — Mindestdrehzahl fuer beide Automodi

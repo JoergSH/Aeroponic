@@ -27,6 +27,8 @@ Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sens
 - [Multimodul](#multimodul)
 - [Analog-Ausgangsmodul](#analog-ausgangsmodul)
 - [CO2-Steuerung](#co2-steuerung)
+- [Luftbefeuchtung-Steuerung](#luftbefeuchtung-steuerung)
+- [Durchflussmesser-Kalibrierung & Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung)
 - [Raumklima & VPD](#raumklima--vpd)
 - [Daten-Log & Download](#daten-log--download)
 
@@ -46,7 +48,8 @@ Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sens
 Aeroponik Master (ESP32-S3 N16R8)
  │  W5500 Ethernet (LAN + WiFi parallel) · Magnetventile MV1–MV4 (direkte GPIO) · DS3231 RTC (I2C)
  │  MicroSD Datenlogging · RS485 UART1 (MAX13487) · DS18B20 (Vorrat/Pflanze/Innen) · Drucksensor 0,5–4,5V
- │  Ultraschall HC-SR04 Füllstand · Netzspannungsüberwachung (USV) · Webinterface Port 80
+ │  Tank-Füllstand: Ultraschall ODER HX710B-Drucksensor (umschaltbar) · Durchflussmesser (Düsen-Überwachung)
+ │  Netzspannungsüberwachung (USV) · Webinterface Port 80
  │
  ├── RS485 (9600 Baud) ⇄
  │    ├─ Multisensor              0x20 · FC03           Zelt-Klima (CO₂/Temp/Feuchte) + PPFD/Spektrum (AS7341)
@@ -126,14 +129,15 @@ typedef struct {
 
 **MCU:** ESP32-S3 N16R8 (16 MB Flash, 8 MB OPI-PSRAM)
 
-> **Gesperrte GPIOs:** 0, 3, 45, 46 (Strapping) · 19, 20 (USB-OTG) · 26–32 (Flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0)
+> **Gesperrte GPIOs:** 0, 45, 46 (Strapping, boot-kritisch) · 19, 20 (USB-OTG) · 26–32 (Flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0). GPIO3 ist zwar ebenfalls ein Strapping-Pin, dessen Rolle (JTAG-Signalquelle) aber nur greift, wenn ein bestimmtes eFuse-Bit gesetzt ist (Standard: nein) — wird deshalb bewusst für den Durchflussmesser genutzt (siehe unten), statt des bootkritischeren GPIO46.
 
 > **Hardware-Revision:** Ab der SMD-Platine (siehe [`SmdVersion_Pinbelegung.pdf`](../../DokuEtc/SmdVersion_Pinbelegung.pdf)) gibt es keinen I2C-GPIO-Expander (PCF8574AP) mehr — Ventile, Pumpe und Umwälzpumpe hängen an direkten GPIOs, und AHT21B teilt sich den Hauptbus mit der RTC statt eines eigenen zweiten I2C-Busses.
 
 | GPIO | Konstante | Peripherie |
 |---|---|---|
-| `1` | `RS485_RO` | UART1 RX ← MAX13487 Receive Out |
-| `2` | `RS485_DI` | UART1 TX → MAX13487 Data In |
+| `1` | `RS485_RX` | UART1 RX ← MAX13487 Receive Out |
+| `2` | `RS485_TX` | UART1 TX → MAX13487 Data In |
+| `3` | `FLOW_SENSOR_PIN` | Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber, push-pull) — siehe [Durchflussmesser-Kalibrierung & Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung) |
 | `4` | `DS18B20_PIN` | OneWire — DS18B20 (Vorrat, Pflanze, optional Innentemperatur), Zuordnung über ROM-Adresse (siehe [Funktionen](#funktionen)) |
 | `5` | `PRESSURE_PIN` | Analog — Drucksensor 0,5–4,5 V ratiometrisch |
 | `6` | `GEHAEUSE_FAN_PIN` | Gehäuselüfter, An/Aus (kein PWM), temperaturgeregelt über Innen-DS18B20 |
@@ -196,7 +200,7 @@ Drei unabhängige Bewässerungskreise mit konfigurierbarer Öffnungszeit (Sek.) 
 
 #### Tanküberwachung (Kegelstumpf)
 
-Füllstand per Ultraschall (HC-SR04). Umrechnung Distanz → Wasserhöhe → Volumen unter Berücksichtigung der konischen Tankgeometrie (einstellbare Radien oben/unten und Höhe).
+Füllstand wahlweise per **Ultraschall** (HC-SR04/RCWL-1670/JSN-SR04T) oder per **Drucksensor** (HX710B-basierte 0–40kPa-Module, 2-Draht-Protokoll ähnlich HX711, kein I2C) — umschaltbar per Konfiguration, beide Sensortypen nutzen dieselben zwei GPIOs (`ULTRASONIC_TRIG`/`ULTRASONIC_ECHO` bzw. `HX710_SCK`/`HX710_DOUT`), keine Platinenänderung beim Wechsel nötig. Umrechnung Distanz/Druck-Rohwert → Wasserhöhe → Volumen unter Berücksichtigung der konischen Tankgeometrie (einstellbare Radien oben/unten und Höhe). Beim Ultraschall glättet ein Median-Filter über die letzten 5 Messungen einzelne Ausreißer weg.
 
 #### DS18B20 — Rollenzuordnung über ROM-Adresse
 
@@ -208,11 +212,17 @@ Einfacher An/Aus-Schalter (kein PWM) am Steuerungsgehäuse, geregelt über den I
 
 #### Netzspannungsüberwachung
 
-`NETZ_OK_PIN` erkennt einen Netzausfall (Betrieb an der USV) — HIGH = Netz vorhanden, LOW = Netzausfall, 2000 ms entprellt gegen kurze Spannungsschwankungen. Der Status ist in der Weboberfläche sichtbar und löst optional eine [WhatsApp-Benachrichtigung](#whatsapp-benachrichtigungen) aus.
+`NETZ_OK_PIN` erkennt einen Netzausfall (Betrieb an der USV) — HIGH = Netz vorhanden, LOW = Netzausfall, 2000 ms entprellt gegen kurze Spannungsschwankungen. Der Status ist in der Weboberfläche sichtbar und löst optional eine [Benachrichtigung](#benachrichtigungen) aus.
 
-#### WhatsApp-Benachrichtigungen
+#### Benachrichtigungen
 
-Über [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) (Telefonnummer + API-Key, einmalig per WhatsApp-Aktivierungsnachricht erhalten). Ein globaler Schalter (`global_enabled`) übersteuert alle einzelnen Alarme; jeder Alarm ist zusätzlich einzeln aktivierbar:
+Drei unabhängig voneinander aktivierbare Kanäle — CallMeBot ist erfahrungsgemäß öfter mal instabil, Telegram und/oder E-Mail laufen deshalb parallel weiter, falls ein Kanal gerade ausfällt. Ein globaler Schalter (`global_enabled`) übersteuert alle Kanäle und Alarme; jeder Alarm ist zusätzlich einzeln aktivierbar:
+
+| Kanal | Einrichtung |
+|---|---|
+| WhatsApp | Über [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) — Telefonnummer + API-Key, einmalig per WhatsApp-Aktivierungsnachricht erhalten |
+| Telegram | Bot bei @BotFather anlegen (Token), eigene Chat-ID z. B. über @userinfobot ermitteln — Versand per Telegram-Bot-API (HTTPS) |
+| E-Mail | Echtes SMTP (implizites TLS, Port 465 üblich) über ein eigenes Postfach, z. B. Gmail mit App-Passwort (nicht das normale Kontopasswort) — kein Drittanbieter-Dienst nötig |
 
 | Alarm | Auslöser |
 |---|---|
@@ -222,6 +232,9 @@ Einfacher An/Aus-Schalter (kein PWM) am Steuerungsgehäuse, geregelt über den I
 | Temperatur | Zelt-Temperatur (RS485-Multisensor) außerhalb `temperatur_min`/`temperatur_max` |
 | Behälter fast leer | Vorratsbehälter-Füllstand unter `tank_min_prozent` |
 | Zeltlüfter-Drehzahl | Ist-Drehzahl weicht vom Erwartungswert ab, siehe [Lueftermodul](#lueftermodul) |
+| Düsen-Durchfluss | Soll/Ist-Abweichung je Behälter, siehe [Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung) |
+
+Jeder Kanal hat ein eigenes Rate-Limit (30 s) gegen versehentliches Zuspammen; ein eigener Test-Button pro Kanal in der Konfiguration verifiziert die Zugangsdaten unabhängig von den anderen.
 
 #### SD-Logging
 
@@ -270,7 +283,7 @@ Beispiel `num_ssr=4`, Aufgang 6:00–8:00 (120 min):
 
 ### RS485-Bus
 
-Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete Geräte im Zelt. Physikalisch ein gemeinsam genutzter Zweidraht-Bus über einen **MAX13487** (automatische Sende-/Empfangsrichtung, kein manuelles DE/RE-Umschalten nötig) an `RS485_DI` (GPIO1) / `RS485_RO` (GPIO2), **9600 Baud, 8N1**.
+Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete Geräte im Zelt. Physikalisch ein gemeinsam genutzter Zweidraht-Bus über einen **MAX13487** (automatische Sende-/Empfangsrichtung, kein manuelles DE/RE-Umschalten nötig) an `RS485_TX` (GPIO1) / `RS485_RX` (GPIO2), **9600 Baud, 8N1**.
 
 > **Historisch:** Auf demselben Bus lief bis vor Kurzem zusätzlich ein MARS-Hydro-*iControl*-Hub als weiterer Modbus-Master (Fremdsteuerung des Abluftlüfters per Werks-App). Dieses Gerät wurde vollständig entfernt — der Aeroponik-Master ist jetzt alleiniger Bus-Master.
 
@@ -279,6 +292,8 @@ Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete 
 Vereinfachtes Modbus-RTU: **FC03** (Read Holding Registers) zum Auslesen, **FC06** (Write Single Register) zum Schreiben. CRC16 nach Modbus-Standard (Polynom `0xA001`). Ein schlankes Zustandsautomat-Modell (`mb_state_t`) fragt die Busteilnehmer nacheinander ab; nur eine Anfrage gleichzeitig offen, Antwort-Timeout **2000 ms**.
 
 Nach jedem Senden wird das eigene Sende-Echo aktiv weggeräumt (`flush()` + kurze Pause + Restpuffer leeren), bevor auf die Antwort gewartet wird — nötig, weil der MAX13487 auf allen eigenen Platinen mit fest auf Empfang liegendem RE die eigene Sendung immer mit auf RX zurückspiegelt.
+
+> **Resync nach Slave-Reboot:** Lueftermodul/Multimodul (`0x51`) haben kein Flash-Gedächtnis für PWM-/Analogwerte — ein eigenständiger Reset des Slaves (Stromwackler, o. ä.) setzt sie auf 0 zurück, ohne dass der Master zwangsläufig eine Bus-Unterbrechung bemerkt (zu kurzer Ausfall). Register 8 der Lüfter-Registerkarte enthält deshalb eine bei jedem Boot zufällig neu gewürfelte **Boot-ID** (`rp2040.hwrand32()`); ändert sie sich gegenüber dem letzten Poll, erkennt der Master zuverlässig „Slave neu gestartet“ und schreibt die zuletzt kommandierten Lüfter-PWM-Werte **und** beide GP8403-Analogkanäle automatisch neu (gleiches physisches Board, siehe [Multimodul](#multimodul)). Licht (Lichtx4) braucht das nicht — die Relaismaske wird dort bereits Node-seitig per `Preferences` persistiert und beim eigenen Boot selbst wiederhergestellt.
 
 #### Bus-Teilnehmer
 
@@ -357,7 +372,9 @@ Eine gemeinsame Mindestdrehzahl (`min_speed`) gilt für beide Automodi. Die Diff
 
 ### Lueftermodul
 
-Eigenständige Firmware (`Lueftermodul`) auf einem **RP2040-Zero** (Waveshare), steuert bis zu 4 direkt am Zelt montierte PC-Lüfter (Arctic, 600–3000 RPM, PWM-gesteuert, 0 RPM unter 5 % PWM) mit individueller oder gemeinsamer Drehzahl in 10-%-Schritten. Nur über RS485 angebunden, Adresse `0x51`.
+> **Eigenständiges Lueftermodul-Projekt entfernt:** Die frühere separate Firmware `Lueftermodul` (nur Lüfter, keine optionale I2C-Peripherie) wurde gelöscht — [Multimodul](#multimodul) deckt den reinen Lüfter-Anwendungsfall bereits vollständig ab (MS2/Analog bleiben einfach inaktiv, wenn die zugehörige I2C-Peripherie fehlt). Auch bei einem Board, das nur Lüfter ansteuert, wird deshalb die Multimodul-Firmware geflasht — das Register-/Pinout-Layout unten gilt unverändert fort.
+
+Firmware auf einem **RP2040-Zero** (Waveshare), steuert bis zu 4 direkt am Zelt montierte PC-Lüfter (Arctic, 600–3000 RPM, PWM-gesteuert, 0 RPM unter 5 % PWM) mit individueller oder gemeinsamer Drehzahl in 10-%-Schritten. Nur über RS485 angebunden, Adresse `0x51`.
 
 #### Pinout
 
@@ -376,10 +393,11 @@ PWM- und Tacho-Pin eines Lüfters liegen bewusst nebeneinander (vereinfacht das 
 |---|---|---|
 | 0–3 | FC06 write / FC03 read | PWM-Sollwert Lüfter 1–4, 0–100 % |
 | 4–7 | FC03 read (read-only) | Ist-Drehzahl Lüfter 1–4, U/min |
+| 8 | FC03 read (read-only) | Boot-ID — zufällig bei jedem Start neu (`rp2040.hwrand32()`), siehe [RS485-Bus](#rs485-bus) |
 
 #### Master-seitige Überwachung
 
-Der Master vergleicht die gemeldete Ist-Drehzahl gegen eine aus dem PWM-Sollwert erwartete Drehzahl (lineare Interpolation zwischen 600 RPM bei 5 % und 3000 RPM bei 100 %, 0 RPM unter 5 %) mit einstellbarer Toleranz und meldet auffällige Abweichungen über die [WhatsApp-Benachrichtigungen](#funktionen).
+Der Master vergleicht die gemeldete Ist-Drehzahl gegen eine aus dem PWM-Sollwert erwartete Drehzahl (lineare Interpolation zwischen 600 RPM bei 5 % und 3000 RPM bei 100 %, 0 RPM unter 5 %) mit einstellbarer Toleranz und meldet auffällige Abweichungen über die [Benachrichtigungen](#funktionen).
 
 ### Multimodul
 
@@ -391,6 +409,8 @@ Eigenständige Firmware (`Multimodul`) auf derselben RP2040-Zero-Basis wie das [
 Beim Boot scannt die Firmware den I2C-Bus; nur tatsächlich gefundene Geräte werden initialisiert und ihre RS485-Adresse aktiviert. Fehlt ein Gerät, bleibt die zugehörige Adresse auf dem Bus unbeantwortet — für den Master nicht von einem schlicht nicht verbauten separaten Multisensor/Analogmodul zu unterscheiden. Dadurch ist am Master **keine Codeänderung** nötig: er pollt `0x20`, `0x50` und `0x51` bereits unabhängig voneinander und behandelt Ausbleiben der Antwort ohnehin als „Gerät offline“.
 
 Ein Multimodul kann also je nach Bestückung ein reines Lüftermodul, ein Lüftermodul mit Zelt-Klimasensorik, ein Lüftermodul mit 0–10V-Ausgang oder alles zusammen sein — auf demselben RS485-Bus, ohne separate Firmware-Varianten.
+
+> **Boot-Reihenfolge:** `rs485_slave_init()` läuft bewusst ganz am Anfang von `setup()`, **vor** dem I2C-Scan/Sensor-Init — sonst bliebe die DI-Leitung (GP28) unkonfiguriert/hochohmig, solange der I2C-Scan oder `scd41_init()`/`gp8403_init()` laufen (können bei einer hängenden I2C-Transaktion beliebig lange dauern), ohne definierten Idle-Pegel auf dem Bus. Zusätzlich loggt die Firmware beim Start die Reset-Ursache (`rp2040.getResetReason()`: Power-On, Watchdog, Brownout, Glitch, …) — nützlich zur Diagnose unerklärter Neustarts, da das Projekt selbst keinen Software-Watchdog nutzt.
 
 ### Analog-Ausgangsmodul
 
@@ -433,6 +453,45 @@ Nur das konfigurierte Relais-Bit (`target_relay_bit`, 0–3) des gewählten Node
 
 Auf der Startseite erscheint eine Status-Karte nur, wenn die Funktion aktiviert ist.
 
+### Luftbefeuchtung-Steuerung
+
+1:1 dieselbe Hysterese-Logik wie die [CO2-Steuerung](#co2-steuerung), nur mit der Zelt-Luftfeuchte (RS485-Multisensor) als Regelgröße statt CO₂ — ebenfalls auf einem beliebigen ESP-NOW-Steckdosen-Node.
+
+#### Logik
+
+- Luftfeuchte ≤ `humid_min` → Ziel-Relais **EIN** (befeuchten)
+- Luftfeuchte ≥ `humid_max` → Ziel-Relais **AUS**
+- dazwischen: letzter Zustand bleibt erhalten
+
+#### Konfiguration (eigener EEPROM-Block, Magic 0x44)
+
+`enabled` · `target_node_id` · `target_relay_bit` · `humid_min` (Standard 50,0 %) · `humid_max` (Standard 65,0 %) — intern als %×10 ohne Float im EEPROM abgelegt, im UI als normale Prozentzahl mit einer Nachkommastelle.
+
+Eigene Status-Karte auf der Startseite, nur sichtbar wenn aktiviert.
+
+### Durchflussmesser-Kalibrierung & Düsen-Überwachung
+
+Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber mit Push-Pull-Ausgang, kein Pull-up nötig) in der gemeinsamen Zulaufleitung **vor** dem Ventil-Verteiler — sieht damit den Durchfluss aller 4 Ventile nacheinander, da laut [Ventilsteuerung](#funktionen) ohnehin immer nur eines gleichzeitig offen ist. Interrupt an `FLOW_SENSOR_PIN` (GPIO3) zählt nur die Pulse; die Umrechnung in ml läuft über eine einmalige Kalibrierung.
+
+#### Kalibrierung (Konfiguration → Ventile)
+
+1. **„Kalibrierung starten“** — Pumpe an (GPIO48), Druck wird live angezeigt. Nutzt denselben Ausgangs-Direkttest wie die Verkabelungsprüfung (pausiert damit automatisch die normale Ventil-/Pumpensteuerung).
+2. **„Start“** — öffnet Rücklaufventil (MV4), zählt ab da die Impulse (live sichtbar).
+3. **„Stop“** — Ventil zu, Impulszahl eingefroren.
+4. Gemessene Menge in ml eintragen (z. B. mit einem Messbecher aufgefangen) → **„Berechnen“** ermittelt Pulse/Liter und speichert dauerhaft (eigener EEPROM-Block).
+
+#### Düsen-Überwachung (`flowmonitor.cpp`)
+
+Beobachtet den Ventilzustand (`behaelterZustand[]`) von außen: Wechselt ein Behälter in den Zustand „Aktiv“, wird der Impulszähler geleert (verwirft Reste aus der Vorlaufphase über MV4); beim Verlassen des Zustands wird die Menge berechnet und zu laufenden Summen addiert (je Behälter + Gesamt, nur im RAM seit letztem Neustart — eine echte Lebenszeit-Summe lässt sich bei Bedarf aus dem SD-Log rekonstruieren).
+
+Pro Behälter wird ein **Sollwert** (ml/s) geführt:
+
+- Ist noch keiner hinterlegt (0 bzw. per „Sollwerte löschen“ zurückgesetzt), übernimmt das System automatisch den **nächsten abgeschlossenen Gießzyklus** als neue Referenz — keine manuelle Berechnung nötig.
+- Ist einer hinterlegt und der Soll/Ist-Vergleich aktiviert, wird jeder Zyklus mit konfigurierbarer Toleranz (%) verglichen; bei Abweichung nach unten (verstopfte Düse) oder oben (Leck) geht eine [Benachrichtigung](#benachrichtigungen) über alle aktiven Kanäle raus.
+- „Sollwerte löschen“ setzt alle drei Werte auf 0 zurück — praktisch nach dem Düsenreinigen, damit nicht die alten (jetzt wieder gültigen) Werte fälschlich als Abweichung gewertet werden.
+
+SD-Log-Spalten: siehe [Daten-Log & Download](#daten-log--download).
+
 ### Raumklima & VPD
 
 #### AHT21B
@@ -470,6 +529,9 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `LichtMaske` | Lichtx4 Relais-Bitmaske |
 | `LuefterLeistung_%`, `LuefterRPM` | Abluftlüfter |
 | `CO2Ausgang` | CO2-Steuerung Relaiszustand (0/1) |
+| `HumidAusgang` | Luftbefeuchtung-Steuerung Relaiszustand (0/1) |
+| `FlowBehaelter1_ml` … `FlowBehaelter3_ml` | Düsen-Überwachung — Summe je Behälter seit Neustart |
+| `FlowGesamt_ml` | Düsen-Überwachung — Gesamtsumme aller Behälter seit Neustart |
 
 > **Automatische Migration:** Trifft die Firmware beim Schreiben auf eine bereits vorhandene Tagesdatei mit dem alten, kürzeren Spaltenformat (vor dieser Erweiterung), wird diese zu `_alt.csv` umbenannt (Daten bleiben erhalten) und eine neue Datei mit vollständigem Header begonnen — kein Vermischen unterschiedlicher Spaltenzahlen in einer Datei.
 
@@ -571,6 +633,8 @@ Nummer (0-3) + Enter (60s Timeout):
 
 > **Kanal-Konsistenz:** Alle Nodes und der Master-AP müssen auf demselben Kanal laufen. Der feste Kanal ist als `ESPNOW_DEFAULT_CHANNEL = 6` in allen `espnow_protocol.h`-Dateien definiert. Der Master-AP verwendet diesen Kanal automatisch wenn `USE_ACCESS_POINT = true`.
 
+> **Selbstheilung bei Router-Kanalwechsel:** Ändert der Router nachträglich seinen WLAN-Kanal (Auto-Channel, Neustart nach Stromausfall, …), würde ein Node mit nur einmalig gespeichertem Kanal dauerhaft auf dem alten (jetzt falschen) Kanal hängen bleiben und den Master nie wiederfinden — der Master selbst merkt das automatisch, da er sich bei jedem Boot per `WiFi.begin(ssid, password)` frisch verbindet und so immer den aktuellen Kanal übernimmt. Steckdosen und Multisensor prüfen deshalb bei **jedem Boot** die bekannte SSID per Scan still im Hintergrund nach (kein erneuter Serial-Dialog nötig) und aktualisieren den gespeicherten Kanal bei Abweichung. Zusätzlich läuft alle 12 Stunden im laufenden Betrieb derselbe Scan erneut; ändert sich der Kanal während des Betriebs (ohne Node-Neustart), startet sich der Node selbst neu, um den neuen Kanal zu übernehmen.
+
 #### 60-Sekunden-Timeout
 
 Wenn bei allen Setup-Dialogen (Typ-Auswahl, Node-ID, Kanal) innerhalb von 60 Sekunden keine Eingabe erfolgt, wird ein Standardwert verwendet: Steckdose / ID=3 / Kanal 6.
@@ -625,6 +689,8 @@ System documentation — master (ESP32-S3) with RS485 devices and wireless senso
 - [Multimodul](#multimodul-1)
 - [Analog Output Module](#analog-output-module)
 - [CO2 Control](#co2-control)
+- [Humidity Control](#humidity-control)
+- [Flow Sensor Calibration & Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring)
 - [Room Climate & VPD](#room-climate--vpd)
 - [Data Log & Download](#data-log--download)
 
@@ -642,9 +708,10 @@ System documentation — master (ESP32-S3) with RS485 devices and wireless senso
 
 ```
 Aeroponik Master (ESP32-S3 N16R8)
- │  W5500 Ethernet (LAN + WiFi in parallel) · PCF8574AP solenoid valves MV1–MV4 · DS3231 RTC (I2C)
+ │  W5500 Ethernet (LAN + WiFi in parallel) · solenoid valves MV1–MV4 (direct GPIO) · DS3231 RTC (I2C)
  │  MicroSD data logging · RS485 UART1 (MAX13487) · 2× DS18B20 · pressure sensor 0.5–4.5V
- │  HC-SR04 ultrasonic fill level · web interface, port 80
+ │  Tank fill level: ultrasonic OR HX710B pressure sensor (switchable) · flow meter (nozzle monitoring)
+ │  Mains power monitoring (UPS) · web interface, port 80
  │
  ├── RS485 (9600 baud) ⇄
  │    ├─ Multisensor              0x20 · FC03           Tent climate (CO₂/temp/humidity) + PPFD/spectrum (AS7341)
@@ -724,14 +791,15 @@ typedef struct {
 
 **MCU:** ESP32-S3 N16R8 (16 MB flash, 8 MB OPI-PSRAM)
 
-> **Reserved GPIOs:** 0, 3, 45, 46 (strapping) · 19, 20 (USB-OTG) · 26–32 (flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0)
+> **Reserved GPIOs:** 0, 45, 46 (strapping, boot-critical) · 19, 20 (USB-OTG) · 26–32 (flash) · 33–37 (OPI-PSRAM) · 38–42 (JTAG) · 43, 44 (UART0). GPIO3 is also a strapping pin, but its role (JTAG signal source) only applies if a specific eFuse bit is set (default: no) — deliberately used for the flow sensor below instead of the more boot-critical GPIO46.
 
 > **Hardware revision:** As of the SMD board (see [`SmdVersion_Pinbelegung.pdf`](../../DokuEtc/SmdVersion_Pinbelegung.pdf)), there is no longer an I2C GPIO expander (PCF8574AP) — valves, main pump, and circulation pump are direct GPIOs, and the AHT21B shares the main bus with the RTC instead of having its own second I2C bus.
 
 | GPIO | Constant | Peripheral |
 |---|---|---|
-| `1` | `RS485_RO` | UART1 RX ← MAX13487 Receive Out |
-| `2` | `RS485_DI` | UART1 TX → MAX13487 Data In |
+| `1` | `RS485_RX` | UART1 RX ← MAX13487 Receive Out |
+| `2` | `RS485_TX` | UART1 TX → MAX13487 Data In |
+| `3` | `FLOW_SENSOR_PIN` | Flow meter (YF-S401-like, Hall pulse output, push-pull) — see [Flow Sensor Calibration & Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring) |
 | `4` | `DS18B20_PIN` | OneWire — DS18B20 (reservoir, plant, optional internal temperature), assigned by ROM address (see [Features](#features)) |
 | `5` | `PRESSURE_PIN` | Analog — pressure sensor 0.5–4.5 V ratiometric |
 | `6` | `GEHAEUSE_FAN_PIN` | Enclosure fan, on/off (no PWM), temperature-controlled via the internal DS18B20 |
@@ -794,7 +862,7 @@ Three independent irrigation circuits with configurable open time (sec.) and pau
 
 #### Tank Monitoring (Truncated Cone)
 
-Fill level via ultrasonic sensor (HC-SR04). Conversion distance → water height → volume, accounting for the conical tank geometry (configurable top/bottom radii and height).
+Fill level via either an **ultrasonic sensor** (HC-SR04/RCWL-1670/JSN-SR04T) or a **pressure sensor** (HX710B-based 0–40kPa modules, 2-wire protocol similar to HX711, no I2C) — switchable via configuration; both sensor types share the same two GPIOs (`ULTRASONIC_TRIG`/`ULTRASONIC_ECHO` resp. `HX710_SCK`/`HX710_DOUT`), no board change needed when switching. Conversion distance/raw pressure value → water height → volume, accounting for the conical tank geometry (configurable top/bottom radii and height). For ultrasonic, a median filter over the last 5 readings smooths out single outliers.
 
 #### DS18B20 — Role Assignment by ROM Address
 
@@ -806,11 +874,17 @@ A simple on/off switch (no PWM) on the controller enclosure, controlled via the 
 
 #### Mains Power Monitoring
 
-`NETZ_OK_PIN` detects a mains power outage (running on the UPS) — HIGH = mains present, LOW = mains outage, debounced 2000 ms against brief voltage dips. The status is shown in the web interface and can optionally trigger a [WhatsApp notification](#whatsapp-notifications).
+`NETZ_OK_PIN` detects a mains power outage (running on the UPS) — HIGH = mains present, LOW = mains outage, debounced 2000 ms against brief voltage dips. The status is shown in the web interface and can optionally trigger a [notification](#notifications).
 
-#### WhatsApp Notifications
+#### Notifications
 
-Via [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) (phone number + API key, obtained once via a WhatsApp activation message). A global switch (`global_enabled`) overrides all individual alerts; each alert can also be enabled separately:
+Three independently enabled channels — CallMeBot tends to be unreliable at times, so Telegram and/or email keep working in parallel if one channel is down. A global switch (`global_enabled`) overrides all channels and alerts; each alert can also be enabled separately:
+
+| Channel | Setup |
+|---|---|
+| WhatsApp | Via [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) — phone number + API key, obtained once via a WhatsApp activation message |
+| Telegram | Create a bot with @BotFather (gives a token), find your own chat ID e.g. via @userinfobot — sent via the Telegram Bot API (HTTPS) |
+| Email | Real SMTP (implicit TLS, port 465 typical) through your own mailbox, e.g. Gmail with an app password (not the regular account password) — no third-party service needed |
 
 | Alert | Trigger |
 |---|---|
@@ -820,6 +894,9 @@ Via [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/) (pho
 | Temperature | Tent temperature (RS485 multisensor) outside `temperatur_min`/`temperatur_max` |
 | Reservoir nearly empty | Reservoir fill level below `tank_min_prozent` |
 | Tent fan RPM | Actual RPM deviates from the expected value, see [Lueftermodul](#lueftermodul-1) |
+| Nozzle flow | Target/actual deviation per reservoir, see [Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring) |
+
+Each channel has its own rate limit (30 s) against accidental spamming; a dedicated test button per channel in the configuration verifies its credentials independently of the others.
 
 #### SD Logging
 
@@ -868,7 +945,7 @@ Example `num_ssr=4`, sunrise 6:00–8:00 (120 min):
 
 ### RS485 Bus
 
-A second communication path, independent of the ESP-NOW network, for hard-wired devices in the tent. Physically a shared two-wire bus via a **MAX13487** (automatic transmit/receive direction, no manual DE/RE switching needed) on `RS485_DI` (GPIO1) / `RS485_RO` (GPIO2), **9600 baud, 8N1**.
+A second communication path, independent of the ESP-NOW network, for hard-wired devices in the tent. Physically a shared two-wire bus via a **MAX13487** (automatic transmit/receive direction, no manual DE/RE switching needed) on `RS485_TX` (GPIO1) / `RS485_RX` (GPIO2), **9600 baud, 8N1**.
 
 > **Historical note:** Until recently, a MARS Hydro *iControl* hub also ran on the same bus as a second Modbus master (third-party control of the exhaust fan via the vendor app). This device has been fully removed — the Aeroponik master is now the sole bus master.
 
@@ -877,6 +954,8 @@ A second communication path, independent of the ESP-NOW network, for hard-wired 
 Simplified Modbus RTU: **FC03** (Read Holding Registers) for reading, **FC06** (Write Single Register) for writing. CRC16 per the Modbus standard (polynomial `0xA001`). A lean state-machine model (`mb_state_t`) polls the bus participants in turn; only one request outstanding at a time, response timeout **2000 ms**.
 
 After every send, the transceiver's own transmit echo is actively drained (`flush()` + a short pause + clearing any leftover bytes) before waiting for the response — needed because the MAX13487 on all of our boards has RE tied permanently to receive, so it always reflects its own transmission back onto RX.
+
+> **Resync after a slave reboot:** Lueftermodul/Multimodul (`0x51`) have no flash memory for PWM/analog values — an independent reset of the slave (power blip, etc.) resets them to 0 without the master necessarily noticing a bus interruption (too short an outage). Register 8 of the fan register map therefore holds a **boot ID**, re-randomized on every boot (`rp2040.hwrand32()`); if it changes versus the last poll, the master reliably knows "slave just restarted" and automatically rewrites the last commanded fan PWM values **and** both GP8403 analog channels (same physical board, see [Multimodul](#multimodul-1)). Lichtx4 doesn't need this — its relay mask is already persisted node-side via `Preferences` and restored on its own boot.
 
 #### Bus Participants
 
@@ -955,7 +1034,9 @@ A shared minimum speed (`min_speed`) applies to both auto modes. The differentia
 
 ### Lueftermodul
 
-Standalone firmware (`Lueftermodul`) on an RP2040-Zero (Waveshare), driving up to 4 PC fans mounted directly on the tent (Arctic, 600–3000 RPM, PWM-controlled, 0 RPM below 5 % PWM) with individual or shared speed in 10 % steps. RS485-only, address `0x51`.
+> **Standalone Lueftermodul project removed:** The former separate firmware `Lueftermodul` (fans only, no optional I2C peripherals) has been deleted — [Multimodul](#multimodul-1) already covers the plain fan-only use case completely (MS2/analog simply stay inactive when the associated I2C peripheral is missing). Even a board that only drives fans is therefore flashed with the Multimodul firmware — the register/pinout layout below still applies unchanged.
+
+Firmware on an RP2040-Zero (Waveshare), driving up to 4 PC fans mounted directly on the tent (Arctic, 600–3000 RPM, PWM-controlled, 0 RPM below 5 % PWM) with individual or shared speed in 10 % steps. RS485-only, address `0x51`.
 
 #### Pinout
 
@@ -974,10 +1055,11 @@ Each fan's PWM and tacho pin are deliberately adjacent (simplifies the PCB layou
 |---|---|---|
 | 0–3 | FC06 write / FC03 read | PWM setpoint fan 1–4, 0–100 % |
 | 4–7 | FC03 read (read-only) | Actual speed fan 1–4, RPM |
+| 8 | FC03 read (read-only) | Boot ID — re-randomized on every start (`rp2040.hwrand32()`), see [RS485 Bus](#rs485-bus-1) |
 
 #### Master-Side Monitoring
 
-The master compares the reported actual RPM against an expected RPM derived from the PWM setpoint (linear interpolation between 600 RPM at 5 % and 3000 RPM at 100 %, 0 RPM below 5 %) with a configurable tolerance, and reports outliers via the [WhatsApp notifications](#features).
+The master compares the reported actual RPM against an expected RPM derived from the PWM setpoint (linear interpolation between 600 RPM at 5 % and 3000 RPM at 100 %, 0 RPM below 5 %) with a configurable tolerance, and reports outliers via the [notifications](#features).
 
 ### Multimodul
 
@@ -989,6 +1071,8 @@ Standalone firmware (`Multimodul`) on the same RP2040-Zero base as the [Luefterm
 On boot, the firmware scans the I2C bus; only devices actually found are initialized and have their RS485 address activated. If a device is missing, its address simply stays unanswered on the bus — indistinguishable, from the master's point of view, from a separate Multisensor/analog module that was never installed. This means **no code change is needed on the master**: it already polls `0x20`, `0x50`, and `0x51` independently and already treats a missing response as "device offline".
 
 Depending on what's populated, a Multimodul can therefore be a plain fan module, a fan module with tent climate sensing, a fan module with a 0–10V output, or all of it at once — on the same RS485 bus, with no separate firmware variants.
+
+> **Boot order:** `rs485_slave_init()` deliberately runs at the very start of `setup()`, **before** the I2C scan/sensor init — otherwise the DI line (GP28) would stay unconfigured/high-impedance for as long as the I2C scan or `scd41_init()`/`gp8403_init()` run (which can take arbitrarily long if an I2C transaction hangs), leaving the bus without a defined idle level. The firmware also logs the reset reason at boot (`rp2040.getResetReason()`: power-on, watchdog, brownout, glitch, …) — useful for diagnosing unexplained reboots, since the project itself doesn't use a software watchdog.
 
 ### Analog Output Module
 
@@ -1031,6 +1115,45 @@ Only the configured relay bit (`target_relay_bit`, 0–3) of the selected node (
 
 A status card appears on the home page only when the feature is enabled.
 
+### Humidity Control
+
+Exactly the same hysteresis logic as [CO2 Control](#co2-control), just using tent humidity (RS485 multisensor) as the control variable instead of CO₂ — also on any ESP-NOW socket node.
+
+#### Logic
+
+- Humidity ≤ `humid_min` → target relay **ON** (humidify)
+- Humidity ≥ `humid_max` → target relay **OFF**
+- in between: last state is held
+
+#### Configuration (own EEPROM block, Magic 0x44)
+
+`enabled` · `target_node_id` · `target_relay_bit` · `humid_min` (default 50.0 %) · `humid_max` (default 65.0 %) — stored internally as %×10 without a float in EEPROM, shown in the UI as a normal percentage with one decimal.
+
+Own status card on the home page, visible only when enabled.
+
+### Flow Sensor Calibration & Nozzle Monitoring
+
+Flow meter (YF-S401-like, Hall pulse output with a push-pull driver, no pull-up needed) in the shared supply line **before** the valve manifold — so it sees the flow of all 4 valves in turn, since per [valve control](#features) only one is ever open at a time anyway. An interrupt on `FLOW_SENSOR_PIN` (GPIO3) just counts pulses; conversion to ml is done via a one-time calibration.
+
+#### Calibration (Configuration → Valves)
+
+1. **"Start calibration"** — pump on (GPIO48), pressure is shown live. Uses the same output direct-test as the wiring check (which automatically pauses normal valve/pump control).
+2. **"Start"** — opens the return valve (MV4), counts pulses from then on (shown live).
+3. **"Stop"** — valve closes, pulse count is frozen.
+4. Enter the measured amount in ml (e.g. collected in a measuring cup) → **"Calculate"** derives pulses/liter and saves it permanently (own EEPROM block).
+
+#### Nozzle Monitoring (`flowmonitor.cpp`)
+
+Observes the valve state (`behaelterZustand[]`) from the outside: when a reservoir switches to the "active" state, the pulse counter is cleared (discarding leftovers from the MV4 pre-flush phase); when it leaves that state, the amount is calculated and added to running totals (per reservoir + overall, RAM-only since the last restart — a true lifetime total can be reconstructed from the SD log if needed).
+
+Each reservoir keeps a **target value** (ml/s):
+
+- If none is set yet (0, or reset via "Clear targets"), the system automatically adopts the **next completed watering cycle** as the new reference — no manual calculation needed.
+- If one is set and the target/actual comparison is enabled, every cycle is compared with a configurable tolerance (%); on deviation below (clogged nozzle) or above (leak), a [notification](#notifications) goes out over all active channels.
+- "Clear targets" resets all three values to 0 — handy after cleaning the nozzles, so the old (now valid again) values aren't wrongly flagged as a deviation.
+
+SD log columns: see [Data Log & Download](#data-log--download).
+
 ### Room Climate & VPD
 
 #### AHT21B
@@ -1068,6 +1191,9 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5
 | `LichtMaske` | Lichtx4 relay bitmask |
 | `LuefterLeistung_%`, `LuefterRPM` | Exhaust fan |
 | `CO2Ausgang` | CO2 control relay state (0/1) |
+| `HumidAusgang` | Humidity control relay state (0/1) |
+| `FlowBehaelter1_ml` … `FlowBehaelter3_ml` | Nozzle monitoring — total per reservoir since restart |
+| `FlowGesamt_ml` | Nozzle monitoring — total of all reservoirs since restart |
 
 > **Automatic migration:** If the firmware encounters an existing daily file with the old, shorter column format (prior to this extension) when writing, it renames it to `_alt.csv` (data is preserved) and starts a new file with the full header — no mixing of different column counts within one file.
 
@@ -1168,6 +1294,8 @@ Number (0-3) + Enter (60s timeout):
 ```
 
 > **Channel consistency:** All nodes and the master AP must run on the same channel. The fixed channel is defined as `ESPNOW_DEFAULT_CHANNEL = 6` in all `espnow_protocol.h` files. The master AP uses this channel automatically when `USE_ACCESS_POINT = true`.
+
+> **Self-healing on router channel change:** If the router later changes its WiFi channel (auto-channel, reboot after a power outage, …), a node that only stores the channel once would stay stuck on the old (now wrong) channel forever and never find the master again — the master itself handles this automatically, since it reconnects fresh via `WiFi.begin(ssid, password)` on every boot and thus always picks up the current channel. Sockets and Multisensor therefore silently re-verify the known SSID via a scan on **every boot** (no serial dialog needed) and update the stored channel if it differs. The same scan additionally runs every 12 hours during normal operation; if the channel changes while running (without a node restart), the node restarts itself to pick up the new channel.
 
 #### 60-Second Timeout
 

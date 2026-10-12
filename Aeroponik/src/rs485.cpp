@@ -176,6 +176,15 @@ static void parse_licht_read(const uint8_t* buf, uint8_t len) {
         return;
     }
 
+    // Wie beim Lueftermodul: kam der Slave gerade aus einem eigenen Reset zurueck (Master lief
+    // durch), hat er seinen letzten Zustand verloren -- der Master schreibt aber nur bei
+    // Aenderung, sieht hier also keinen Grund zum Neuschreiben. Bei Wiederverbindung deshalb
+    // einmalig die zuletzt kommandierte Maske erneut schreiben.
+    if (!licht.online) {
+        dbgPrintln("[RS485] Licht wieder erreichbar -- synchronisiere Maske neu");
+        licht_write_pending = true;
+    }
+
     licht.mask           = (uint8_t)((uint16_t)buf[3] << 8 | buf[4]);
     licht.online          = true;
     licht.last_update_ms = millis();
@@ -272,6 +281,15 @@ static void parse_analog_read(const uint8_t* buf, uint8_t len) {
         return;
     }
 
+    // Wie bei Lueftermodul/Licht: Slave kann durch eigenen Reset seinen Zustand verloren haben,
+    // ohne dass der Master eine Aenderung sieht -- bei Wiederverbindung beide Kanaele mit dem
+    // zuletzt kommandierten Wert neu schreiben.
+    if (!analog.online) {
+        dbgPrintln("[RS485] Analog wieder erreichbar -- synchronisiere beide Kanaele neu");
+        analog_ch1_write_pending = true;
+        analog_ch2_write_pending = true;
+    }
+
     analog.ch1_raw       = (uint16_t)buf[3] << 8 | buf[4];
     analog.ch2_raw       = (uint16_t)buf[5] << 8 | buf[6];
     analog.online         = true;
@@ -308,11 +326,12 @@ static void parse_analog_write_ack(const uint8_t* buf, uint8_t len, uint16_t wri
 }
 
 static void parse_lueft_read(const uint8_t* buf, uint8_t len) {
-    // Erwartet: [addr][0x03][byte_count=8][4 × 2 bytes RPM][crc_lo][crc_hi]
-    if (len < 13) return;
+    // Erwartet: [addr][0x03][byte_count=10][4 × 2 bytes RPM][2 bytes Boot-ID][crc_lo][crc_hi]
+    // (RPM 4-7 + Boot-ID 8, siehe RS485_LUEFT_REG_BOOTID) -- ein Register mehr als frueher.
+    if (len < 15) return;
     if (buf[0] != RS485_ADDR_LUEFT || buf[1] != 0x03) return;
     uint8_t byte_count = buf[2];
-    if (byte_count != RS485_LUEFT_COUNT * 2) return;
+    if (byte_count != (RS485_LUEFT_COUNT + 1) * 2) return;
 
     uint16_t calc = crc16(buf, 3 + byte_count);
     uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
@@ -320,6 +339,34 @@ static void parse_lueft_read(const uint8_t* buf, uint8_t len) {
         dbgPrintln("[RS485] CRC-Fehler Lueftermodul");
         return;
     }
+
+    // Resync-Erkennung, zweifach abgesichert:
+    //  1) Boot-ID (Reg 8) hat sich gegenueber dem letzten Poll geaendert -- erkennt JEDEN
+    //     Neustart des Slaves zuverlaessig, auch einen zu kurzen, um als Bus-Unterbrechung
+    //     aufzufallen (der Master saehe sonst gar keine Lücke).
+    //  2) Fallback: Slave war zuvor als offline erkannt (z.B. laengerer Ausfall).
+    // In beiden Faellen hat der Slave seine PWM-Register auf 0 verloren, der Master schreibt
+    // Sollwerte aber nur bei Aenderung neu (siehe loopLueftmodul() in main.cpp) -- deshalb hier
+    // einmalig alle 4 Kanaele mit dem zuletzt kommandierten Wert (lueft_write_value[], bleibt im
+    // Master-RAM erhalten) neu schreiben.
+    static int32_t lastBootId = -1;  // -1 = noch keinen gueltigen Wert gesehen (erzwingt Erstsync)
+    uint16_t bootId = (uint16_t)buf[3 + RS485_LUEFT_COUNT * 2] << 8 | buf[4 + RS485_LUEFT_COUNT * 2];
+    bool rebooted = (bootId != lastBootId);
+    if (rebooted || !lueft.online) {
+        dbgPrintf("[RS485] Lueftermodul %s -- synchronisiere PWM-Sollwerte neu (Boot-ID 0x%04X)\n",
+                      rebooted ? "neu gestartet" : "wieder erreichbar", bootId);
+        for (int i = 0; i < RS485_LUEFT_COUNT; i++) lueft_write_pending[i] = true;
+    }
+    // Analog (0x50, GP8403) sitzt physisch auf demselben Multimodul-Board wie das Lueftermodul
+    // (0x51) -- ein echter Neustart (Boot-ID-Wechsel) betrifft also immer beide gemeinsam. Eigene
+    // Boot-ID fuer Analog waere redundant, deshalb hier huckepack mit resynchronisieren (nur bei
+    // echtem Neustart, nicht beim bloss ausgebliebenen Fallback, da der nicht zwingend das ganze
+    // Board betrifft).
+    if (rebooted) {
+        analog_ch1_write_pending = true;
+        analog_ch2_write_pending = true;
+    }
+    lastBootId = bootId;
 
     for (int i = 0; i < RS485_LUEFT_COUNT; i++)
         lueft.rpm[i] = (uint16_t)buf[3 + i * 2] << 8 | buf[4 + i * 2];
@@ -359,9 +406,9 @@ static void parse_lueft_write_ack(const uint8_t* buf, uint8_t len, uint8_t chann
 // ========== Public ==========
 
 void setupRS485() {
-    gpio_reset_pin((gpio_num_t)RS485_RO);
-    gpio_reset_pin((gpio_num_t)RS485_DI);
-    RS485Serial.begin(RS485_BAUD, SERIAL_8N1, RS485_RO, RS485_DI);
+    gpio_reset_pin((gpio_num_t)RS485_RX);
+    gpio_reset_pin((gpio_num_t)RS485_TX);
+    RS485Serial.begin(RS485_BAUD, SERIAL_8N1, RS485_RX, RS485_TX);
     dbgPrintf("RS485 bereit (%d Baud, UART1)\n", RS485_BAUD);
 }
 
@@ -508,7 +555,7 @@ void loopRS485() {
         } else if (lueft_polling_enabled && (now - lueft_poll_ms >= FAN_POLL_INTERVAL_MS)) {
             lueft_poll_ms = now;
             send_ms       = now;
-            send_fc03(RS485_ADDR_LUEFT, RS485_LUEFT_REG_RPM_BASE, RS485_LUEFT_COUNT);
+            send_fc03(RS485_ADDR_LUEFT, RS485_LUEFT_REG_RPM_BASE, RS485_LUEFT_COUNT + 1);  // RPM×4 + Boot-ID
             active_target = TARGET_LUEFT_READ;
             mb_state      = MB_WAIT_RESPONSE;
         }

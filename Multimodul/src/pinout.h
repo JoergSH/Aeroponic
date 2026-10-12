@@ -10,8 +10,8 @@
 // ============================================================================
 
 // RS485 (UART0) — GP28 = TX -> DI, GP29 = RX <- RO des Transceivers
-#define RS485_TX   28
-#define RS485_RX   29
+#define RS485_TX   28 //an RXD vom Modul
+#define RS485_RX   29 //an TXD vom Modul
 
 // 4x PWM-Ausgang (25 kHz) + 4x Tacho-Eingang, identisch zum Lueftermodul (siehe dort fuer
 // die Begruendung der Pin-Reihenfolge: PWM/Tacho eines Luefters liegen nebeneinander).

@@ -30,3 +30,27 @@ void loadTankConfig() {
         dbgPrintln("Tankkonfig: Standardwerte");
     }
 }
+
+TankSensorConfig tankSensorConfig;
+
+void saveTankSensorConfig() {
+    EEPROM.put(EEPROM_TANKSENSOR_BASE, tankSensorConfig);
+    EEPROM.put(EEPROM_TANKSENSOR_MAGIC_ADDR, (uint8_t)EEPROM_TANKSENSOR_MAGIC_BYTE);
+    EEPROM.commit();
+    dbgPrintln("Tanksensor-Konfig gespeichert");
+}
+
+void loadTankSensorConfig() {
+    uint8_t magic;
+    EEPROM.get(EEPROM_TANKSENSOR_MAGIC_ADDR, magic);
+    if (magic == EEPROM_TANKSENSOR_MAGIC_BYTE) {
+        EEPROM.get(EEPROM_TANKSENSOR_BASE, tankSensorConfig);
+        dbgPrintln("Tanksensor-Konfig geladen");
+    } else {
+        tankSensorConfig.sensor_type         = TANK_SENSOR_ULTRASCHALL;
+        tankSensorConfig.druck_null_raw      = 0;
+        tankSensorConfig.druck_counts_pro_mm = 1000.0f;  // Platzhalter bis zur Kalibrierung
+        saveTankSensorConfig();
+        dbgPrintln("Tanksensor-Konfig: Standardwerte (Ultraschall)");
+    }
+}

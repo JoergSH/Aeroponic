@@ -7,6 +7,7 @@
 #include "relay/relay_manager.h"
 
 #define STATUS_INTERVAL_MS  30000UL
+#define CHANNEL_RECHECK_INTERVAL_MS (12UL * 3600000UL)  // 12h -- siehe recheck_channel_if_needed()
 
 static uint8_t  my_node_id    = 0x03;
 static uint8_t  my_node_type  = NODE_TYPE_SOCKET;
@@ -72,7 +73,31 @@ static uint8_t channel_setup() {
     prefs.end();
 
     if (ch > 0 && !ssid.isEmpty()) {
-        Serial.printf("[WIFI] Kanal %d (SSID: '%s')\n", ch, ssid.c_str());
+        // Router kann seinen Kanal jederzeit wechseln (Auto-Channel, Neustart nach
+        // Stromausfall, ...) -- der gespeicherte Wert waere dann dauerhaft falsch, ohne dass
+        // das je auffaellt (der Node haette einfach keine Verbindung zum Master mehr, siehe
+        // "Node meldet sich nicht an"). Deshalb bei jedem Boot still im Hintergrund pruefen
+        // statt dem gespeicherten Kanal blind zu vertrauen -- kein Serial-Prompt noetig, die
+        // SSID ist ja schon bekannt.
+        Serial.printf("[WIFI] Gespeichert: Kanal %d (SSID: '%s') -- verifiziere...\n", ch, ssid.c_str());
+        int n = WiFi.scanNetworks();
+        uint8_t found_ch = 0;
+        for (int i = 0; i < n; i++) {
+            if (ssid.equals(WiFi.SSID(i))) { found_ch = (uint8_t)WiFi.channel(i); break; }
+        }
+        WiFi.scanDelete();
+        if (found_ch > 0 && found_ch != ch) {
+            Serial.printf("[WIFI] Router-Kanal geaendert: %d -> %d, aktualisiere\n", ch, found_ch);
+            prefs.begin("wificfg", false);
+            prefs.putUChar("channel", found_ch);
+            prefs.end();
+            return found_ch;
+        }
+        if (found_ch == 0) {
+            Serial.println("[WIFI] SSID im Scan nicht gefunden, nutze gespeicherten Kanal weiter");
+        } else {
+            Serial.println("[WIFI] Kanal stimmt noch");
+        }
         return ch;
     }
     if (ch > 0 && ssid.isEmpty()) {
@@ -136,6 +161,46 @@ static uint8_t channel_setup() {
 
     Serial.printf("[WIFI] Gespeichert: '%s' Kanal %d\n", chosen_ssid.c_str(), chosen_ch);
     return chosen_ch;
+}
+
+// Ergaenzt die Boot-Pruefung in channel_setup(): falls der Router den Kanal waehrend des
+// laufenden Betriebs wechselt (Node selbst laeuft ja oft monatelang durch, ohne neu zu
+// starten), wuerde das sonst erst beim naechsten Reboot auffallen. Scan stoert ESP-NOW kurz
+// (Kanal-Hopping), daher nur selten pruefen.
+static void recheck_channel_if_needed() {
+    static uint32_t last_check_ms = 0;
+    uint32_t now = millis();
+    if (now - last_check_ms < CHANNEL_RECHECK_INTERVAL_MS) return;
+    last_check_ms = now;
+
+    prefs.begin("wificfg", true);
+    String  ssid      = prefs.getString("ssid", "");
+    uint8_t stored_ch = prefs.getUChar("channel", 0);
+    prefs.end();
+    if (ssid.isEmpty()) return;  // kein WLAN konfiguriert (fester Kanal) -- nichts zu pruefen
+
+    Serial.println("[WIFI] Periodische Kanal-Pruefung...");
+    int n = WiFi.scanNetworks();
+    uint8_t found_ch = 0;
+    for (int i = 0; i < n; i++) {
+        if (ssid.equals(WiFi.SSID(i))) { found_ch = (uint8_t)WiFi.channel(i); break; }
+    }
+    WiFi.scanDelete();
+
+    if (found_ch > 0 && found_ch != stored_ch) {
+        Serial.printf("[WIFI] Router-Kanal hat sich waehrend des Betriebs geaendert (%d -> %d) -- starte neu\n",
+                      stored_ch, found_ch);
+        prefs.begin("wificfg", false);
+        prefs.putUChar("channel", found_ch);
+        prefs.end();
+        delay(300);
+        ESP.restart();
+    }
+
+    // Der Scan selbst hat den Funkkanal verstellt, auch wenn sich nichts geaendert hat --
+    // zurueck auf den ESP-NOW-Betriebskanal, sonst bleibt der Node bis zum naechsten Reboot
+    // auf dem zuletzt gescannten Kanal haengen und faellt scheinbar grundlos offline.
+    esp_wifi_set_channel(stored_ch, WIFI_SECOND_CHAN_NONE);
 }
 
 // ========== Status senden ==========
@@ -260,5 +325,6 @@ void loop() {
             last_status_ms = now;
             send_status();
         }
+        recheck_channel_if_needed();
     }
 }

@@ -92,6 +92,36 @@ void setup() {
     while (!Serial && millis() - waitStart < 3000) delay(10);
     Serial.println("\n\nMultimodul (RP2040-Zero): RS485-Luefter (0x51) + optional MS2 (0x20) / Analog (0x50)");
 
+    // Diagnose fuer die haeufigen unerklaerten Reboots: es gibt keinen Software-Watchdog in
+    // diesem Projekt, die Reset-Ursache muss also entweder BROWNOUT_RESET/GLITCH_RESET
+    // (Stromversorgung) oder etwas anderes sein -- das hier direkt beim Boot mitloggen, statt
+    // weiter zu raten.
+    switch (rp2040.getResetReason()) {
+        case RP2040::PWRON_RESET:    Serial.println("[BOOT] Reset-Ursache: Power-On"); break;
+        case RP2040::RUN_PIN_RESET:  Serial.println("[BOOT] Reset-Ursache: RUN-Pin (manueller Reset)"); break;
+        case RP2040::SOFT_RESET:     Serial.println("[BOOT] Reset-Ursache: Software (reset()/reboot())"); break;
+        case RP2040::WDT_RESET:      Serial.println("[BOOT] Reset-Ursache: Watchdog (haengengeblieben)"); break;
+        case RP2040::DEBUG_RESET:    Serial.println("[BOOT] Reset-Ursache: Debug-Port"); break;
+        case RP2040::GLITCH_RESET:   Serial.println("[BOOT] Reset-Ursache: ⚠️ Glitch (Spannungs-/Taktstoerung)"); break;
+        case RP2040::BROWNOUT_RESET: Serial.println("[BOOT] Reset-Ursache: ⚠️ Brownout (Versorgungsspannung eingebrochen)"); break;
+        default:                     Serial.println("[BOOT] Reset-Ursache: unbekannt"); break;
+    }
+
+    // Boot-ID: einmalig zufaellig pro Start, damit der Master jeden Neustart dieses Slaves
+    // zuverlaessig erkennt (auch wenn er zu kurz war, um als Bus-Unterbrechung aufzufallen) und
+    // PWM-Sollwerte automatisch neu schreibt -- siehe Kommentar in rs485_slave.h.
+    uint16_t bootId = (uint16_t)(rp2040.hwrand32() & 0xFFFF);
+    rs485_slave_update_lueft(RS485_LUEFT_REG_BOOTID, bootId);
+    Serial.printf("[BOOT] Boot-ID: 0x%04X\n", bootId);
+
+    // RS485 ganz an den Anfang, VOR den I2C-Scan/Sensor-Init unten: DI (GP28) bleibt sonst
+    // unkonfiguriert/hochohmig, solange I2C-Scan + scd41_init()/gp8403_init() laufen (koennen
+    // bei einer haengenden I2C-Transaktion beliebig lange dauern) -- der Bus haette bis dahin
+    // keinen definierten Idle-Pegel. Das Lueftermodul (ohne I2C-Peripherie) hat dieses Problem
+    // nicht, weil dort nichts vor rs485_slave_init() passiert.
+    rs485_slave_set_lueft_write_cb(onLueftWrite);
+    rs485_slave_init(RS485_TX, RS485_RX);
+
     led.begin();
     led.setBrightness(40);
     led.setPixelColor(0, led.Color(0, 0, 30));  // dim blau = bereit/idle
@@ -132,8 +162,6 @@ void setup() {
     rs485_slave_set_ms2_active(scd41Present);
     rs485_slave_set_analog_active(gp8403Present);
 
-    rs485_slave_set_lueft_write_cb(onLueftWrite);
-    rs485_slave_init(RS485_TX, RS485_RX);
     Serial.printf("[RS485] Adressen: 0x51 (Luefter, immer) 0x20 (MS2, %s) 0x50 (Analog, %s)\n",
                   scd41Present ? "aktiv" : "inaktiv", gp8403Present ? "aktiv" : "inaktiv");
 }
