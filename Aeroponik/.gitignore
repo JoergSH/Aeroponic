@@ -9,3 +9,6 @@ flash_dump.bin
 
 # Claude Code Tool-Konfiguration (lokale Pfade/Berechtigungen, nicht projektrelevant)
 .claude/
+
+# Kalkulations-Tabelle (lokale Datei, nicht fuer das Repo bestimmt)
+docs/Kalkulation_Alles.ods
