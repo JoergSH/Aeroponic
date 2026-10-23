@@ -14,8 +14,12 @@ bool scd41_init() {
     delay(500);
     int16_t err = scd4x.startPeriodicMeasurement();
     if (err) {
-        Serial.printf("[SCD41] startPeriodicMeasurement Fehler: %d\n", err);
-        error_flag = true;
+        // Nicht gefunden/nicht gestartet ist kein Fehlerzustand im Sinne der Hang-Recovery --
+        // analog zu as7341_handler.cpp wird das nur als "keine Daten" behandelt, OHNE
+        // error_flag zu setzen. Sonst wuerde ein schlicht fehlender/nicht verbundener Sensor
+        // denselben 3-Versuche-dann-Neustart-Pfad wie ein echter Laufzeit-Hang ausloesen
+        // (siehe sensor_manager.cpp) und das Board endlos neu starten.
+        Serial.printf("[SCD41] nicht gefunden/startPeriodicMeasurement Fehler: %d\n", err);
         return false;
     }
     error_flag  = false;
@@ -46,7 +50,10 @@ bool scd41_read(int16_t* temp_cdeg, uint16_t* hum_cpct, uint16_t* co2_ppm) {
     *temp_cdeg  = (int16_t)(temp * 100.0f);
     *hum_cpct   = (uint16_t)(hum  * 100.0f);
     *co2_ppm    = co2;
-    Serial.printf("[SCD41] CO2=%u ppm  T=%.1f°C  H=%.1f%%\n", co2, temp, hum);
+    // Serial.printf("%f") liefert auf diesem Core teils leere Ausgabe statt der Zahl (fehlende
+    // Gleitkomma-Unterstuetzung) -- String(..,1) umgeht das zuverlaessig.
+    Serial.printf("[SCD41] CO2=%u ppm  T=%s°C  H=%s%%\n",
+                  co2, String(temp, 1).c_str(), String(hum, 1).c_str());
     return true;
 }
 

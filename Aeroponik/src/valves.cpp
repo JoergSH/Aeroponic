@@ -8,7 +8,14 @@ VentilConfig     ventilConfig;
 BehaelterZustand behaelterZustand[3];
 UmwaelzConfig    umwaelzConfig;
 
-static bool testMode = false;
+static bool testMode        = false;
+static bool testModePending = false;  // angefordert, wartet auf Ende des laufenden Zyklus
+
+// Batch-Modus-Zustand ("Gleiche Zeiten fuer alle") -- vorgezogen deklariert, da setupVentile()
+// batchPauseStart schon mitinitialisiert (siehe dort); Details/Nutzung siehe loopVentileBatch().
+static int8_t        batchActiveIdx  = -1;    // -1 = gemeinsame Pause-Phase
+static bool          batchInVorlauf  = false;
+static unsigned long batchPauseStart = 0;
 
 // Alle Ausgaenge (Ventile, Pumpe, Umwälzpumpe) sind direkte GPIO, kein I2C-Expander
 // (PCF8574) mehr — siehe OUTPUT_ACTIVE_LOW in pinout.h fuer die Treiber-Polaritaet.
@@ -111,9 +118,30 @@ static const char* OUTPUT_TEST_NAMES[OUTPUT_TEST_COUNT] = {
 };
 static uint8_t testState = 0x00;
 
+// true, solange irgendein Ventil/die Pumpe/die Umwälzpumpe gerade automatisch offen/an ist --
+// Testmodus soll keinen laufenden Giesszyklus mitten drin unterbrechen, siehe output_test_mode().
+static bool anyOutputActive() {
+    for (uint8_t i = 0; i < 3; i++)
+        if (behaelterZustand[i].zustand == V_AKTIV) return true;
+    return rueckOffenState || pumpeState || umwaelzState;
+}
+
 void output_test_mode(bool enable) {
-    testMode = enable;
-    if (!enable) {
+    if (enable) {
+        if (testMode) return;  // schon aktiv
+        if (anyOutputActive()) {
+            // Laufenden Zyklus nicht abwuergen -- erst aktivieren, sobald loopVentile() von
+            // selbst alles geschlossen hat (siehe dortige Pruefung von testModePending).
+            testModePending = true;
+            return;
+        }
+        testMode        = true;
+        testModePending = false;
+        testState       = 0x00;  // alles bereits aus, nichts zu uebernehmen
+    } else {
+        testModePending = false;  // noch nicht aktiv gewordene Anfrage zurueckziehen
+        if (!testMode) return;
+        testMode = false;
         for (uint8_t i = 0; i < OUTPUT_TEST_COUNT; i++) setOut(OUTPUT_TEST_PINS[i], false);
         testState        = 0x00;
         rueckOffenState   = false;
@@ -121,6 +149,8 @@ void output_test_mode(bool enable) {
         umwaelzState      = false;
     }
 }
+
+bool output_test_pending() { return testModePending; }
 
 void output_test_set(uint8_t index, bool on) {
     if (index >= OUTPUT_TEST_COUNT) return;
@@ -151,11 +181,18 @@ void setupVentile() {
         setOut(OUTPUT_TEST_PINS[i], false);
     }
     loadVentilConfig();
+    // Nach einem Neustart soll sofort gewaessert werden, statt erst die volle konfigurierte
+    // Pausenzeit abzuwarten (die bis zu 60 Minuten betragen kann) -- timerStart/batchPauseStart
+    // daher weit genug in die Vergangenheit setzen, damit die Pausenzeit-Pruefung (siehe
+    // loopVentileNormal()/loopVentileBatch()) beim allerersten Durchlauf sofort "abgelaufen"
+    // sieht. Unsigned-Unterlauf hier ist beabsichtigt und sicher (uebliches millis()-Rollover-
+    // Idiom): "now - timerStart" liefert trotzdem die korrekte (grosse) Differenz.
+    unsigned long initialTimerStart = millis() - 61UL * 60000UL;
     for (int i = 0; i < 3; i++) {
         behaelterZustand[i].zustand    = V_PAUSE;
-        behaelterZustand[i].timerStart = millis();
-        behaelterZustand[i].timerStart -= (unsigned long)i * 30000UL;
+        behaelterZustand[i].timerStart = initialTimerStart;
     }
+    batchPauseStart = initialTimerStart;
 
     loadUmwaelzConfig();
 
@@ -167,10 +204,7 @@ void setupVentile() {
 // einmal vor dem ersten aktiven Behaelter, dann alle aktiven Behaelter direkt
 // nacheinander (kein erneuter Vorlauf dazwischen), danach eine gemeinsame Pause, dann
 // wiederholt sich der ganze Batch. Individuelle "Aktiv"-Haken bleiben nutzbar — inaktive
-// Behaelter werden im Batch einfach uebersprungen.
-static int8_t       batchActiveIdx  = -1;    // -1 = gemeinsame Pause-Phase
-static bool         batchInVorlauf  = false;
-static unsigned long batchPauseStart = 0;
+// Behaelter werden im Batch einfach uebersprungen. (Zustandsvariablen siehe Dateianfang.)
 
 static int8_t findNextActive(int8_t fromIdx) {
     for (int8_t i = fromIdx; i < 3; i++)
@@ -334,6 +368,12 @@ static void loopVentileNormal(bool lichtAn) {
 }
 
 void loopVentile(bool lichtAn) {
+    if (testModePending && !anyOutputActive()) {
+        testMode        = true;
+        testModePending = false;
+        testState       = 0x00;
+        dbgPrintln("Ausgangstest: Zyklus beendet, Testmodus jetzt aktiv");
+    }
     if (testMode) return;
     if (ventilConfig.gleiche_zeiten) loopVentileBatch(lichtAn);
     else                             loopVentileNormal(lichtAn);

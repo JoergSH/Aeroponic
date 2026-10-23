@@ -26,6 +26,13 @@ bool sensor_manager_init(uint8_t sda_pin, uint8_t scl_pin);
 void sensor_manager_loop();
 bool sensor_manager_data_ready();
 void sensor_manager_get_data(sensor_data_t* out);
-bool sensor_manager_as7341_ok();   // false = AS7341 nicht gefunden/defekt, Lichtwerte ungueltig
+bool sensor_manager_as7341_ok();   // false = AS7341 nicht gefunden/defekt/deaktiviert, Lichtwerte ungueltig
+
+// SCD41-Teilergebnis ist unabhaengig vom (ggf. haengenden) AS7341 verfuegbar -- siehe
+// sensor_manager_data_ready()/_get_data() fuer den kompletten Zyklus inkl. AS7341. Ohne diese
+// Trennung blieb bei haengendem AS7341 auch eine laengst fertige, gueltige SCD41-Messung
+// (CO2/Temp/Feuchte) auf der Strecke, weil sie nur gemeinsam mit AS7341 uebertragen wurde.
+bool sensor_manager_scd41_ready();
+void sensor_manager_get_scd41(int16_t* temp_cdeg, uint16_t* hum_cpct, uint16_t* co2_ppm);
 
 #endif

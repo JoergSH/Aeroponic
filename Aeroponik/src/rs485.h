@@ -16,9 +16,17 @@
 #define RS485_REG_MASK      0      // Relaismaske, Bit0-3 = Relais 1-4
 
 #define RS485_ADDR_FAN       6     // MARS Hydro iControl Abluftluefter (fremdes Geraet, feste Adresse)
-#define RS485_FAN_REG_RPM    11    // 0-basiert = Register 12 (1-basiert), Ist-Drehzahl
-#define RS485_FAN_REG_PERCENT 16   // 0-basiert = Register 17 (1-basiert), Leistung 0-100%
-#define RS485_FAN_READ_COUNT 6     // deckt Register 12-17 (0-basiert 11-16) in einem Read ab
+// Der Luefter-Controller selbst fragt laut verifizierter Original-Spec
+// (CLAUDE_CODE_SPEC_RS485_MARS_FAN.md) IMMER Start=0, Count=17 ab (volles Register-Set) --
+// andere Lesebereiche wurden nicht getestet/erwartet. RPM/Prozent liegen innerhalb dieses
+// 17-Register-Blocks an fester Position.
+#define RS485_FAN_REG_RPM    11    // 0-basiert, Ist-Drehzahl
+#define RS485_FAN_REG_ENABLE 15    // 0-basiert, Enable/An-Bit -- muss vor einer Leistungsaenderung
+                                    // auf 1 gesetzt werden, sonst wird der Leistungswert zwar im
+                                    // Register uebernommen, aber nicht physisch ausgefuehrt
+                                    // (siehe MARS_Hydro_RE_Notizen.md Abschnitt 5b, Fund 7)
+#define RS485_FAN_REG_PERCENT 16   // 0-basiert, Leistung 0-100% (auch Schreibregister FC06)
+#define RS485_FAN_READ_COUNT 17    // immer das volle Set ab Register 0 lesen
 
 #define RS485_ADDR_ANALOG     0x50 // 2-Kanal RS485->0-10V Modul (ATO), einmalig per
                                     // Herstellersoftware auf diese Adresse + 9600 Baud
@@ -108,5 +116,11 @@ void rs485_set_licht_polling(bool enabled);
 void rs485_set_fan_polling(bool enabled);
 void rs485_set_analog_polling(bool enabled);
 void rs485_set_lueft_polling(bool enabled);
+
+// Diagnose: probiert eine einzelne Adresse direkt (FC03, blockierend, kurzer Timeout) --
+// umgeht die normale Poll-Zustandsmaschine bewusst, fuer Adress-/Baudraten-Scans bei
+// Verdacht auf eine verschobene/zurueckgesetzte Geraeteadresse (siehe handleApiRs485ScanFan()
+// in main.cpp). Rueckgabe: Anzahl empfangener Bytes (0 = keine Antwort).
+uint8_t rs485_probe_fc03(uint8_t addr, uint16_t start, uint16_t count, uint8_t* out_buf, uint8_t max_len);
 
 #endif

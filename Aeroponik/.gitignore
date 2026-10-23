@@ -12,3 +12,6 @@ flash_dump.bin
 
 # Kalkulations-Tabelle (lokale Datei, nicht fuer das Repo bestimmt)
 docs/Kalkulation_Alles.ods
+
+# Lokale, rechnerspezifische Einstellungen (z.B. LICHTX4_LEGACY_9600), siehe src/rs485.cpp
+src/local_config.h

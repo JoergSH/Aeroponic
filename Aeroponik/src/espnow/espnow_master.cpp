@@ -162,7 +162,6 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
             if (pkt.payload_len > 0) {
                 if (pkt.payload[0] == SUBTYPE_RELAY_STATUS)  inferred = NODE_TYPE_SOCKET;
                 else if (pkt.payload[0] == SUBTYPE_PWM_STATUS)    inferred = NODE_TYPE_LIGHT;
-                else if (pkt.payload[0] == SUBTYPE_LICHT_SUMMARY) inferred = NODE_TYPE_SPEKTRUM;
             }
             node->node_type = inferred;
             node->registered  = true;

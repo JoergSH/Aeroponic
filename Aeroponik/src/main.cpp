@@ -18,6 +18,7 @@
 #include <Wire.h>
 #include <RTClib.h>
 #include <Adafruit_AHTX0.h>
+#include <DFRobot_ENS160.h>
 #include "time.h"
 
 #include "config.h"
@@ -32,6 +33,7 @@
 #include "co2ctrl.h"
 #include "humidctrl.h"
 #include "dwcctrl.h"
+#include "raumlichtctrl.h"
 #include "ds18b20cfg.h"
 #include "gehaeusefan.h"
 #include "fanctrl.h"
@@ -67,9 +69,23 @@ static bool           aht21Ok   = false;
 static float          aht21Temp = NAN;
 static float          aht21Hum  = NAN;
 
-// Druck
+// ENS160 (optional, z.B. DFRobot Gravity ENS160+AHT21-Kombimodul SEN0515, Standardadresse 0x52,
+// gleicher I2C-Bus wie AHT21). Braucht Temp/Feuchte zur Kompensation (setTempAndHum() in loop()),
+// deshalb nur sinnvoll, solange auch der AHT21 gefunden wird.
+static DFRobot_ENS160_I2C ens160(&Wire, 0x52);
+static bool     ens160Ok   = false;
+static uint16_t ens160Eco2 = 0;
+
+// Druck (Pumpendruck, GPIO5) -- per Web-UI deaktivierbar, falls Sensor nicht verbaut/defekt ist
+// (siehe loadDruckSensorConfig()); Startseite zeigt die Karte dann gar nicht erst an.
 float druckPSI  = 0.0;
 float druckBar  = 0.0;
+static bool druckSensorEnabled = true;
+
+void loadDruckSensorConfig();
+void saveDruckSensorConfig();
+void handleApiDruckSensorGet();
+void handleApiDruckSensorSave();
 
 // Füllstand
 int     distanzMM         = -1;   // nur bei Sensortyp Ultraschall gueltig
@@ -287,14 +303,8 @@ struct NodeData {
     bool     has_relays;
     bool     has_pwm;
     uint32_t last_update_ms;
-    // AS7341 Spektrum-Sensor
+    // AS7341 Spektrum-Sensor (gemeldet vom Multisensor-Node, sensor_type 0x02)
     uint8_t  spektrum[8];    // Kanäle F1-F8 normiert 0-255
-    float    licht_ppfd;
-    float    licht_rb;
-    uint8_t  licht_bluepct;
-    uint8_t  licht_redpct;
-    bool     licht_sat;
-    bool     has_spektrum;
     bool     has_sensor_channels;  // SUBTYPE_LIGHT 12 Bytes: Gain + 8 Kanäle
 };
 static NodeData nodeData[ESPNOW_MAX_NODES];
@@ -341,15 +351,6 @@ void onEspNowSensor(uint8_t node_id, uint8_t /*node_type*/, const uint8_t* paylo
         d.pwm_ch1 = (uint16_t)((payload[1] << 8) | payload[2]);
         d.pwm_ch2 = (uint16_t)((payload[3] << 8) | payload[4]);
         d.has_pwm = true;
-    }
-    if (sensor_type == SUBTYPE_LICHT_SUMMARY && len >= 16) {
-        d.licht_ppfd    = (uint16_t)((payload[1] << 8) | payload[2]) / 10.0f;
-        d.licht_rb      = (uint16_t)((payload[3] << 8) | payload[4]) / 100.0f;
-        d.licht_bluepct = payload[5];
-        d.licht_redpct  = payload[6];
-        d.licht_sat     = payload[7] != 0;
-        for (int j = 0; j < 8; j++) d.spektrum[j] = payload[8 + j];
-        d.has_spektrum  = true;
     }
 }
 
@@ -428,6 +429,17 @@ void handleApiLogsDelete() {
     server.send(ok ? 200 : 404, "application/json", ok ? "{\"success\":true}" : "{\"success\":false}");
 }
 
+void handleApiLogsDeleteAll() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    uint32_t n = storage_delete_all_logs();
+    JsonDocument doc;
+    doc["success"] = true;
+    doc["deleted"] = n;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
 void handleApiOutputTest() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     JsonDocument doc;
@@ -442,6 +454,22 @@ void handleApiOutputTest() {
     resp["success"]  = true;
     resp["state"]    = output_test_get_state();
     resp["testmode"] = output_test_active();
+    resp["pending"]  = output_test_pending();
+    JsonArray names = resp["names"].to<JsonArray>();
+    for (uint8_t i = 0; i < OUTPUT_TEST_COUNT; i++) names.add(output_test_name(i));
+    String response;
+    serializeJson(resp, response);
+    server.send(200, "application/json", response);
+}
+
+// Nur-Lese-Status fuer periodisches Polling (siehe output_test_mode()/testModePending in
+// valves.cpp) -- damit die UI selbststaendig mitbekommt, wenn ein angeforderter Testmodus nach
+// Ende des laufenden Giesszyklus von selbst aktiv wird.
+void handleApiOutputTestStatus() {
+    JsonDocument resp;
+    resp["state"]    = output_test_get_state();
+    resp["testmode"] = output_test_active();
+    resp["pending"]  = output_test_pending();
     JsonArray names = resp["names"].to<JsonArray>();
     for (uint8_t i = 0; i < OUTPUT_TEST_COUNT; i++) names.add(output_test_name(i));
     String response;
@@ -450,15 +478,19 @@ void handleApiOutputTest() {
 }
 
 // ========== Durchflussmesser-Kalibrierung ==========
-// Ablauf: Pumpe an (Druck beobachten) -> Start (Ventil 4 auf, Pulse zaehlen) -> Stop (Ventil
-// zu, Pulszahl einfrieren) -> gemessene Menge in ml eingeben -> Pulse/Liter berechnen+speichern.
+// Ablauf: Pumpe an (Druck beobachten) -> Entlueften (Ventil auf/zu, Luft raus, beliebig oft) ->
+// Start (Ventil 4 auf, Pulse zaehlen) -> Stop (Ventil zu, Pulszahl einfrieren) -> gemessene Menge
+// in ml eingeben -> Pulse/Liter berechnen+speichern. Start ist erst nach mindestens einem
+// abgeschlossenen Entlueftungs-Zyklus moeglich (flowCalPurged), damit Luft im System nicht die
+// Pulszahl verfaelscht.
 // Nutzt den bestehenden Ausgangs-Direkttest (valves.h: output_test_*) fuer Pumpe (Index 5) und
 // Ruecklaufventil (Index 3) -- das pausiert automatisch die normale Ventil-/Pumpensteuerung
 // (output_test_mode(true)), genau wie beim manuellen Verkabelungstest.
-enum FlowCalState { FLOWCAL_IDLE, FLOWCAL_PUMP_ON, FLOWCAL_COUNTING, FLOWCAL_STOPPED };
+enum FlowCalState { FLOWCAL_IDLE, FLOWCAL_PUMP_ON, FLOWCAL_PURGING, FLOWCAL_COUNTING, FLOWCAL_STOPPED };
 static FlowCalState flowCalState          = FLOWCAL_IDLE;
 static uint32_t      flowCalResultPulses  = 0;   // eingefroren nach Stop
 static float          flowCalPulsesPerLiter = 0.0f;
+static bool           flowCalPurged         = false;  // true sobald einmal entlueftet wurde -- erst dann darf die eigentliche Messung starten
 
 void loadFlowCalConfig() {
     if (EEPROM.read(EEPROM_FLOWCAL_MAGIC_ADDR) == EEPROM_FLOWCAL_MAGIC_BYTE) {
@@ -480,7 +512,8 @@ static void flowCalAbort() {
     output_test_set(3, false);  // Ruecklaufventil zu
     output_test_set(5, false);  // Pumpe aus
     output_test_mode(false);
-    flowCalState = FLOWCAL_IDLE;
+    flowCalState  = FLOWCAL_IDLE;
+    flowCalPurged = false;
 }
 
 void handleApiFlowCalStatus() {
@@ -493,6 +526,7 @@ void handleApiFlowCalStatus() {
     doc["pulses_result"]    = flowCalResultPulses;
     doc["druckBar"]         = serialized(String(druckBar, 2));
     doc["pulses_per_liter"] = serialized(String(flowCalPulsesPerLiter, 1));
+    doc["purged"]           = flowCalPurged;
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -502,13 +536,33 @@ void handleApiFlowCalStart() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     output_test_mode(true);
     output_test_set(5, true);   // Pumpe an
-    flowCalState = FLOWCAL_PUMP_ON;
+    flowCalState  = FLOWCAL_PUMP_ON;
+    flowCalPurged = false;
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+// Entlueften: Ventil oeffnen/schliessen bevor die eigentliche Messung beginnt, damit Luft im
+// System (falls vorhanden) nicht die Pulszahl verfaelscht. Derselbe Button/Endpoint schaltet um --
+// erst nach dem Schliessen (flowCalPurged=true) laesst handleApiFlowCalBegin() den Start zu.
+void handleApiFlowCalPurge() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (flowCalState == FLOWCAL_PUMP_ON) {
+        output_test_set(3, true);   // Ruecklaufventil auf zum Entlueften
+        flowCalState = FLOWCAL_PURGING;
+    } else if (flowCalState == FLOWCAL_PURGING) {
+        output_test_set(3, false);  // Ruecklaufventil zu
+        flowCalPurged = true;
+        flowCalState  = FLOWCAL_PUMP_ON;
+    } else {
+        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
+        return;
+    }
     server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleApiFlowCalBegin() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
-    if (flowCalState != FLOWCAL_PUMP_ON) {
+    if (flowCalState != FLOWCAL_PUMP_ON || !flowCalPurged) {
         server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
         return;
     }
@@ -632,9 +686,12 @@ void handleApiData() {
     doc["aht21Temp"] = serialized(String(aht21Temp, 1));
     doc["aht21Hum"]  = serialized(String(aht21Hum,  1));
   }
+  doc["ens160Ok"] = ens160Ok;
+  if (ens160Ok) doc["ens160Co2"] = ens160Eco2;
   doc["netzOk"]            = netzOk;
   doc["lastResetReason"]   = bootResetReasonText;
   doc["druckBar"]          = serialized(String(druckBar, 2));
+  doc["druckSensorEnabled"] = druckSensorEnabled;
   doc["sensorTyp"]         = tankSensorConfig.sensor_type;
   if (tankSensorConfig.sensor_type == TANK_SENSOR_ULTRASCHALL) {
     doc["distanzMM"]       = distanzMM;
@@ -715,44 +772,10 @@ void handleApiEspNow() {
                 n["pwm_ch1"] = nodeData[i].pwm_ch1;
                 n["pwm_ch2"] = nodeData[i].pwm_ch2;
             }
-            if (nodeData[i].has_spektrum) {
-                n["licht_ppfd"]    = serialized(String(nodeData[i].licht_ppfd,   1));
-                n["licht_rb"]      = serialized(String(nodeData[i].licht_rb,     2));
-                n["licht_bluepct"] = nodeData[i].licht_bluepct;
-                n["licht_redpct"]  = nodeData[i].licht_redpct;
-                n["licht_sat"]     = nodeData[i].licht_sat;
-                JsonArray sp = n["spektrum"].to<JsonArray>();
-                for (int j = 0; j < 8; j++) sp.add(nodeData[i].spektrum[j]);
-            }
         }
         count++;
     }
     doc["count"] = count;
-    String response;
-    serializeJson(doc, response);
-    server.send(200, "application/json", response);
-}
-
-void handleApiLicht() {
-    JsonDocument doc;
-    JsonArray arr = doc["nodes"].to<JsonArray>();
-    unsigned long now = millis();
-    for (int i = 0; i < ESPNOW_MAX_NODES; i++) {
-        if (!espnow_nodes[i].registered) continue;
-        if (espnow_nodes[i].node_type != NODE_TYPE_SPEKTRUM) continue;
-        if (!nodeData[i].has_spektrum) continue;
-        JsonObject n = arr.add<JsonObject>();
-        n["id"]     = espnow_nodes[i].node_id;
-        n["online"] = espnow_nodes[i].online;
-        n["age_s"]  = (now - nodeData[i].last_update_ms) / 1000;
-        n["p"]      = serialized(String(nodeData[i].licht_ppfd,   1));
-        n["r"]      = serialized(String(nodeData[i].licht_rb,     3));
-        n["b"]      = nodeData[i].licht_bluepct;
-        n["a"]      = nodeData[i].licht_redpct;
-        n["s"]      = nodeData[i].licht_sat;
-        JsonArray f = n["f"].to<JsonArray>();
-        for (int j = 0; j < 8; j++) f.add(nodeData[i].spektrum[j]);
-    }
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -963,6 +986,71 @@ void handleApiVentilConfig() {
   // Modus-Wechsel: sauberer Reset, damit kein Ventil aus dem vorherigen Modus offen bleibt.
   if (ventilConfig.gleiche_zeiten != wasGleicheZeiten) resetVentilRuntimeState();
   server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== Manueller Einzelzyklus pro Behaelter ==========
+// Button auf der Aeroponik-Seite: oeffnet das Ventil des gewaehlten Behaelters einmal fuer die
+// konfigurierte Oeffnungszeit (je nach aktueller Licht-/Dunkelphase, siehe lichtAnCached) und
+// schliesst danach automatisch wieder. Nutzt denselben Ausgangs-Direkttest wie beim
+// Verkabelungstest/der Durchflussmesser-Kalibrierung -- pausiert dabei die normale Automatik.
+static int8_t   manualDoseBehaelter = -1;   // -1 = inaktiv, sonst Index 0-2
+static uint32_t manualDoseEndMs     = 0;
+
+void handleApiManualDoseStatus() {
+    JsonDocument doc;
+    doc["active"] = (manualDoseBehaelter >= 0);
+    if (manualDoseBehaelter >= 0) {
+        doc["index"] = manualDoseBehaelter;
+        uint32_t now = millis();
+        doc["remaining_s"] = (manualDoseEndMs > now) ? (manualDoseEndMs - now + 999) / 1000 : 0;
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiManualDoseStart() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (manualDoseBehaelter >= 0) {
+        server.send(400, "application/json", "{\"error\":\"Laeuft bereits\"}");
+        return;
+    }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    int idx = doc["index"] | -1;
+    if (idx < 0 || idx > 2) {
+        server.send(400, "application/json", "{\"error\":\"Ungueltiger Index\"}");
+        return;
+    }
+    uint8_t sekunden = lichtAnCached ? ventilConfig.behaelter[idx].oeffnungszeit_s
+                                     : ventilConfig.behaelter[idx].oeffnungszeit_s_dunkel;
+    output_test_mode(true);
+    output_test_set((uint8_t)idx, true);
+    output_test_set(5, true);   // Pumpe an -- sonst kommt am Duesenventil kein Druck an
+    manualDoseBehaelter = idx;
+    manualDoseEndMs     = millis() + (uint32_t)sekunden * 1000UL;
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiManualDoseCancel() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    if (manualDoseBehaelter >= 0) {
+        output_test_set((uint8_t)manualDoseBehaelter, false);
+        output_test_set(5, false);
+        output_test_mode(false);
+        manualDoseBehaelter = -1;
+    }
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void loopManualDose() {
+    if (manualDoseBehaelter < 0) return;
+    if (millis() >= manualDoseEndMs) {
+        output_test_set((uint8_t)manualDoseBehaelter, false);
+        output_test_set(5, false);
+        output_test_mode(false);
+        manualDoseBehaelter = -1;
+    }
 }
 
 // ========== NTP → RTC Sync ==========
@@ -1256,12 +1344,21 @@ void loopHumidCtrl() {
     last_check = millis();
 
     const Rs485SensorData& ms2 = rs485_get_ms2();
-    if (!ms2.online) return;  // keine verlaessliche Feuchte-Messung
+    // bit0 der MS2-Status (siehe Multimodul rs485_slave.h) = SCD41 liefert gerade gueltige
+    // Werte. ms2.online allein heisst nur "Modbus-Antwort kam an", nicht "Wert ist frisch" --
+    // bei haengendem/deaktiviertem AS7341 kam frueher trotzdem eine Antwort mit Feuchte=0%.
+    bool humValid = ms2.online && (ms2.status & 0x01);
 
-    uint16_t humNow = (uint16_t)roundf(ms2.hum_pct * 10.0f);
-    if (humNow <= humidConfig.humid_min)      humidOutputOn = true;
-    else if (humNow >= humidConfig.humid_max) humidOutputOn = false;
-    // sonst: Zustand halten (Hysterese-Band)
+    if (!humValid) {
+        // Keine verlaessliche Feuchte-Messung -> sicherheitshalber abschalten, statt den
+        // zuletzt bekannten Zustand (moeglicherweise "EIN") blind weiterlaufen zu lassen.
+        humidOutputOn = false;
+    } else {
+        uint16_t humNow = (uint16_t)roundf(ms2.hum_pct * 10.0f);
+        if (humNow <= humidConfig.humid_min)      humidOutputOn = true;
+        else if (humNow >= humidConfig.humid_max) humidOutputOn = false;
+        // sonst: Zustand halten (Hysterese-Band)
+    }
 
     int idx = findNodeIndex(humidConfig.target_node_id);
     if (idx < 0 || !espnow_nodes[idx].online) return;
@@ -1269,9 +1366,14 @@ void loopHumidCtrl() {
     uint8_t mask = nodeData[idx].relay_mask;
     uint8_t want = humidOutputOn ? (mask | (1 << bit)) : (mask & ~(1 << bit));
     if (want != mask) {
-        if (espnow_send_relay_mask(humidConfig.target_node_id, want))
-            dbgPrintf("[HUMID] Node %d Bit %d -> %s (Feuchte=%.1f%%)\n",
-                          humidConfig.target_node_id, bit, humidOutputOn ? "EIN" : "AUS", ms2.hum_pct);
+        if (espnow_send_relay_mask(humidConfig.target_node_id, want)) {
+            if (humValid)
+                dbgPrintf("[HUMID] Node %d Bit %d -> %s (Feuchte=%.1f%%)\n",
+                              humidConfig.target_node_id, bit, humidOutputOn ? "EIN" : "AUS", ms2.hum_pct);
+            else
+                dbgPrintf("[HUMID] Node %d Bit %d -> AUS (keine gueltige Feuchte-Messung)\n",
+                              humidConfig.target_node_id, bit);
+        }
     }
 }
 
@@ -1369,6 +1471,57 @@ void handleApiDwcSave() {
     saveDwcConfig();
     dwc_force_check = true;
     server.send(200, "application/json", "{\"success\":true}");
+}
+
+// ========== Raumlicht (manueller Schalter, kein Automatik/Zeitplan) ==========
+// Zeigt/schaltet nur einen Ausgang eines ESP-NOW-Steckdosen-Nodes -- kein eigener Ist-Zustand
+// im RAM/EEPROM, der echte Zustand kommt live aus nodeData[].relay_mask (siehe handleApiRaumlichtGet).
+
+void handleApiRaumlichtGet() {
+    JsonDocument doc;
+    doc["target_node_id"]   = raumlichtConfig.target_node_id;
+    doc["target_relay_bit"] = raumlichtConfig.target_relay_bit;
+    int idx = findNodeIndex(raumlichtConfig.target_node_id);
+    if (idx >= 0 && espnow_nodes[idx].online) {
+        uint8_t bit = raumlichtConfig.target_relay_bit & 0x03;
+        doc["online"]    = true;
+        doc["output_on"] = (nodeData[idx].relay_mask & (1 << bit)) != 0;
+    } else {
+        doc["online"]    = false;
+        doc["output_on"] = false;
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiRaumlichtSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["target_node_id"].is<int>())   raumlichtConfig.target_node_id   = constrain((int)doc["target_node_id"],   0, 254);
+    if (doc["target_relay_bit"].is<int>()) raumlichtConfig.target_relay_bit = constrain((int)doc["target_relay_bit"], 0, 3);
+    saveRaumlichtConfig();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiRaumlichtToggle() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    int idx = findNodeIndex(raumlichtConfig.target_node_id);
+    if (idx < 0 || !espnow_nodes[idx].online) {
+        server.send(400, "application/json", "{\"error\":\"Node offline\"}");
+        return;
+    }
+    uint8_t bit  = raumlichtConfig.target_relay_bit & 0x03;
+    uint8_t mask = nodeData[idx].relay_mask;
+    uint8_t want = mask ^ (1 << bit);  // umschalten
+    bool ok = espnow_send_relay_mask(raumlichtConfig.target_node_id, want);
+    JsonDocument doc;
+    doc["success"]   = ok;
+    doc["output_on"] = (want & (1 << bit)) != 0;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
 }
 
 // ========== Gehaeuseluefter (An/Aus mit Hysterese ueber Innen-DS18B20) ==========
@@ -1875,6 +2028,44 @@ void handleApiFanGet() {
     server.send(200, "application/json", response);
 }
 
+// Diagnose bei Verdacht auf eine verschobene/zurueckgesetzte MARS-Hydro-Adresse (Standard 6,
+// siehe rs485.h): probiert FC03 auf Register 11 (RPM) nacheinander fuer jede Adresse im Bereich
+// durch und meldet, welche antworten. Bekannte eigene Adressen (MS2 0x20, Lichtx4 0x40, Analog
+// 0x50, Lueftermodul 0x51) antworten im Scan ebenfalls -- das ist normal, interessant sind nur
+// zusaetzliche/unerwartete Treffer.
+void handleApiRs485ScanFan() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    int addrFrom = constrain((int)(doc["from"] | 1),   1, 247);
+    int addrTo   = constrain((int)(doc["to"]   | 20),  addrFrom, 247);
+
+    dbgPrintf("[RS485] Scan Adressen %d-%d (FC03, Reg %d, Count %d) ...\n",
+                  addrFrom, addrTo, RS485_FAN_REG_RPM, RS485_FAN_READ_COUNT);
+
+    JsonDocument resp;
+    JsonArray found = resp["found"].to<JsonArray>();
+    uint8_t buf[48];  // genug fuer eigenes Sende-Echo (8 Byte) + volle Antwort (max. 17 Byte bei Count=6)
+    for (int a = addrFrom; a <= addrTo; a++) {
+        esp_task_wdt_reset();
+        uint8_t len = rs485_probe_fc03((uint8_t)a, RS485_FAN_REG_RPM, RS485_FAN_READ_COUNT, buf, sizeof(buf));
+        if (len > 0) {
+            char hex[sizeof(buf) * 3 + 1] = {0};
+            for (uint8_t i = 0; i < len; i++) sprintf(hex + i * 3, "%02X ", buf[i]);
+            dbgPrintf("[RS485] Scan Adresse %d: %u Bytes: %s\n", a, len, hex);
+            JsonObject o = found.add<JsonObject>();
+            o["addr"]  = a;
+            o["bytes"] = len;
+            o["hex"]   = hex;
+        }
+    }
+    dbgPrintln("[RS485] Scan fertig");
+    resp["success"] = true;
+    String scanResponse;
+    serializeJson(resp, scanResponse);
+    server.send(200, "application/json", scanResponse);
+}
+
 void handleApiFanSave() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     JsonDocument doc;
@@ -2001,6 +2192,7 @@ void handleApiWifiSave() {
 void setup() {
   Serial.begin(115200);
   dbgPrintln("\n\nESP32 Aeroponik");
+  dbgPrintf("Firmware-Version: %s\n", FW_VERSION);
 
   bootResetReasonText = resetReasonToText(esp_reset_reason());
   dbgPrintf("Letzter Neustart: %s\n", bootResetReasonText.c_str());
@@ -2037,6 +2229,8 @@ void setup() {
   loadFlowMonitorConfig();
   loadHumidConfig();
   loadDwcConfig();
+  loadRaumlichtConfig();
+  loadDruckSensorConfig();
   loadDs18b20Config();
   loadGehaeuseFanConfig();
   loadFanConfig();
@@ -2081,6 +2275,10 @@ void setup() {
     while (aht21.getStatus() & AHTX0_STATUS_BUSY) delay(10);
   }
   dbgPrintln(aht21Ok ? "AHT21B gefunden" : "AHT21B nicht gefunden!");
+
+  // ENS160 (optional): begin() gibt 0 bei Erfolg zurueck.
+  ens160Ok = (ens160.begin() == 0);
+  dbgPrintln(ens160Ok ? "ENS160 gefunden" : "ENS160 nicht gefunden");
 
   // WiFi
   bool startFallbackAP = USE_ACCESS_POINT;
@@ -2182,11 +2380,12 @@ void setup() {
   server.on("/api/espnow",            handleApiEspNow);
   server.on("/api/espnow/relay",     HTTP_POST, handleApiRelaySet);
   server.on("/api/espnow/pwm",      HTTP_POST, handleApiPwmSet);
-  server.on("/api/licht",            handleApiLicht);
   server.on("/api/ventile",         handleApiVentilStatus);
   server.on("/api/output/test",     HTTP_POST, handleApiOutputTest);
+  server.on("/api/output/test",     HTTP_GET,  handleApiOutputTestStatus);
   server.on("/api/flowcal/status",  HTTP_GET,  handleApiFlowCalStatus);
   server.on("/api/flowcal/start",   HTTP_POST, handleApiFlowCalStart);
+  server.on("/api/flowcal/purge",   HTTP_POST, handleApiFlowCalPurge);
   server.on("/api/flowcal/begin",   HTTP_POST, handleApiFlowCalBegin);
   server.on("/api/flowcal/stop",    HTTP_POST, handleApiFlowCalStop);
   server.on("/api/flowcal/calc",    HTTP_POST, handleApiFlowCalCalc);
@@ -2197,7 +2396,11 @@ void setup() {
   server.on("/api/logs",            HTTP_GET,  handleApiLogsList);
   server.on("/api/logs/download",   HTTP_GET,  handleApiLogsDownload);
   server.on("/api/logs/delete",     HTTP_POST, handleApiLogsDelete);
+  server.on("/api/logs/delete-all", HTTP_POST, handleApiLogsDeleteAll);
   server.on("/api/ventile/config",  HTTP_POST, handleApiVentilConfig);
+  server.on("/api/ventile/dose/status", HTTP_GET,  handleApiManualDoseStatus);
+  server.on("/api/ventile/dose/start",  HTTP_POST, handleApiManualDoseStart);
+  server.on("/api/ventile/dose/cancel", HTTP_POST, handleApiManualDoseCancel);
   server.on("/api/umwaelz",          HTTP_GET,  handleApiUmwaelzGet);
   server.on("/api/umwaelz/save",     HTTP_POST, handleApiUmwaelzSave);
   server.on("/api/scheduler",       HTTP_GET,  handleApiSchedulerGet);
@@ -2208,6 +2411,11 @@ void setup() {
   server.on("/api/humid/save",      HTTP_POST, handleApiHumidSave);
   server.on("/api/dwc",             HTTP_GET,  handleApiDwcGet);
   server.on("/api/dwc/save",        HTTP_POST, handleApiDwcSave);
+  server.on("/api/raumlicht",        HTTP_GET,  handleApiRaumlichtGet);
+  server.on("/api/raumlicht/save",   HTTP_POST, handleApiRaumlichtSave);
+  server.on("/api/raumlicht/toggle", HTTP_POST, handleApiRaumlichtToggle);
+  server.on("/api/drucksensor",      HTTP_GET,  handleApiDruckSensorGet);
+  server.on("/api/drucksensor/save", HTTP_POST, handleApiDruckSensorSave);
   server.on("/api/gehaeuse",        HTTP_GET,  handleApiGehaeuseGet);
   server.on("/api/gehaeuse/save",   HTTP_POST, handleApiGehaeuseSave);
   server.on("/api/lueftmodul",      HTTP_GET,  handleApiLueftmodulGet);
@@ -2220,6 +2428,7 @@ void setup() {
   server.on("/api/ds18b20/scan",    HTTP_GET,  handleApiDs18b20Scan);
   server.on("/api/ds18b20/assign",  HTTP_POST, handleApiDs18b20Assign);
   server.on("/api/fan",             HTTP_GET,  handleApiFanGet);
+  server.on("/api/rs485/scanfan",   HTTP_POST, handleApiRs485ScanFan);
   server.on("/api/fan/save",        HTTP_POST, handleApiFanSave);
   server.on("/api/output",          HTTP_GET,  handleApiOutputGet);
   server.on("/api/output/save",     HTTP_POST, handleApiOutputSave);
@@ -2270,6 +2479,39 @@ void setup() {
 }
 
 // ========== LOOP ==========
+
+void loadDruckSensorConfig() {
+    if (EEPROM.read(EEPROM_DRUCKSENSOR_MAGIC_ADDR) == EEPROM_DRUCKSENSOR_MAGIC_BYTE) {
+        druckSensorEnabled = EEPROM.read(EEPROM_DRUCKSENSOR_BASE) != 0;
+    } else {
+        druckSensorEnabled = true;
+        saveDruckSensorConfig();
+    }
+}
+
+void saveDruckSensorConfig() {
+    EEPROM.write(EEPROM_DRUCKSENSOR_BASE, druckSensorEnabled ? 1 : 0);
+    EEPROM.write(EEPROM_DRUCKSENSOR_MAGIC_ADDR, EEPROM_DRUCKSENSOR_MAGIC_BYTE);
+    EEPROM.commit();
+}
+
+void handleApiDruckSensorGet() {
+    JsonDocument doc;
+    doc["enabled"] = druckSensorEnabled;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiDruckSensorSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>()) druckSensorEnabled = doc["enabled"];
+    saveDruckSensorConfig();
+    if (!druckSensorEnabled) druckBar = 0.0f;
+    server.send(200, "application/json", "{\"success\":true}");
+}
 
 // Nicht-blockierend: ein Sample pro loopDruck()-Aufruf statt delay(2) in einer Schleife.
 // starteDruckMessung() startet einen neuen 8-Sample-Mittelwert, loopDruck() treibt ihn voran.
@@ -2409,6 +2651,7 @@ void loop() {
   }
 
   loopVentile(lichtAnCached);
+  loopManualDose();
   loopFlowMonitor();
   loopRS485();
   loopEspNow();
@@ -2448,7 +2691,7 @@ void loop() {
     sensors.requestTemperatures();  // nicht-blockierend, siehe setWaitForConversion(false)
     tempConversionStartMs = now;
     tempConversionPending = true;
-    starteDruckMessung();
+    if (druckSensorEnabled) starteDruckMessung();
 
     if (aht21Ok) {
       sensors_event_t humEvt, tempEvt;
@@ -2456,6 +2699,12 @@ void loop() {
       aht21Temp = tempEvt.temperature;
       aht21Hum  = humEvt.relative_humidity;
       dbgPrintf("[AHT21] %.1f°C  %.1f%% rH\n", aht21Temp, aht21Hum);
+
+      if (ens160Ok) {
+        ens160.setTempAndHum(aht21Temp, aht21Hum);  // Kompensation braucht aktuelle Werte
+        ens160Eco2 = ens160.getECO2();
+        dbgPrintf("[ENS160] %u ppm eCO2\n", ens160Eco2);
+      }
     }
   }
 

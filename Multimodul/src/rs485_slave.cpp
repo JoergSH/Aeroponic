@@ -4,8 +4,10 @@
 // UART0 des RP2040 = Serial1 im arduino-pico Core. Pins werden vor begin() via
 // setTX/setRX gesetzt (siehe rs485_slave_init).
 
-#define RS485_BAUD         9600
-#define FRAME_TIMEOUT_US   4000   // >3.5 Zeichen Pause = Frame-Ende (bei 9600 Baud)
+#define RS485_BAUD         115200
+#define FRAME_TIMEOUT_US   4000   // >3.5 Zeichen Pause = Frame-Ende (unveraendert sicher: bei
+                                  // 115200 Baud liegen Byte-Luecken innerhalb eines Frames weit
+                                  // darunter, nur die erkannte Frame-Ende-Latenz ist etwas hoeher)
 #define RX_BUF_SIZE        64
 
 static uint16_t lueftRegs[RS485_LUEFT_NUM_REGS]   = {0};

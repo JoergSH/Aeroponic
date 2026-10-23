@@ -23,14 +23,40 @@ static const float GAIN_FACTOR[] = {
 #define GAIN_DEFAULT_IDX  1   // GAIN_1X — Kalibrierungsreferenz
 #define GAIN_TABLE_SIZE  11
 
-// MLR-Koeffizienten für PPFD-Berechnung
-// Rahman et al. (2025), doi:10.20944/preprints202504.1750.v1, Table 6
-// Kalibriert bei: GAIN_1X, ATIME=35, ASTEP=999 (≈100ms), R²=0.9998
-static const float MLR_B0   = -1.83008f;
-static const float MLR_B[8] = {
-    -0.10893f, -0.19323f,  0.149401f, 0.234282f,
-     0.019283f, -0.162300f, 0.133297f, 0.087622f,
-};
+// PPFD-Berechnung: physikalisches Modell statt MLR-Regression (Rahman et al. 2025) -- die MLR
+// hatte negative Gewichte (F1,F2,F6) und lieferte bei Spektren, die den Trainingslampen nicht
+// aehnelten, spuerbar falsche Werte. Vollstaendige Herleitung (Responsivity/Photonenenergie/
+// Avogadro, Quelle ams AS7341 Datasheet DS000504 v3-00) siehe Licht-Meter/src/main.cpp --
+// hier nur die Kurzfassung, identische Konstanten/Formel, K_CAL empirisch mit dem
+// Licht-Meter-Handgeraet gegen ein Referenzmessgeraet ermittelt.
+static const float CENTER_WL_NM[8]      = { 415, 445, 480, 515, 555, 590, 630, 680 };
+static const float REF_RESPONSIVITY[8]  = { 55, 110, 210, 390, 590, 840, 1350, 1070 };  // counts bei Ee=107.67uW/cm^2
+static const float REF_IRRADIANCE_UWCM2 = 107.67f;
+static const float REF_GAIN_X           = 64.0f;
+static const float REF_TINT_MS          = 27.8f;
+static const float OUR_GAIN_X           = 1.0f;  // K_PPFD gilt fuer GAIN_1X-normierte Zaehlwerte (siehe scale unten)
+static const double H_PLANCK = 6.62607015e-34;   // J*s
+static const double C_LIGHT  = 2.99792458e8;     // m/s
+static const double NA_UMOL  = 6.02214076e17;    // Teilchen pro Mikromol
+static float K_PPFD[8];                          // in as7341_init() berechnet, siehe compute_ppfd_weights()
+static const float K_CAL = 0.0731f;               // siehe Licht-Meter/src/main.cpp (gleicher Sensor/gleiche Einstellungen)
+
+// ADC-Vollausschlag = (ATIME+1)*(ASTEP+1) (Datasheet Equation 2), bei ATIME=35/ASTEP=999 also
+// 36000, NICHT 65535 -- die alte feste Schwelle 60000 fuer die Auto-Gain-Saettigungserkennung
+// konnte dadurch nie erreicht werden.
+static const uint32_t ADC_MAX        = (uint32_t)(35 + 1) * (999 + 1);
+static const uint32_t SAT_THRESHOLD  = (uint32_t)(ADC_MAX * 0.97f);
+
+static void compute_ppfd_weights() {
+    float ourTintMs = (35 + 1) * (999 + 1) * 2.78f / 1000.0f;  // ATIME=35/ASTEP=999, siehe as7341_init()
+    double scale = (OUR_GAIN_X / REF_GAIN_X) * (ourTintMs / REF_TINT_MS);
+    for (int i = 0; i < 8; i++) {
+        double rePerUwcm2Ref = REF_RESPONSIVITY[i] / REF_IRRADIANCE_UWCM2;
+        double reOurs   = rePerUwcm2Ref * scale;
+        double ePhotonJ = H_PLANCK * C_LIGHT / (CENTER_WL_NM[i] * 1e-9);
+        K_PPFD[i] = (float)(0.01 / (reOurs * ePhotonJ * NA_UMOL));  // 0.01 = uW/cm^2 -> W/m^2
+    }
+}
 
 typedef enum {
     AS_IDLE = 0,
@@ -46,6 +72,11 @@ static as_state_t as_state  = AS_IDLE;
 static as7341_data_t result;
 
 bool as7341_init() {
+    // Auch als Recovery-Reinit nutzbar (siehe sensor_manager.cpp): setzt Zustandsmaschine und
+    // Gain zurueck, damit ein zuvor haengen gebliebener Messzyklus nicht "AS_DONE" vorgaukelt.
+    as_state = AS_IDLE;
+    gain_idx = GAIN_DEFAULT_IDX;
+
     // Haengt an Wire1 (I2C1, siehe pinout.h) statt am Standard-Wire (I2C0).
     initialized = as7341.begin(AS7341_I2CADDR_DEFAULT, &Wire1);
     if (!initialized) {
@@ -55,6 +86,7 @@ bool as7341_init() {
     as7341.setATIME(35);
     as7341.setASTEP(999);
     as7341.setGain(GAIN_ENUM[gain_idx]);
+    compute_ppfd_weights();
     Serial.println("[AS7341] OK (ATIME=35, ASTEP=999, GAIN_1X)");
     return true;
 }
@@ -100,6 +132,7 @@ static bool process_reading() {
         raw[0], raw[1], raw[2], raw[3],   // 415, 445, 480, 515
         raw[6], raw[7], raw[8], raw[9]    // 555, 590, 630, 680
     };
+    uint16_t clearVal = raw[10];
 
     uint16_t max_ch  = 0;
     bool     all_dark = true;
@@ -107,10 +140,17 @@ static bool process_reading() {
         if (ch[i] > max_ch) max_ch = ch[i];
         if (ch[i] >= 100) all_dark = false;
     }
+    if (clearVal > max_ch) max_ch = clearVal;  // auch sehr breitbandiges/weisses Licht erkennen
+    if (clearVal >= 100) all_dark = false;     // sonst Oszillation moeglich: Clear saettigt
+                                                // (Gain runter), aber F1-F8 gelten bei halbem Gain
+                                                // dann als "dunkel" (Gain wieder hoch), usw.
 
-    // Auto-Gain: nur beim ersten Durchlauf anpassen, dann neu messen
-    if (as_state == AS_FIRST_MEASURE) {
-        if (max_ch > 60000 && gain_idx > 0) {
+    // Auto-Gain: bei Saettigung/Dunkelheit anpassen und neu messen -- auch nach einem
+    // vorherigen Schritt (AS_REMEASURE) erneut pruefen, damit bei starken Lichtspruengen
+    // (z.B. gestaffelte Lichtsteigerung) der Gain in einem Zyklus bis zum richtigen Wert
+    // konvergiert, statt pro Poll-Zyklus nur einen Schritt zu machen.
+    if (as_state == AS_FIRST_MEASURE || as_state == AS_REMEASURE) {
+        if (max_ch > SAT_THRESHOLD && gain_idx > 0) {
             gain_idx--;
             as7341.setGain(GAIN_ENUM[gain_idx]);
             Serial.printf("[AS7341] Sättigung → Gain idx %d\n", gain_idx);
@@ -128,10 +168,12 @@ static bool process_reading() {
         }
     }
 
-    // PPFD via MLR — Normierung auf GAIN_1X (Kalibrierungsreferenz, Index 1)
+    // PPFD via physikalisches Modell — Normierung auf GAIN_1X (Kalibrierungsreferenz, Index 1),
+    // K_PPFD ist fuer genau diese Normierung hergeleitet (siehe compute_ppfd_weights()).
     float scale = 1.0f / GAIN_FACTOR[gain_idx];  // bei GAIN_1X: scale = 1.0
-    float ppfd = MLR_B0;
-    for (int i = 0; i < 8; i++) ppfd += MLR_B[i] * ((float)ch[i] * scale);
+    float ppfd = 0.0f;
+    for (int i = 0; i < 8; i++) ppfd += K_PPFD[i] * ((float)ch[i] * scale);
+    ppfd *= K_CAL;
     if (ppfd < 0.0f) ppfd = 0.0f;
 
     result.ppfd_dppfd = (uint16_t)(ppfd * 10.0f + 0.5f);

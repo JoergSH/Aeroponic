@@ -7,7 +7,7 @@
 // ========== Firmware-Version ==========
 // Bei jeder Änderung hochzählen — wird im Webinterface unter System angezeigt,
 // damit erkennbar ist ob ein Upload tatsächlich angekommen ist.
-#define FW_VERSION "1.6.2"
+#define FW_VERSION "1.10.4"
 
 // ========== WiFi Konfiguration ==========
 // SSID/Passwort des Heim-WLANs liegen NICHT mehr im Quellcode — siehe wifictrl.h.
@@ -187,6 +187,18 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_FLOWMON_MAGIC_ADDR       531
 #define EEPROM_FLOWMON_MAGIC_BYTE       0x8C
 #define EEPROM_FLOWMON_BASE             532   // ~17 Bytes, siehe FlowMonitorConfig in flowmonitor.h
+
+// Raumlicht: manueller Schalter fuer einen Ausgang eines ESP-NOW-Steckdosen-Nodes (keine
+// Automatik/Zeitplan), siehe raumlichtctrl.h
+#define EEPROM_RAUMLICHT_MAGIC_ADDR     550
+#define EEPROM_RAUMLICHT_MAGIC_BYTE     0x3F
+#define EEPROM_RAUMLICHT_BASE           551   // 2 Bytes, siehe RaumlichtConfig in raumlichtctrl.h
+
+// Drucksensor (Pumpendruck, GPIO5, siehe druckBar) -- An/Aus, Anzeige auf der Startseite nur
+// wenn aktiviert (Sensor ggf. nicht verbaut/defekt)
+#define EEPROM_DRUCKSENSOR_MAGIC_ADDR   554
+#define EEPROM_DRUCKSENSOR_MAGIC_BYTE   0x19
+#define EEPROM_DRUCKSENSOR_BASE         555   // 1 Byte (bool enabled)
 
 // Gehaeuseluefter-Config: eigener Magic-Bereich. Magic-Byte geaendert (0x4D -> 0x51), da
 // min_speed mit dem Wechsel von PWM auf reines An/Aus entfallen ist (dieser Lueftertyp

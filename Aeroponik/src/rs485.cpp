@@ -6,10 +6,28 @@
 #include <string.h>
 #include "driver/gpio.h"
 
-#define RS485_BAUD           9600
+#define RS485_BAUD           115200   // alle Slaves (Lichtx4, Multisensor, Multimodul, ProtoRS485)
+
+// Optionale lokale Einstellungen (src/local_config.h, per .gitignore NICHT im Repo).
+// Dort z.B. `#define LICHTX4_LEGACY_9600` fuer ein Lichtx4, das noch mit alter Firmware auf
+// 9600 Baud laeuft und (eingebaut) nicht neu geflasht werden kann: der Master schaltet dann
+// nur fuer die Lichtx4-Transaktionen kurz auf 9600 Baud um. Ohne die Datei laufen alle
+// Module (inkl. Lichtx4) mit RS485_BAUD.
+#if __has_include("local_config.h")
+#include "local_config.h"
+#endif
+
+#ifdef LICHTX4_LEGACY_9600
+#define LICHT_BAUD_BEGIN()   RS485Serial.updateBaudRate(9600)
+#define LICHT_BAUD_END()     RS485Serial.updateBaudRate(RS485_BAUD)
+#else
+#define LICHT_BAUD_BEGIN()   do {} while (0)
+#define LICHT_BAUD_END()     do {} while (0)
+#endif
 #define POLL_INTERVAL_MS     15000UL
 #define LICHT_POLL_INTERVAL_MS 15000UL
 #define FAN_POLL_INTERVAL_MS  3000UL  // Luefter-Leistung aendert sich schneller als Zeitplan/Ventile
+#define FAN_HEARTBEAT_INTERVAL_MS 6000UL  // Takt des echten iControl-Broadcasts, siehe unten
 #define RESPONSE_TIMEOUT_MS  2000UL  // DS18B20 requestTemperatures() blockiert bis 750ms
 #define FRAME_TIMEOUT_US     4000
 #define RX_BUF_SIZE          64
@@ -45,7 +63,7 @@ static Rs485LueftData  lueft  = {false, {0,0,0,0}, {0,0,0,0}, 0};
 
 typedef enum { MB_IDLE, MB_WAIT_RESPONSE } mb_state_t;
 typedef enum { TARGET_MS2_READ, TARGET_LICHT_WRITE, TARGET_LICHT_READ,
-               TARGET_FAN_WRITE, TARGET_FAN_READ,
+               TARGET_FAN_ENABLE_WRITE, TARGET_FAN_WRITE, TARGET_FAN_READ,
                TARGET_ANALOG_WRITE_CH1, TARGET_ANALOG_WRITE_CH2, TARGET_ANALOG_READ,
                TARGET_LUEFT_WRITE, TARGET_LUEFT_READ } mb_target_t;
 
@@ -56,6 +74,7 @@ static uint32_t     licht_poll_ms = 0;
 static uint32_t     fan_poll_ms   = 0;
 static uint32_t     analog_poll_ms = 0;
 static uint32_t     lueft_poll_ms  = 0;
+static uint32_t     fan_heartbeat_ms = 0;
 static uint32_t     send_ms       = 0;
 static bool         first_poll    = true;
 
@@ -67,8 +86,9 @@ static bool lueft_polling_enabled  = true;
 static bool    licht_write_pending = false;
 static uint8_t licht_write_value   = 0;
 
-static bool    fan_write_pending = false;
-static uint8_t fan_write_value   = 0;
+static bool    fan_write_pending  = false;
+static uint8_t fan_write_value    = 0;
+static bool    fan_enable_pending = false;  // siehe RS485_FAN_REG_ENABLE in rs485.h
 
 static bool     analog_ch1_write_pending = false;
 static uint16_t analog_ch1_write_value   = 0;
@@ -124,6 +144,37 @@ static void send_fc06(uint8_t addr, uint16_t reg, uint16_t value) {
     req[6] = c & 0xFF;
     req[7] = c >> 8;
     RS485Serial.write(req, 8);
+    drainSelfEcho();
+    rx_len = 0;
+}
+
+static void send_fan_heartbeat_broadcast() {
+    // Experiment (23.10.2026, siehe MARS_Hydro_RE_Notizen.md Abschnitt 5b): der Luefter
+    // scheint einen "echten" Bus-Master nicht am blossen Polling zu erkennen, sondern an
+    // diesem periodischen Broadcast der echten iControl-Steuerung (addr=0, FC10,
+    // start=1001, count=26 Register, reg[8]=7 als Signatur). Ohne ihn bleibt er im
+    // Standalone-Modus (eigenes Polling, ignoriert normale Leseanfragen auf seine Adresse).
+    // Broadcast = keine Antwort erwartet, daher kein MB_WAIT_RESPONSE noetig.
+    uint16_t regs[26] = {0};
+    regs[8] = 7;
+
+    uint8_t req[7 + 26 * 2 + 2];
+    req[0] = 0;        // Broadcast-Adresse
+    req[1] = 0x10;
+    req[2] = 1001 >> 8;
+    req[3] = 1001 & 0xFF;
+    req[4] = 26 >> 8;
+    req[5] = 26 & 0xFF;
+    req[6] = 26 * 2;
+    for (int i = 0; i < 26; i++) {
+        req[7 + i * 2]     = regs[i] >> 8;
+        req[7 + i * 2 + 1] = regs[i] & 0xFF;
+    }
+    uint16_t c = crc16(req, 7 + 26 * 2);
+    req[7 + 26 * 2]     = c & 0xFF;
+    req[7 + 26 * 2 + 1] = c >> 8;
+
+    RS485Serial.write(req, sizeof(req));
     drainSelfEcho();
     rx_len = 0;
 }
@@ -219,9 +270,10 @@ static void parse_licht_write_ack(const uint8_t* buf, uint8_t len) {
 }
 
 static void parse_fan_read(const uint8_t* buf, uint8_t len) {
-    // Erwartet: [addr][0x03][byte_count=12][6 × 2 bytes][crc_lo][crc_hi]
-    // Register-Reihenfolge: [0]=Reg12 (RPM) ... [5]=Reg17 (Leistung %)
-    if (len < 17) return;
+    // Erwartet: [addr][0x03][byte_count=34][17 x 2 bytes][crc_lo][crc_hi], Register 0-16 am Stueck
+    // (siehe CLAUDE_CODE_SPEC_RS485_MARS_FAN.md) -- RPM/Prozent liegen an fester Position
+    // innerhalb des Blocks (RS485_FAN_REG_RPM/_PERCENT, siehe rs485.h).
+    if (len < 3 + RS485_FAN_READ_COUNT * 2 + 2) return;
     if (buf[0] != RS485_ADDR_FAN || buf[1] != 0x03) return;
     uint8_t byte_count = buf[2];
     if (byte_count != RS485_FAN_READ_COUNT * 2) return;
@@ -233,11 +285,38 @@ static void parse_fan_read(const uint8_t* buf, uint8_t len) {
         return;
     }
 
-    fan.rpm            = (uint16_t)buf[3] << 8 | buf[4];               // erstes Register = Reg12
-    fan.percent         = (uint8_t)((uint16_t)buf[13] << 8 | buf[14]); // letztes Register = Reg17
+    uint8_t rpmOff = 3 + RS485_FAN_REG_RPM * 2;
+    uint8_t pctOff = 3 + RS485_FAN_REG_PERCENT * 2;
+    fan.rpm            = (uint16_t)buf[rpmOff] << 8 | buf[rpmOff + 1];
+    fan.percent         = (uint8_t)((uint16_t)buf[pctOff] << 8 | buf[pctOff + 1]);
     fan.online          = true;
     fan.last_update_ms  = millis();
     dbgPrintf("[RS485] Fan: %u%%  %u RPM\n", fan.percent, fan.rpm);
+}
+
+static void parse_fan_enable_ack(const uint8_t* buf, uint8_t len) {
+    if (len < 5) return;
+    if (buf[0] != RS485_ADDR_FAN) return;
+
+    if (buf[1] == 0x86) {  // Exception: FC06 abgelehnt
+        uint16_t calc = crc16(buf, 3);
+        uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
+        if (calc != recv) return;
+        dbgPrintf("[RS485] Fan lehnt Enable-Befehl ab (Code 0x%02X)\n", buf[2]);
+        fan.online = true;
+        return;
+    }
+
+    if (len < 8 || buf[1] != 0x06) return;
+    uint16_t calc = crc16(buf, 6);
+    uint16_t recv = (uint16_t)buf[7] << 8 | buf[6];
+    if (calc != recv) {
+        dbgPrintln("[RS485] CRC-Fehler Fan-Enable-ACK");
+        return;
+    }
+    fan.online         = true;
+    fan.last_update_ms = millis();
+    dbgPrintln("[RS485] Fan-Enable-ACK bestaetigt");
 }
 
 static void parse_fan_write_ack(const uint8_t* buf, uint8_t len) {
@@ -435,6 +514,7 @@ void loopRS485() {
                 case TARGET_MS2_READ:    parse_ms2_response(rx_buf, rx_len);     break;
                 case TARGET_LICHT_WRITE: parse_licht_write_ack(rx_buf, rx_len);  break;
                 case TARGET_LICHT_READ:  parse_licht_read(rx_buf, rx_len);       break;
+                case TARGET_FAN_ENABLE_WRITE: parse_fan_enable_ack(rx_buf, rx_len); break;
                 case TARGET_FAN_WRITE:   parse_fan_write_ack(rx_buf, rx_len);    break;
                 case TARGET_FAN_READ:    parse_fan_read(rx_buf, rx_len);         break;
                 case TARGET_ANALOG_WRITE_CH1:
@@ -450,6 +530,9 @@ void loopRS485() {
                     break;
                 case TARGET_LUEFT_READ:  parse_lueft_read(rx_buf, rx_len);       break;
             }
+            if (active_target == TARGET_LICHT_WRITE || active_target == TARGET_LICHT_READ) {
+                LICHT_BAUD_END();  // ggf. zurueck auf die Standard-Baudrate
+            }
             rx_len   = 0;
             mb_state = MB_IDLE;
         } else if (timed_out) {
@@ -458,6 +541,7 @@ void loopRS485() {
                     dbgPrintf("[RS485] MS2 Timeout (rx_len=%d)\n", rx_len);
                     ms2.online = false;
                     break;
+                case TARGET_FAN_ENABLE_WRITE:
                 case TARGET_FAN_WRITE:
                 case TARGET_FAN_READ:
                     dbgPrintf("[RS485] Fan Timeout (rx_len=%d)\n", rx_len);
@@ -477,6 +561,7 @@ void loopRS485() {
                 default:
                     dbgPrintf("[RS485] Licht Timeout (rx_len=%d)\n", rx_len);
                     licht.online = false;
+                    LICHT_BAUD_END();  // ggf. zurueck auf die Standard-Baudrate
                     break;
             }
             rx_len   = 0;
@@ -489,8 +574,19 @@ void loopRS485() {
             licht_write_pending = false;
             send_ms             = now;
             dbgPrintf("[RS485] Licht-Maske schreiben: 0x%02X\n", licht_write_value);
+            LICHT_BAUD_BEGIN();
             send_fc06(RS485_ADDR_LICHT, RS485_REG_MASK, licht_write_value);
             active_target = TARGET_LICHT_WRITE;
+            mb_state      = MB_WAIT_RESPONSE;
+        } else if (fan_enable_pending) {
+            // Muss vor der Leistung geschrieben werden, sonst uebernimmt der Luefter den
+            // Prozentwert zwar im Register, faehrt aber nicht physisch hoch (siehe
+            // MARS_Hydro_RE_Notizen.md Abschnitt 5b, Fund 7/8).
+            fan_enable_pending = false;
+            send_ms            = now;
+            dbgPrintln("[RS485] Fan-Enable schreiben (reg15=1) ...");
+            send_fc06(RS485_ADDR_FAN, RS485_FAN_REG_ENABLE, 1);
+            active_target = TARGET_FAN_ENABLE_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (fan_write_pending) {
             fan_write_pending = false;
@@ -536,13 +632,16 @@ void loopRS485() {
             licht_poll_ms = now;
             send_ms       = now;
             dbgPrintln("[RS485] Poll Licht (0x40) ...");
+            LICHT_BAUD_BEGIN();
             send_fc03(RS485_ADDR_LICHT, RS485_REG_MASK, 1);
             active_target = TARGET_LICHT_READ;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (fan_polling_enabled && (now - fan_poll_ms >= FAN_POLL_INTERVAL_MS)) {
             fan_poll_ms = now;
             send_ms     = now;
-            send_fc03(RS485_ADDR_FAN, RS485_FAN_REG_RPM, RS485_FAN_READ_COUNT);
+            dbgPrintf("[RS485] Poll Fan (Adresse %d, Start 0, Count %d) ...\n",
+                          RS485_ADDR_FAN, RS485_FAN_READ_COUNT);
+            send_fc03(RS485_ADDR_FAN, 0, RS485_FAN_READ_COUNT);  // immer Start=0, siehe rs485.h
             active_target = TARGET_FAN_READ;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (analog_polling_enabled && (now - analog_poll_ms >= LICHT_POLL_INTERVAL_MS)) {
@@ -555,9 +654,15 @@ void loopRS485() {
         } else if (lueft_polling_enabled && (now - lueft_poll_ms >= FAN_POLL_INTERVAL_MS)) {
             lueft_poll_ms = now;
             send_ms       = now;
+            dbgPrintf("[RS485] Poll Lueftermodul (Adresse %d) ...\n", RS485_ADDR_LUEFT);
             send_fc03(RS485_ADDR_LUEFT, RS485_LUEFT_REG_RPM_BASE, RS485_LUEFT_COUNT + 1);  // RPM×4 + Boot-ID
             active_target = TARGET_LUEFT_READ;
             mb_state      = MB_WAIT_RESPONSE;
+        } else if (fan_polling_enabled && (now - fan_heartbeat_ms) >= FAN_HEARTBEAT_INTERVAL_MS) {
+            fan_heartbeat_ms = now;
+            dbgPrintln("[RS485] Fan-Heartbeat-Broadcast (Master-Erkennungsexperiment) ...");
+            send_fan_heartbeat_broadcast();
+            // bleibt MB_IDLE: Broadcast, keine Antwort erwartet
         }
     }
 }
@@ -573,8 +678,9 @@ bool rs485_set_licht_mask(uint8_t mask) {
 const Rs485LichtData& rs485_get_licht() { return licht; }
 
 bool rs485_set_fan_percent(uint8_t percent) {
-    fan_write_pending = true;
-    fan_write_value   = percent > 100 ? 100 : percent;
+    fan_enable_pending = true;   // immer vor der Leistung setzen, siehe fan_enable_pending oben
+    fan_write_pending  = true;
+    fan_write_value    = percent > 100 ? 100 : percent;
     return true;
 }
 
@@ -607,3 +713,35 @@ void rs485_set_licht_polling(bool enabled)  { licht_polling_enabled  = enabled; 
 void rs485_set_fan_polling(bool enabled)    { fan_polling_enabled    = enabled; }
 void rs485_set_analog_polling(bool enabled) { analog_polling_enabled = enabled; }
 void rs485_set_lueft_polling(bool enabled)  { lueft_polling_enabled  = enabled; }
+
+uint8_t rs485_probe_fc03(uint8_t addr, uint16_t start, uint16_t count, uint8_t* out_buf, uint8_t max_len) {
+    mb_state = MB_IDLE;  // evtl. laufende normale Abfrage nicht verwirren -- siehe loopRS485()
+
+    // Bewusst OHNE drainSelfEcho(): die normale Funktion verwirft kurz nach dem Senden alles, was
+    // auf dem Bus ankommt, um das eigene Sende-Echo (MAX13487) wegzuraeumen -- antwortet ein
+    // Geraet aber sehr schnell, kann dabei der Anfang der echten Antwort mit verschluckt werden
+    // (genau das war vermutlich die Ursache fuer abgeschnitten wirkende Scan-Treffer). Fuer die
+    // Diagnose zeichnen wir deshalb wirklich ALLES auf dem Bus auf, inkl. der eigenen Anfrage --
+    // laesst sich am Anfang des Puffers eindeutig erkennen (das sind die ersten 8 Bytes).
+    uint8_t req[8];
+    req[0] = addr;
+    req[1] = 0x03;
+    req[2] = start >> 8;
+    req[3] = start & 0xFF;
+    req[4] = count >> 8;
+    req[5] = count & 0xFF;
+    uint16_t c = crc16(req, 6);
+    req[6] = c & 0xFF;
+    req[7] = c >> 8;
+    RS485Serial.write(req, 8);
+
+    uint8_t len = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 150) {
+        while (RS485Serial.available() && len < max_len) {
+            out_buf[len++] = RS485Serial.read();
+        }
+    }
+    rx_len = 0;
+    return len;
+}

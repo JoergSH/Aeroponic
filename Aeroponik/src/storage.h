@@ -39,4 +39,7 @@ File storage_open_log(const char *name);
 // Loescht eine Log-Datei. Rueckgabe false wenn nicht gefunden/Fehler.
 bool storage_delete_log(const char *name);
 
+// Loescht alle *.csv/*.txt-Dateien im Root der SD-Karte. Rueckgabe: Anzahl geloeschter Dateien.
+uint32_t storage_delete_all_logs();
+
 #endif

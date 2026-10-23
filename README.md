@@ -23,19 +23,21 @@ Multi-Root-Workspace, öffnen über `Aeroponik.code-workspace` (VSCode + [pioard
 | `Lichtx4` | ESP32 | RS485 | 4× Relais-Lichtsteuerung, vom Master über den Beleuchtungs-Scheduler angesteuert |
 | `Multisensor` | ESP32-C3 | RS485 oder ESP-NOW | Zelt-Klima (SCD41: CO₂/Temp/Feuchte) + PPFD/Spektrum (AS7341) |
 | `Steckdosen` | ESP32 | ESP-NOW | Allgemeine Relais-Nodes (u. a. Ziel der CO2-Steuerung) |
-| `Lueftermodul` | RP2040-Zero | RS485 | 4× Zeltlüfter-PWM/Tacho-Steuerung |
-| `Multimodul` | RP2040-Zero | RS485 | Lueftermodul-Basis + optional Zelt-Klima (SCD41/AS7341) und/oder 0-10V-Ausgang (GP8403) über einen zweiten I2C-Bus, Hardware-Erkennung beim Boot |
+| `Multimodul` | RP2040-Zero | RS485 | 4× Zeltlüfter-PWM/Tacho + optional Zelt-Klima (SCD41/AS7341) und/oder 0-10V-Ausgang (GP8403) über einen zweiten I2C-Bus, Hardware-Erkennung beim Boot |
 | `ProtoRS485` | ESP32-C3 | RS485 | Generischer Modbus-RTU-Slave-Simulator mit WS2812-Anzeige zum Testen ohne echte Hardware — aktuell das Analog-Ausgangsmodul emulierend, für andere Geräte anpassbar |
 | `shared/espnow_common` | — | — | Gemeinsam genutzte ESP-NOW-Protokoll-Library für Master/Multisensor/Steckdosen |
 
 ### Funktionsübersicht
 
 - **Bewässerung** — 3 unabhängige Ventilkreise (Öffnungszeit + Pausenintervall) plus optionaler Rücklauf-Vorlauf
-- **Tanküberwachung** — Ultraschall-Füllstand, Volumenberechnung über die konische Tankgeometrie
+- **Tanküberwachung** — Ultraschall- oder Druck-Füllstand (HX710B), Volumenberechnung über die konische Tankgeometrie
 - **Beleuchtungs-Scheduler** — simuliertes Sonnenauf-/-untergang über bis zu 4 Kanäle, angesteuert über Lichtx4 (RS485)
 - **Zeltklima** — CO₂, Temperatur, Luftfeuchte sowie PPFD/Spektrum über den RS485-Multisensor
 - **Raumklima & VPD** — AHT21B als Referenzsensor außerhalb des Zelts, daraus berechneter VPD-Wert (Tetens-Formel)
-- **CO2-Steuerung** — Hysterese-Regelung eines CO₂-Ausgangs auf einem ESP-NOW-Steckdosen-Node
+- **CO2- und Luftbefeuchtung-Steuerung** — Hysterese-Regelung je eines Ausgangs auf einem ESP-NOW-Steckdosen-Node
+- **Raumlicht & DWC-Timer** — manueller Schalter bzw. einfache Zeitschaltuhr für einen Steckdosen-Ausgang
+- **Düsen-Überwachung** — Durchflussmesser mit Soll/Ist-Vergleich je Behälter (verstopfte Düse / Leck)
+- **Benachrichtigungen** — WhatsApp (CallMeBot), Telegram und E-Mail parallel, u. a. bei Netzausfall, Sensor-Ausfall, Klima-Grenzwerten, leerem Behälter
 - **Abluftlüfter-Steuerung** — MARS-Hydro-Lüfter über RS485, manuell oder automatisch (Luftfeuchte, Zelttemperatur absolut/differenz zur Raumtemperatur)
 - **Wählbarer Analog-Ausgang (0-10V)** — Licht und/oder Lüfter alternativ über ein RS485-2-Kanal-Analogmodul statt Lichtx4/MARS Hydro ansteuerbar, Auswahl als Setup-Entscheidung (bestimmt auch, welche Geräte überhaupt gepollt werden)
 - **SD-Karten-Log** — CSV pro Tag mit allen Sensor-/Steuerwerten, Download und Löschen direkt über die Weboberfläche
@@ -72,19 +74,21 @@ Multi-root workspace, open via `Aeroponik.code-workspace` (VSCode + [pioarduino]
 | `Lichtx4` | ESP32 | RS485 | 4× relay light control, driven by the master's lighting scheduler |
 | `Multisensor` | ESP32-C3 | RS485 or ESP-NOW | Tent climate (SCD41: CO₂/temp/humidity) + PPFD/spectrum (AS7341) |
 | `Steckdosen` | ESP32 | ESP-NOW | General-purpose relay nodes (e.g. target of CO2 control) |
-| `Lueftermodul` | RP2040-Zero | RS485 | 4× tent fan PWM/tacho control |
-| `Multimodul` | RP2040-Zero | RS485 | Lueftermodul base + optional tent climate (SCD41/AS7341) and/or 0-10V output (GP8403) on a second I2C bus, hardware auto-detected at boot |
+| `Multimodul` | RP2040-Zero | RS485 | 4× tent fan PWM/tacho + optional tent climate (SCD41/AS7341) and/or 0-10V output (GP8403) on a second I2C bus, hardware auto-detected at boot |
 | `ProtoRS485` | ESP32-C3 | RS485 | Generic Modbus RTU slave simulator with a WS2812 display for testing without real hardware — currently emulates the analog output module, adaptable for other devices |
 | `shared/espnow_common` | — | — | Shared ESP-NOW protocol library used by master/Multisensor/Steckdosen |
 
 ### Features
 
 - **Irrigation** — 3 independent valve circuits (open time + pause interval) plus optional return pre-flush
-- **Tank monitoring** — ultrasonic fill level, volume calculation via the conical tank geometry
+- **Tank monitoring** — ultrasonic or pressure-based fill level (HX710B), volume calculation via the conical tank geometry
 - **Lighting scheduler** — simulated sunrise/sunset over up to 4 channels, driven via Lichtx4 (RS485)
 - **Tent climate** — CO₂, temperature, humidity, and PPFD/spectrum via the RS485 multisensor
 - **Room climate & VPD** — AHT21B as a reference sensor outside the tent, VPD calculated from it (Tetens formula)
-- **CO2 control** — hysteresis control of a CO₂ output on an ESP-NOW socket node
+- **CO2 and humidity control** — hysteresis control of one output each on an ESP-NOW socket node
+- **Room light & DWC timer** — manual switch or simple timer switch for a socket output
+- **Nozzle monitoring** — flow meter with target/actual comparison per reservoir (clogged nozzle / leak)
+- **Notifications** — WhatsApp (CallMeBot), Telegram, and email in parallel, e.g. on power outage, sensor failure, climate limits, empty reservoir
 - **Exhaust fan control** — MARS Hydro fan over RS485, manual or automatic (humidity, tent temperature absolute/differential to room temperature)
 - **Selectable analog output (0-10V)** — light and/or fan can alternatively be driven via an RS485 2-channel analog module instead of Lichtx4/MARS Hydro, selected as a setup-time decision (also determines which devices are polled at all)
 - **SD card logging** — daily CSV with all sensor/control values, download and delete directly via the web interface

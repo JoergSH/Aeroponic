@@ -42,7 +42,6 @@ typedef struct {
 #define NODE_TYPE_LIGHT      0x01   // Lichtsteuerung (PWM/Licht-Meter)
 #define NODE_TYPE_SENSOR     0x02   // Multisensor (Luft + Licht)
 #define NODE_TYPE_SOCKET     0x03   // Steckdose (allgemein)
-#define NODE_TYPE_SPEKTRUM   0x04   // AS7341 Spektrum-Lichtsensor
 #define NODE_TYPE_LIGHT_SSR  0x05   // Licht-SSR (Sonnenauf/-untergang via Scheduler)
 
 #define ESPNOW_DEFAULT_CHANNEL  6   // Fester Kanal wenn kein WLAN-Router
@@ -56,11 +55,6 @@ typedef struct {
 
 #define SUBTYPE_RELAY_STATUS   0x10  // payload[1] = Bitmaske aktiver Relais
 #define SUBTYPE_PWM_STATUS     0x11  // payload[1..2]=CH1, payload[3..4]=CH2 (0-1000)
-
-// AS7341 Spektrum-Zusammenfassung (16 Byte):
-// payload[0]  = 0x20, [1..2]=ppfd×10 uint16BE, [3..4]=rb×100 uint16BE,
-// [5]=bluepct, [6]=redpct, [7]=sat, [8..15]=Kanäle F1-F8 normiert 0-255
-#define SUBTYPE_LICHT_SUMMARY  0x20
 
 // ========== CRC8 (Polynom 0x07) ==========
 

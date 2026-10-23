@@ -28,6 +28,7 @@ Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sens
 - [Analog-Ausgangsmodul](#analog-ausgangsmodul)
 - [CO2-Steuerung](#co2-steuerung)
 - [Luftbefeuchtung-Steuerung](#luftbefeuchtung-steuerung)
+- [Raumlicht & DWC-Timer](#raumlicht--dwc-timer)
 - [Durchflussmesser-Kalibrierung & Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung)
 - [Raumklima & VPD](#raumklima--vpd)
 - [Daten-Log & Download](#daten-log--download)
@@ -51,7 +52,7 @@ Aeroponik Master (ESP32-S3 N16R8)
  │  Tank-Füllstand: Ultraschall ODER HX710B-Drucksensor (umschaltbar) · Durchflussmesser (Düsen-Überwachung)
  │  Netzspannungsüberwachung (USV) · Webinterface Port 80
  │
- ├── RS485 (9600 Baud) ⇄
+ ├── RS485 (115200 Baud) ⇄
  │    ├─ Multisensor              0x20 · FC03           Zelt-Klima (CO₂/Temp/Feuchte) + PPFD/Spektrum (AS7341)
  │    ├─ Lichtx4                  0x40 · FC03/FC06      4× Relais-Lichtsteuerung
  │    ├─ Abluftlüfter (MARS Hydro) Adr. 6 · FC03/FC06   Drehzahl/Leistung, manuell oder automatisch
@@ -88,8 +89,9 @@ typedef struct {
 | `NODE_TYPE_LIGHT` | `0x01` | LED-Lichtsteuerung (PWM, Licht-Meter) |
 | `NODE_TYPE_SENSOR` | `0x02` | Multisensor — Luft + Spektrum |
 | `NODE_TYPE_SOCKET` | `0x03` | Steckdose — allgemeine manuelle Steuerung |
-| `NODE_TYPE_SPEKTRUM` | `0x04` | AS7341 Spektrum-Lichtsensor |
 | `NODE_TYPE_LIGHT_SSR` | `0x05` | Licht-SSR — automatisch per Beleuchtungs-Scheduler (Legacy, siehe [Steckdosen](#steckdosen)) |
+
+> Der frühere separate ESP-NOW-Spektrum-Node (`NODE_TYPE_SPEKTRUM 0x04`, Subtyp `SUBTYPE_LICHT_SUMMARY 0x20`) wurde entfernt — PPFD/Spektrum kommen jetzt über RS485 (`0x20`, Multisensor bzw. Multimodul).
 
 #### Nachrichtentypen
 
@@ -121,7 +123,6 @@ typedef struct {
 | `SUBTYPE_AIR` | `0x01` | [1..2] Temp×100 int16BE · [3..4] RH×100 uint16BE · [5..6] eCO₂ ppm · [7..8] TVOC ppb |
 | `SUBTYPE_LIGHT` | `0x02` | [1..2] PPFD×10 uint16BE · [3..16] Spektralkanäle 415–680 nm |
 | `SUBTYPE_RELAY_STATUS` | `0x10` | [1] Relais-Bitmaske (Bit0–3 = R1–R4) |
-| `SUBTYPE_LICHT_SUMMARY` | `0x20` | [1..2] PPFD×10 · [3..4] RB-Ratio×100 · [5] blue% · [6] red% · [7] Sättigung · [8..15] F1–F8 normiert |
 
 ---
 
@@ -139,20 +140,20 @@ typedef struct {
 | `2` | `RS485_TX` | UART1 TX → MAX13487 Data In |
 | `3` | `FLOW_SENSOR_PIN` | Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber, push-pull) — siehe [Durchflussmesser-Kalibrierung & Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung) |
 | `4` | `DS18B20_PIN` | OneWire — DS18B20 (Vorrat, Pflanze, optional Innentemperatur), Zuordnung über ROM-Adresse (siehe [Funktionen](#funktionen)) |
-| `5` | `PRESSURE_PIN` | Analog — Drucksensor 0,5–4,5 V ratiometrisch |
+| `5` | `PRESSURE_PIN` | Analog — Drucksensor 0,5–4,5 V ratiometrisch (per Web-UI abschaltbar, siehe [Drucksensor](#drucksensor-pumpendruck)) |
 | `6` | `GEHAEUSE_FAN_PIN` | Gehäuselüfter, An/Aus (kein PWM), temperaturgeregelt über Innen-DS18B20 |
-| `7` | `VENTIL1_PIN` | Magnetventil Behälter 1 (direkte GPIO) |
-| `8` | `VENTIL2_PIN` | Magnetventil Behälter 2 |
-| `9` | `VENTIL3_PIN` | Magnetventil Behälter 3 |
-| `10` | `VENTIL4_PIN` | Rücklaufventil |
+| `7` | `VENTIL2_PIN` | Magnetventil Behälter 2 (direkte GPIO) |
+| `8` | `VENTIL1_PIN` | Magnetventil Behälter 1 |
+| `9` | `VENTIL4_PIN` | Rücklaufventil |
+| `10` | `VENTIL3_PIN` | Magnetventil Behälter 3 |
 | `11` | `SPI_MOSI` | SPI2 MOSI — W5500 + MicroSD |
 | `12` | `SPI_SCK` | SPI2 SCK |
 | `13` | `SPI_MISO` | SPI2 MISO |
 | `14` | `SPI_CS_W5500` | W5500 Chip Select |
 | `15` | `ULTRASONIC_TRIG` | HC-SR04 Trigger |
 | `16` | `ULTRASONIC_ECHO` | HC-SR04 Echo (3,3 V direkt anschließbar) |
-| `17` | `I2C_SCL` | I2C-Bus: DS3231, AHT21B, optional GP8403 |
-| `18` | `I2C_SDA` | I2C-Bus: DS3231, AHT21B, optional GP8403 |
+| `17` | `I2C_SCL` | I2C-Bus: DS3231, AHT21B, optional ENS160/GP8403 |
+| `18` | `I2C_SDA` | I2C-Bus: DS3231, AHT21B, optional ENS160/GP8403 |
 | `21` | `WSINT` | W5500 Interrupt |
 | `38` | `NETZ_OK_PIN` | Netzspannungsüberwachung — HIGH = Netz vorhanden, LOW = USV-Betrieb (2000 ms entprellt) |
 | `39` | `SPI_CS_SD` | MicroSD Chip Select |
@@ -166,6 +167,7 @@ Die Treiber-Polarität aller direkten Ausgänge (Ventile 1–4, Pumpe, Umwälzpu
 | Adresse | Baustein | Funktion |
 |---|---|---|
 | `0x38` | AHT21B | Raumklima-Referenzsensor (Standardadresse der Adafruit_AHTX0-Bibliothek) |
+| `0x52` | ENS160 | Optionaler eCO₂-Sensor für die Raumluft (z. B. DFRobot SEN0515, Kombimodul mit AHT21), siehe [Raumklima & VPD](#raumklima--vpd) |
 | `0x58` | GP8403 | Optionaler 2-Kanal-0–10V-DAC, siehe [Analog-Ausgangsmodul](#analog-ausgangsmodul) |
 | `0x68` | DS3231 | Echtzeituhr + integriertes EEPROM (AT24C32) |
 
@@ -198,6 +200,12 @@ Ohne Router: Master startet als **AP auf Kanal 6** (`ESPNOW_DEFAULT_CHANNEL`). N
 
 Drei unabhängige Bewässerungskreise mit konfigurierbarer Öffnungszeit (Sek.) und Pausenintervall (Min., jeweils getrennt für Licht- und Dunkelphase). Optional vorgeschalteter Rücklauf-Vorlauf via MV4 (konfigurierbare Vorlaufzeit). Im Modus "Gleiche Zeiten für alle" läuft statt drei unabhängiger Timer ein gemeinsamer Batch-Durchlauf (Vorlauf einmal vor dem ersten aktiven Behälter, dann alle aktiven Behälter direkt nacheinander, eine gemeinsame Pause).
 
+Nach einem Neustart wird **sofort** gewässert, statt erst die volle Pausenzeit (bis zu 60 min) abzuwarten.
+
+**Manueller Einzelzyklus:** Auf der Aeroponik-Seite lässt sich pro Behälter ein einzelner Gießzyklus von Hand auslösen — das Ventil öffnet einmal für die aktuell gültige Öffnungszeit (Licht- bzw. Dunkelphase) und schließt danach automatisch (`/api/ventile/dose/start`, `/status`, `/cancel`). Die normale Automatik pausiert währenddessen.
+
+**Ausgangstest:** Der Direkttest der Ausgänge (Verkabelungsprüfung, Durchflussmesser-Kalibrierung) unterbricht keinen laufenden Gießzyklus mehr — ist gerade ein Ventil/eine Pumpe automatisch aktiv, wird der Testmodus erst aktiv, sobald der Zyklus von selbst beendet ist. Die UI zeigt den Wartezustand an (`GET /api/output/test`).
+
 #### Tanküberwachung (Kegelstumpf)
 
 Füllstand wahlweise per **Ultraschall** (HC-SR04/RCWL-1670/JSN-SR04T) oder per **Drucksensor** (HX710B-basierte 0–40kPa-Module, 2-Draht-Protokoll ähnlich HX711, kein I2C) — umschaltbar per Konfiguration, beide Sensortypen nutzen dieselben zwei GPIOs (`ULTRASONIC_TRIG`/`ULTRASONIC_ECHO` bzw. `HX710_SCK`/`HX710_DOUT`), keine Platinenänderung beim Wechsel nötig. Umrechnung Distanz/Druck-Rohwert → Wasserhöhe → Volumen unter Berücksichtigung der konischen Tankgeometrie (einstellbare Radien oben/unten und Höhe). Beim Ultraschall glättet ein Median-Filter über die letzten 5 Messungen einzelne Ausreißer weg.
@@ -205,6 +213,10 @@ Füllstand wahlweise per **Ultraschall** (HC-SR04/RCWL-1670/JSN-SR04T) oder per 
 #### DS18B20 — Rollenzuordnung über ROM-Adresse
 
 Die DS18B20-Sensoren am gemeinsamen 1-Wire-Bus (Vorrat, Pflanze, optional Innentemperatur für den Gehäuselüfter) werden über ihre eindeutige 64-Bit-ROM-Adresse einer Rolle zugeordnet, statt sich auf die Bus-Scan-Reihenfolge zu verlassen (die sich bei vertauschten oder unterschiedlich langen Kabeln ändert). Solange eine Rolle nicht zugewiesen ist, fällt die Firmware auf die alte Index-Reihenfolge zurück (0=Vorrat, 1=Pflanze, 2=Innentemperatur).
+
+#### Drucksensor (Pumpendruck)
+
+Der analoge Drucksensor an `PRESSURE_PIN` (GPIO5) lässt sich auf der Aeroponik-Seite ein-/ausschalten (eigener EEPROM-Block, Magic `0x19`) — für Aufbauten ohne bzw. mit defektem Sensor. Ausgeschaltet entfällt die Druck-Karte auf der Startseite und es wird kein Druck gemessen (`/api/drucksensor`, `/api/drucksensor/save`).
 
 #### Gehäuselüfter
 
@@ -283,9 +295,11 @@ Beispiel `num_ssr=4`, Aufgang 6:00–8:00 (120 min):
 
 ### RS485-Bus
 
-Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete Geräte im Zelt. Physikalisch ein gemeinsam genutzter Zweidraht-Bus über einen **MAX13487** (automatische Sende-/Empfangsrichtung, kein manuelles DE/RE-Umschalten nötig) an `RS485_TX` (GPIO1) / `RS485_RX` (GPIO2), **9600 Baud, 8N1**.
+Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete Geräte im Zelt. Physikalisch ein gemeinsam genutzter Zweidraht-Bus über einen **MAX13487** (automatische Sende-/Empfangsrichtung, kein manuelles DE/RE-Umschalten nötig) an `RS485_TX` (GPIO1) / `RS485_RX` (GPIO2), **115200 Baud, 8N1** — Master und alle eigenen Slaves (Lichtx4, Multisensor, Multimodul, ProtoRS485).
 
-> **Historisch:** Auf demselben Bus lief bis vor Kurzem zusätzlich ein MARS-Hydro-*iControl*-Hub als weiterer Modbus-Master (Fremdsteuerung des Abluftlüfters per Werks-App). Dieses Gerät wurde vollständig entfernt — der Aeroponik-Master ist jetzt alleiniger Bus-Master.
+> **Übergang für ein noch nicht neu geflashtes Lichtx4:** Ein bereits eingebautes Lichtx4 mit alter Firmware läuft noch auf 9600 Baud. Für diesen Fall gibt es das Define `LICHTX4_LEGACY_9600` — es wird in einer optionalen, per `.gitignore` ausgeschlossenen Datei `Aeroponik/src/local_config.h` gesetzt (`#define LICHTX4_LEGACY_9600`). Ist es aktiv, schaltet der Master nur für die Lichtx4-Transaktionen kurz auf 9600 Baud um und danach zurück. Ohne die Datei (Standard im Repo) läuft der ganze Bus mit 115200 Baud.
+
+> **Historisch:** Auf demselben Bus lief bis vor Kurzem zusätzlich ein MARS-Hydro-*iControl*-Hub als weiterer Modbus-Master (Fremdsteuerung des Abluftlüfters per Werks-App). Dieses Gerät wurde vollständig entfernt — der Aeroponik-Master ist jetzt alleiniger Bus-Master. Damit der Lüfter ihn als Master akzeptiert, sendet der Master den periodischen Broadcast des iControl-Hubs nach, siehe [Abluftlüfter](#abluftlüfter).
 
 #### Protokoll
 
@@ -326,6 +340,8 @@ Fest im Zelt verbautes Sensormodul an RS485-Adresse `0x20`, liefert Klimadaten u
 | `channels[8]` | — | Spektralkanäle |
 | `gain`, `status` | — | Sensor-Diagnose |
 
+**PPFD-Berechnung:** physikalisches Modell aus den 8 Spektralkanälen (Kanal-Responsivität laut AS7341-Datenblatt, Photonenenergie je Mittenwellenlänge, normiert auf GAIN_1X) mit einem empirischen Kalibrierfaktor, der mit dem Licht-Meter-Handgerät gegen ein Referenzmessgerät ermittelt wurde. Ersetzt die frühere MLR-Regression, die bei Spektren abseits der Trainingslampen deutlich danebenlag. Gleiche Berechnung in Multisensor und Multimodul.
+
 Zelt-Temperatur, -Feuchte und -CO₂ dieses Sensors sind die Grundlage für [Abluftlüfter-Automodi](#abluftlüfter), [CO2-Steuerung](#co2-steuerung) und die [VPD-Berechnung](#raumklima--vpd).
 
 ### Lichtx4
@@ -351,9 +367,12 @@ MARS Hydro (RS485). Werksseitig fertige Lüfterplatine, RS485-Adresse `6`, urspr
 
 | Register | Zugriff | Inhalt |
 |---|---|---|
-| 11 | FC03 read (Teil von 6 Registern ab 11) | Drehzahl (RPM) |
-| 16 | FC03 read (letztes der 6 Register) | Aktuelle Leistung (%) |
-| 0x0010 (16) | FC06 write | Ziel-Leistung 0–100 % |
+| 0–16 | FC03 read | Immer das volle Set: Start 0, 17 Register (wie der Original-Controller) |
+| 11 | (im Block) | Drehzahl (RPM) |
+| 15 | FC06 write | Enable-Bit — wird **vor** jeder Leistungsänderung auf 1 gesetzt, sonst übernimmt der Lüfter den Wert nur ins Register, fährt aber nicht physisch hoch |
+| 16 | FC03 read (im Block) / FC06 write | Aktuelle bzw. Ziel-Leistung 0–100 % |
+
+> **Master-Erkennung (Experiment):** Der Lüfter scheint einen Bus-Master nicht am bloßen Polling zu erkennen, sondern am periodischen Broadcast der echten iControl-Steuerung. Der Master sendet deshalb alle 6 s denselben Broadcast nach (Adresse 0, FC10, Start 1001, 26 Register, `reg[8]=7` als Signatur; keine Antwort erwartet). Für den Verdacht auf eine verschobene Geräteadresse gibt es einen Diagnose-Scan (`POST /api/rs485/scanfan`, JSON `{"from":1,"to":20}`), der jede Adresse im Bereich per FC03 anfragt und die Antworten roh zurückliefert — Treffer auf den eigenen Adressen (`0x20`, `0x40`, `0x50`, `0x51`) sind dabei normal.
 
 #### Steuerungsmodi
 
@@ -412,11 +431,15 @@ Ein Multimodul kann also je nach Bestückung ein reines Lüftermodul, ein Lüfte
 
 > **Boot-Reihenfolge:** `rs485_slave_init()` läuft bewusst ganz am Anfang von `setup()`, **vor** dem I2C-Scan/Sensor-Init — sonst bliebe die DI-Leitung (GP28) unkonfiguriert/hochohmig, solange der I2C-Scan oder `scd41_init()`/`gp8403_init()` laufen (können bei einer hängenden I2C-Transaktion beliebig lange dauern), ohne definierten Idle-Pegel auf dem Bus. Zusätzlich loggt die Firmware beim Start die Reset-Ursache (`rp2040.getResetReason()`: Power-On, Watchdog, Brownout, Glitch, …) — nützlich zur Diagnose unerklärter Neustarts, da das Projekt selbst keinen Software-Watchdog nutzt.
 
+> **SCD41 und AS7341 unabhängig:** CO₂/Temperatur/Feuchte (SCD41) werden sofort nach jeder Messung in die `0x20`-Register geschrieben, unabhängig vom AS7341. Bleibt eine AS7341-Messung länger als 6 s hängen, wird nur der AS7341 neu initialisiert (kein I2C-Bus-Reset, der den SCD41 mitreißen würde); nach 3 erfolglosen Versuchen wird er für 10 min deaktiviert (Lichtwerte = 0, Gain = `0xFF`, Status-Bit 1 = 0) und danach automatisch neu versucht — Board, SCD41, Lüfter und Analogausgang bleiben die ganze Zeit online.
+
 ### Analog-Ausgangsmodul
 
 0-10V. 2-Kanal RS485-zu-0-10V-Wandler (ATO), Standard-Modbus-RTU. Wahlweise Alternative zu Lichtx4 (Kanal 2, stufenlose Helligkeit statt Relais-Stufen) und/oder zum MARS-Hydro-Lüfter (Kanal 1) — z. B. für generische Lüfter oder Dimmer mit 0-10V-Steuereingang. Dasselbe Register-Layout wird auch vom optionalen GP8403-Ausgang des [Multimodul](#multimodul) bedient.
 
-> **Einmaliger Hardware-Setup:** Das Modul kommt ab Werk auf Adresse `0x01` / 4800 Baud — inkompatibel mit unserem 9600-Baud-Bus. Vor dem Einbau muss es einmalig **einzeln** (nicht am gemeinsamen Bus) per USB-RS485-Adapter und der ATO-Konfigurationssoftware umgestellt werden: Adresse → `0x50`, Baudrate → 9600 (Registerwert 2), Ausgangstyp beider Kanäle → 0-10V (Register 0x0055 sowie die physischen Lötbrücken auf "V").
+> **Einmaliger Hardware-Setup:** Das Modul kommt ab Werk auf Adresse `0x01` / 4800 Baud. Vor dem Einbau muss es einmalig **einzeln** (nicht am gemeinsamen Bus) per USB-RS485-Adapter und der ATO-Konfigurationssoftware umgestellt werden: Adresse → `0x50`, Ausgangstyp beider Kanäle → 0-10V (Register 0x0055 sowie die physischen Lötbrücken auf "V"), Baudrate → die des Busses.
+>
+> **Achtung Baudrate:** Der Bus läuft inzwischen mit **115200 Baud** (früher 9600). Ein ATO-Modul, das noch auf 9600 eingestellt ist, antwortet dann nicht mehr — es muss auf 115200 umgestellt werden, sofern die ATO-Software das anbietet. Andernfalls übernimmt der GP8403-Ausgang des [Multimodul](#multimodul) die Adresse `0x50`.
 
 #### Register
 
@@ -469,6 +492,18 @@ Auf der Startseite erscheint eine Status-Karte nur, wenn die Funktion aktiviert 
 
 Eigene Status-Karte auf der Startseite, nur sichtbar wenn aktiviert.
 
+### Raumlicht & DWC-Timer
+
+Zwei einfache Schalt-Funktionen, die — wie [CO2-](#co2-steuerung) und [Luftbefeuchtung-Steuerung](#luftbefeuchtung-steuerung) — genau einen Ausgang (`target_relay_bit`, 0–3) eines **ESP-NOW-Steckdosen-Nodes** (`target_node_id`) schalten; die übrigen Relais-Bits des Nodes bleiben unangetastet.
+
+#### Raumlicht (EEPROM, Magic 0x3F)
+
+Rein **manueller** Ein/Aus-Schalter, ohne Automatik, Hysterese oder Zeitplan. Der Ausgang wird im Klima-Tab gewählt; sobald einer gewählt ist, erscheint auf der Startseite ein Schalter. Der Ein/Aus-Zustand wird nicht separat gespeichert, sondern live aus der gemeldeten Relaismaske des Ziel-Nodes gelesen — UI und echter Relaiszustand können so nicht auseinanderlaufen. Endpunkte: `GET /api/raumlicht`, `POST /api/raumlicht/save`, `POST /api/raumlicht/toggle`.
+
+#### DWC-Timer (EEPROM, Magic 0x3A)
+
+Einfacher Ein/Aus-Beleuchtungstimer für ein separates DWC-System, wie eine haushaltsübliche Zeitschaltuhr (kein Sonnenauf-/-untergang wie beim [Beleuchtungs-Scheduler](#beleuchtungs-scheduler)): `enabled` · `target_node_id` · `target_relay_bit` · `on_min` / `off_min` (Minuten seit Mitternacht; `off_min < on_min` = über Mitternacht).
+
 ### Durchflussmesser-Kalibrierung & Düsen-Überwachung
 
 Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber mit Push-Pull-Ausgang, kein Pull-up nötig) in der gemeinsamen Zulaufleitung **vor** dem Ventil-Verteiler — sieht damit den Durchfluss aller 4 Ventile nacheinander, da laut [Ventilsteuerung](#funktionen) ohnehin immer nur eines gleichzeitig offen ist. Interrupt an `FLOW_SENSOR_PIN` (GPIO3) zählt nur die Pulse; die Umrechnung in ml läuft über eine einmalige Kalibrierung.
@@ -476,9 +511,10 @@ Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber mit Push-Pull-Ausgang, kein
 #### Kalibrierung (Konfiguration → Ventile)
 
 1. **„Kalibrierung starten“** — Pumpe an (GPIO48), Druck wird live angezeigt. Nutzt denselben Ausgangs-Direkttest wie die Verkabelungsprüfung (pausiert damit automatisch die normale Ventil-/Pumpensteuerung).
-2. **„Start“** — öffnet Rücklaufventil (MV4), zählt ab da die Impulse (live sichtbar).
-3. **„Stop“** — Ventil zu, Impulszahl eingefroren.
-4. Gemessene Menge in ml eintragen (z. B. mit einem Messbecher aufgefangen) → **„Berechnen“** ermittelt Pulse/Liter und speichert dauerhaft (eigener EEPROM-Block).
+2. **„Entlüften“** — Ventil auf/zu, beliebig oft, bis keine Luft mehr im System ist (Luft würde die Impulszahl verfälschen). „Start“ ist erst nach mindestens einem abgeschlossenen Entlüftungszyklus möglich.
+3. **„Start“** — öffnet Rücklaufventil (MV4), zählt ab da die Impulse (live sichtbar).
+4. **„Stop“** — Ventil zu, Impulszahl eingefroren.
+5. Gemessene Menge in ml eintragen (z. B. mit einem Messbecher aufgefangen) → **„Berechnen“** ermittelt Pulse/Liter und speichert dauerhaft (eigener EEPROM-Block).
 
 #### Düsen-Überwachung (`flowmonitor.cpp`)
 
@@ -499,6 +535,10 @@ SD-Log-Spalten: siehe [Daten-Log & Download](#daten-log--download).
 Hängt am Haupt-I2C-Bus (`I2C_SDA`/`I2C_SCL`, GPIO18/17) zusammen mit der RTC und dem optionalen GP8403 — siehe [I2C-Geräte](#i2c-geräte-sda18-scl17). Der Sensor misst die **Raumluft außerhalb des Zelts** als Referenz.
 
 > **Bekannter Library-Bug:** Adafruit_AHTX0 sendet standardmäßig den AHT10-Kalibrierbefehl `0xE1`. AHT20/AHT21(B)-Chips erwarten stattdessen `0xBE` — sonst liefert der Feuchtekanal dauerhaft ~100 %, während die Temperatur bereits korrekt ist. Die Firmware sendet den korrekten Befehl (`0xBE, 0x08, 0x00`) direkt nach `aht21.begin()` manuell nach.
+
+#### ENS160 (optional)
+
+Optionaler eCO₂-Sensor für die Raumluft am selben I2C-Bus (Adresse `0x52`, z. B. DFRobot Gravity SEN0515 — Kombimodul ENS160 + AHT21). Wird beim Boot automatisch erkannt; da der ENS160 aktuelle Temperatur/Feuchte zur Kompensation braucht, bekommt er laufend die AHT21-Werte (`setTempAndHum()`). Der eCO₂-Wert (ppm) erscheint in der Status-API (`ens160Ok`, `ens160Co2`) und in der Weboberfläche. eCO₂ ist ein Schätzwert aus der VOC-Messung, kein echter NDIR-CO₂-Wert wie beim SCD41 im Zelt.
 
 #### VPD (Vapor Pressure Deficit)
 
@@ -542,6 +582,7 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `/api/logs` | GET | Liste aller `*.csv`- und `*.txt`-Dateien mit Dateigröße |
 | `/api/logs/download?file=NAME` | GET | Streamt die Datei mit `Content-Disposition: attachment` |
 | `/api/logs/delete` | POST (JSON `{"file":"NAME"}`) | Löscht die Datei (UI fragt vorher per Bestätigungsdialog nach) |
+| `/api/logs/delete-all` | POST | Löscht alle `*.csv`/`*.txt`-Dateien auf der SD-Karte, Antwort enthält die Anzahl (UI fragt vorher nach) |
 
 Dateinamen werden serverseitig gegen Pfad-Traversal geprüft (kein `/` oder `..` zulässig).
 
@@ -690,6 +731,7 @@ System documentation — master (ESP32-S3) with RS485 devices and wireless senso
 - [Analog Output Module](#analog-output-module)
 - [CO2 Control](#co2-control)
 - [Humidity Control](#humidity-control)
+- [Room Light & DWC Timer](#room-light--dwc-timer)
 - [Flow Sensor Calibration & Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring)
 - [Room Climate & VPD](#room-climate--vpd)
 - [Data Log & Download](#data-log--download)
@@ -713,7 +755,7 @@ Aeroponik Master (ESP32-S3 N16R8)
  │  Tank fill level: ultrasonic OR HX710B pressure sensor (switchable) · flow meter (nozzle monitoring)
  │  Mains power monitoring (UPS) · web interface, port 80
  │
- ├── RS485 (9600 baud) ⇄
+ ├── RS485 (115200 baud) ⇄
  │    ├─ Multisensor              0x20 · FC03           Tent climate (CO₂/temp/humidity) + PPFD/spectrum (AS7341)
  │    ├─ Lichtx4                  0x40 · FC03/FC06      4× relay light control
  │    ├─ Exhaust fan (MARS Hydro) Addr. 6 · FC03/FC06   RPM/power, manual or automatic
@@ -750,8 +792,9 @@ typedef struct {
 | `NODE_TYPE_LIGHT` | `0x01` | LED light control (PWM, light meter) |
 | `NODE_TYPE_SENSOR` | `0x02` | Multisensor — air + spectrum |
 | `NODE_TYPE_SOCKET` | `0x03` | Socket — general manual control |
-| `NODE_TYPE_SPEKTRUM` | `0x04` | AS7341 spectral light sensor |
 | `NODE_TYPE_LIGHT_SSR` | `0x05` | Light SSR — automatic via lighting scheduler (legacy, see [Sockets](#sockets)) |
+
+> The former separate ESP-NOW spectrum node (`NODE_TYPE_SPEKTRUM 0x04`, subtype `SUBTYPE_LICHT_SUMMARY 0x20`) has been removed — PPFD/spectrum now come via RS485 (`0x20`, Multisensor or Multimodul).
 
 #### Message Types
 
@@ -783,7 +826,6 @@ typedef struct {
 | `SUBTYPE_AIR` | `0x01` | [1..2] temp×100 int16BE · [3..4] RH×100 uint16BE · [5..6] eCO₂ ppm · [7..8] TVOC ppb |
 | `SUBTYPE_LIGHT` | `0x02` | [1..2] PPFD×10 uint16BE · [3..16] spectral channels 415–680 nm |
 | `SUBTYPE_RELAY_STATUS` | `0x10` | [1] relay bitmask (bit0–3 = R1–R4) |
-| `SUBTYPE_LICHT_SUMMARY` | `0x20` | [1..2] PPFD×10 · [3..4] RB ratio×100 · [5] blue% · [6] red% · [7] saturation · [8..15] F1–F8 normalized |
 
 ---
 
@@ -801,20 +843,20 @@ typedef struct {
 | `2` | `RS485_TX` | UART1 TX → MAX13487 Data In |
 | `3` | `FLOW_SENSOR_PIN` | Flow meter (YF-S401-like, Hall pulse output, push-pull) — see [Flow Sensor Calibration & Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring) |
 | `4` | `DS18B20_PIN` | OneWire — DS18B20 (reservoir, plant, optional internal temperature), assigned by ROM address (see [Features](#features)) |
-| `5` | `PRESSURE_PIN` | Analog — pressure sensor 0.5–4.5 V ratiometric |
+| `5` | `PRESSURE_PIN` | Analog — pressure sensor 0.5–4.5 V ratiometric (can be disabled in the web UI, see [Pressure Sensor](#pressure-sensor-pump-pressure)) |
 | `6` | `GEHAEUSE_FAN_PIN` | Enclosure fan, on/off (no PWM), temperature-controlled via the internal DS18B20 |
-| `7` | `VENTIL1_PIN` | Solenoid valve reservoir 1 (direct GPIO) |
-| `8` | `VENTIL2_PIN` | Solenoid valve reservoir 2 |
-| `9` | `VENTIL3_PIN` | Solenoid valve reservoir 3 |
-| `10` | `VENTIL4_PIN` | Return valve |
+| `7` | `VENTIL2_PIN` | Solenoid valve reservoir 2 (direct GPIO) |
+| `8` | `VENTIL1_PIN` | Solenoid valve reservoir 1 |
+| `9` | `VENTIL4_PIN` | Return valve |
+| `10` | `VENTIL3_PIN` | Solenoid valve reservoir 3 |
 | `11` | `SPI_MOSI` | SPI2 MOSI — W5500 + MicroSD |
 | `12` | `SPI_SCK` | SPI2 SCK |
 | `13` | `SPI_MISO` | SPI2 MISO |
 | `14` | `SPI_CS_W5500` | W5500 chip select |
 | `15` | `ULTRASONIC_TRIG` | HC-SR04 trigger |
 | `16` | `ULTRASONIC_ECHO` | HC-SR04 echo (3.3 V, direct connection) |
-| `17` | `I2C_SCL` | I2C bus: DS3231, AHT21B, optional GP8403 |
-| `18` | `I2C_SDA` | I2C bus: DS3231, AHT21B, optional GP8403 |
+| `17` | `I2C_SCL` | I2C bus: DS3231, AHT21B, optional ENS160/GP8403 |
+| `18` | `I2C_SDA` | I2C bus: DS3231, AHT21B, optional ENS160/GP8403 |
 | `21` | `WSINT` | W5500 interrupt |
 | `38` | `NETZ_OK_PIN` | Mains power monitoring — HIGH = mains present, LOW = running on UPS (2000 ms debounced) |
 | `39` | `SPI_CS_SD` | MicroSD chip select |
@@ -828,6 +870,7 @@ The driver polarity of every direct output (valves 1–4, main pump, circulation
 | Address | Chip | Function |
 |---|---|---|
 | `0x38` | AHT21B | Room climate reference sensor (default address of the Adafruit_AHTX0 library) |
+| `0x52` | ENS160 | Optional eCO₂ sensor for room air (e.g. DFRobot SEN0515, combo module with AHT21), see [Room Climate & VPD](#room-climate--vpd) |
 | `0x58` | GP8403 | Optional 2-channel 0–10V DAC, see [Analog Output Module](#analog-output-module) |
 | `0x68` | DS3231 | Real-time clock + onboard EEPROM (AT24C32) |
 
@@ -860,6 +903,12 @@ Without a router: the master starts as an **AP on channel 6** (`ESPNOW_DEFAULT_C
 
 Three independent irrigation circuits with configurable open time (sec.) and pause interval (min., separately configurable for the light and dark phases). Optional return pre-flush via MV4 (configurable pre-flush time). In "same times for all" mode, a single shared batch run replaces the three independent timers (pre-flush once before the first active reservoir, then all active reservoirs directly in sequence, one shared pause).
 
+After a restart, watering starts **immediately** instead of first waiting out the full pause time (up to 60 min).
+
+**Manual single cycle:** On the Aeroponik page, a single watering cycle can be triggered manually per reservoir — the valve opens once for the currently valid open time (light or dark phase) and closes again automatically (`/api/ventile/dose/start`, `/status`, `/cancel`). Normal automation is paused meanwhile.
+
+**Output test:** The direct output test (wiring check, flow sensor calibration) no longer interrupts a running watering cycle — if a valve/pump is currently active automatically, test mode only becomes active once the cycle has finished on its own. The UI shows the waiting state (`GET /api/output/test`).
+
 #### Tank Monitoring (Truncated Cone)
 
 Fill level via either an **ultrasonic sensor** (HC-SR04/RCWL-1670/JSN-SR04T) or a **pressure sensor** (HX710B-based 0–40kPa modules, 2-wire protocol similar to HX711, no I2C) — switchable via configuration; both sensor types share the same two GPIOs (`ULTRASONIC_TRIG`/`ULTRASONIC_ECHO` resp. `HX710_SCK`/`HX710_DOUT`), no board change needed when switching. Conversion distance/raw pressure value → water height → volume, accounting for the conical tank geometry (configurable top/bottom radii and height). For ultrasonic, a median filter over the last 5 readings smooths out single outliers.
@@ -867,6 +916,10 @@ Fill level via either an **ultrasonic sensor** (HC-SR04/RCWL-1670/JSN-SR04T) or 
 #### DS18B20 — Role Assignment by ROM Address
 
 The DS18B20 sensors on the shared 1-Wire bus (reservoir, plant, optional internal temperature for the enclosure fan) are assigned to a role via their unique 64-bit ROM address, rather than relying on bus-scan order (which changes with swapped or differently-lengthed cables). As long as a role isn't assigned, the firmware falls back to the old index order (0=reservoir, 1=plant, 2=internal temperature).
+
+#### Pressure Sensor (Pump Pressure)
+
+The analog pressure sensor on `PRESSURE_PIN` (GPIO5) can be switched on/off on the Aeroponik page (own EEPROM block, magic `0x19`) — for setups without a sensor or with a defective one. When disabled, the pressure card disappears from the home page and no pressure is measured (`/api/drucksensor`, `/api/drucksensor/save`).
 
 #### Enclosure Fan
 
@@ -945,9 +998,11 @@ Example `num_ssr=4`, sunrise 6:00–8:00 (120 min):
 
 ### RS485 Bus
 
-A second communication path, independent of the ESP-NOW network, for hard-wired devices in the tent. Physically a shared two-wire bus via a **MAX13487** (automatic transmit/receive direction, no manual DE/RE switching needed) on `RS485_TX` (GPIO1) / `RS485_RX` (GPIO2), **9600 baud, 8N1**.
+A second communication path, independent of the ESP-NOW network, for hard-wired devices in the tent. Physically a shared two-wire bus via a **MAX13487** (automatic transmit/receive direction, no manual DE/RE switching needed) on `RS485_TX` (GPIO1) / `RS485_RX` (GPIO2), **115200 baud, 8N1** — the master and all of our own slaves (Lichtx4, Multisensor, Multimodul, ProtoRS485).
 
-> **Historical note:** Until recently, a MARS Hydro *iControl* hub also ran on the same bus as a second Modbus master (third-party control of the exhaust fan via the vendor app). This device has been fully removed — the Aeroponik master is now the sole bus master.
+> **Transition for a Lichtx4 not yet reflashed:** An already installed Lichtx4 with old firmware still runs at 9600 baud. For this case there is the define `LICHTX4_LEGACY_9600` — it is set in an optional file `Aeroponik/src/local_config.h` that is excluded via `.gitignore` (`#define LICHTX4_LEGACY_9600`). When active, the master briefly switches to 9600 baud only for the Lichtx4 transactions and back afterwards. Without the file (the repo default), the whole bus runs at 115200 baud.
+
+> **Historical note:** Until recently, a MARS Hydro *iControl* hub also ran on the same bus as a second Modbus master (third-party control of the exhaust fan via the vendor app). This device has been fully removed — the Aeroponik master is now the sole bus master. So that the fan accepts it as master, the master re-creates the iControl hub's periodic broadcast, see [Exhaust Fan](#exhaust-fan).
 
 #### Protocol
 
@@ -988,6 +1043,8 @@ Sensor module hard-mounted in the tent at RS485 address `0x20`, providing climat
 | `channels[8]` | — | Spectral channels |
 | `gain`, `status` | — | Sensor diagnostics |
 
+**PPFD calculation:** physical model from the 8 spectral channels (channel responsivity per the AS7341 datasheet, photon energy per center wavelength, normalized to GAIN_1X) with an empirical calibration factor determined with the Licht-Meter handheld against a reference meter. Replaces the former MLR regression, which was noticeably off for spectra unlike the training lamps. Same calculation in Multisensor and Multimodul.
+
 This sensor's tent temperature, humidity, and CO₂ readings are the basis for the [exhaust fan auto modes](#exhaust-fan), [CO2 control](#co2-control), and the [VPD calculation](#room-climate--vpd).
 
 ### Lichtx4
@@ -1013,9 +1070,12 @@ MARS Hydro (RS485). Factory-built fan controller board, RS485 address `6`, origi
 
 | Register | Access | Content |
 |---|---|---|
-| 11 | FC03 read (part of 6 registers starting at 11) | Speed (RPM) |
-| 16 | FC03 read (last of the 6 registers) | Current power (%) |
-| 0x0010 (16) | FC06 write | Target power 0–100 % |
+| 0–16 | FC03 read | Always the full set: start 0, 17 registers (like the original controller) |
+| 11 | (in block) | Speed (RPM) |
+| 15 | FC06 write | Enable bit — set to 1 **before** every power change, otherwise the fan only stores the value in its register but doesn't physically ramp up |
+| 16 | FC03 read (in block) / FC06 write | Current / target power 0–100 % |
+
+> **Master detection (experiment):** The fan apparently doesn't recognize a bus master by mere polling, but by the periodic broadcast of the real iControl controller. The master therefore re-sends the same broadcast every 6 s (address 0, FC10, start 1001, 26 registers, `reg[8]=7` as signature; no response expected). If the device address is suspected to have shifted, a diagnostic scan (`POST /api/rs485/scanfan`, JSON `{"from":1,"to":20}`) queries every address in the range via FC03 and returns the raw responses — hits on our own addresses (`0x20`, `0x40`, `0x50`, `0x51`) are normal.
 
 #### Control Modes
 
@@ -1074,11 +1134,15 @@ Depending on what's populated, a Multimodul can therefore be a plain fan module,
 
 > **Boot order:** `rs485_slave_init()` deliberately runs at the very start of `setup()`, **before** the I2C scan/sensor init — otherwise the DI line (GP28) would stay unconfigured/high-impedance for as long as the I2C scan or `scd41_init()`/`gp8403_init()` run (which can take arbitrarily long if an I2C transaction hangs), leaving the bus without a defined idle level. The firmware also logs the reset reason at boot (`rp2040.getResetReason()`: power-on, watchdog, brownout, glitch, …) — useful for diagnosing unexplained reboots, since the project itself doesn't use a software watchdog.
 
+> **SCD41 and AS7341 independent:** CO₂/temperature/humidity (SCD41) are written to the `0x20` registers right after each measurement, independently of the AS7341. If an AS7341 measurement hangs for more than 6 s, only the AS7341 is reinitialized (no I2C bus reset that would take the SCD41 down with it); after 3 failed attempts it is disabled for 10 min (light values = 0, gain = `0xFF`, status bit 1 = 0) and then retried automatically — the board, SCD41, fans, and analog output stay online the whole time.
+
 ### Analog Output Module
 
 0-10V. 2-channel RS485-to-0-10V converter (ATO), standard Modbus RTU. An optional alternative to Lichtx4 (channel 2, stepless brightness instead of relay steps) and/or the MARS Hydro fan (channel 1) — e.g. for generic fans or dimmers with a 0-10V control input. The same register layout is also served by the [Multimodul](#multimodul-1)'s optional GP8403 output.
 
-> **One-time hardware setup:** The module ships at address `0x01` / 4800 baud by default — incompatible with our 9600-baud bus. Before installing it, it must be reconfigured once **standalone** (not on the shared bus) via a USB-RS485 adapter and the ATO configuration software: address → `0x50`, baud rate → 9600 (register value 2), output type of both channels → 0-10V (register 0x0055 plus the physical solder jumpers set to "V").
+> **One-time hardware setup:** The module ships at address `0x01` / 4800 baud by default. Before installing it, it must be reconfigured once **standalone** (not on the shared bus) via a USB-RS485 adapter and the ATO configuration software: address → `0x50`, output type of both channels → 0-10V (register 0x0055 plus the physical solder jumpers set to "V"), baud rate → that of the bus.
+>
+> **Note on baud rate:** The bus now runs at **115200 baud** (formerly 9600). An ATO module still set to 9600 will no longer respond — it must be switched to 115200 if the ATO software offers that. Otherwise the [Multimodul](#multimodul-1)'s GP8403 output takes over address `0x50`.
 
 #### Registers
 
@@ -1131,6 +1195,18 @@ Exactly the same hysteresis logic as [CO2 Control](#co2-control), just using ten
 
 Own status card on the home page, visible only when enabled.
 
+### Room Light & DWC Timer
+
+Two simple switching features that — like [CO2](#co2-control) and [humidity control](#humidity-control) — switch exactly one output (`target_relay_bit`, 0–3) of an **ESP-NOW socket node** (`target_node_id`); the node's other relay bits are left untouched.
+
+#### Room Light (EEPROM, Magic 0x3F)
+
+A purely **manual** on/off switch, with no automation, hysteresis, or schedule. The output is selected in the climate tab; once one is selected, a switch appears on the home page. The on/off state isn't stored separately but read live from the target node's reported relay mask — so the UI and the actual relay state can't drift apart. Endpoints: `GET /api/raumlicht`, `POST /api/raumlicht/save`, `POST /api/raumlicht/toggle`.
+
+#### DWC Timer (EEPROM, Magic 0x3A)
+
+A simple on/off lighting timer for a separate DWC system, like an ordinary household timer switch (no sunrise/sunset like the [lighting scheduler](#lighting-scheduler)): `enabled` · `target_node_id` · `target_relay_bit` · `on_min` / `off_min` (minutes since midnight; `off_min < on_min` = across midnight).
+
 ### Flow Sensor Calibration & Nozzle Monitoring
 
 Flow meter (YF-S401-like, Hall pulse output with a push-pull driver, no pull-up needed) in the shared supply line **before** the valve manifold — so it sees the flow of all 4 valves in turn, since per [valve control](#features) only one is ever open at a time anyway. An interrupt on `FLOW_SENSOR_PIN` (GPIO3) just counts pulses; conversion to ml is done via a one-time calibration.
@@ -1138,9 +1214,10 @@ Flow meter (YF-S401-like, Hall pulse output with a push-pull driver, no pull-up 
 #### Calibration (Configuration → Valves)
 
 1. **"Start calibration"** — pump on (GPIO48), pressure is shown live. Uses the same output direct-test as the wiring check (which automatically pauses normal valve/pump control).
-2. **"Start"** — opens the return valve (MV4), counts pulses from then on (shown live).
-3. **"Stop"** — valve closes, pulse count is frozen.
-4. Enter the measured amount in ml (e.g. collected in a measuring cup) → **"Calculate"** derives pulses/liter and saves it permanently (own EEPROM block).
+2. **"Purge"** — valve open/close, as often as needed, until there's no air left in the system (air would skew the pulse count). "Start" is only possible after at least one completed purge cycle.
+3. **"Start"** — opens the return valve (MV4), counts pulses from then on (shown live).
+4. **"Stop"** — valve closes, pulse count is frozen.
+5. Enter the measured amount in ml (e.g. collected in a measuring cup) → **"Calculate"** derives pulses/liter and saves it permanently (own EEPROM block).
 
 #### Nozzle Monitoring (`flowmonitor.cpp`)
 
@@ -1161,6 +1238,10 @@ SD log columns: see [Data Log & Download](#data-log--download).
 Sits on the main I2C bus (`I2C_SDA`/`I2C_SCL`, GPIO18/17) together with the RTC and the optional GP8403 — see [I2C Devices](#i2c-devices-sda18-scl17). The sensor measures **room air outside the tent** as a reference.
 
 > **Known library bug:** Adafruit_AHTX0 sends the AHT10 calibration command `0xE1` by default. AHT20/AHT21(B) chips instead expect `0xBE` — otherwise the humidity channel reports a constant ~100 % while temperature is already correct. The firmware manually re-sends the correct command (`0xBE, 0x08, 0x00`) right after `aht21.begin()`.
+
+#### ENS160 (optional)
+
+Optional eCO₂ sensor for room air on the same I2C bus (address `0x52`, e.g. DFRobot Gravity SEN0515 — ENS160 + AHT21 combo module). Detected automatically at boot; since the ENS160 needs current temperature/humidity for compensation, it is continuously fed the AHT21 readings (`setTempAndHum()`). The eCO₂ value (ppm) appears in the status API (`ens160Ok`, `ens160Co2`) and in the web interface. eCO₂ is an estimate derived from VOC measurement, not a true NDIR CO₂ reading like the SCD41 in the tent.
 
 #### VPD (Vapor Pressure Deficit)
 
@@ -1204,6 +1285,7 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5
 | `/api/logs` | GET | List of all `*.csv` and `*.txt` files with file size |
 | `/api/logs/download?file=NAME` | GET | Streams the file with `Content-Disposition: attachment` |
 | `/api/logs/delete` | POST (JSON `{"file":"NAME"}`) | Deletes the file (UI asks for confirmation first) |
+| `/api/logs/delete-all` | POST | Deletes all `*.csv`/`*.txt` files on the SD card, response contains the count (UI asks for confirmation first) |
 
 Filenames are checked server-side against path traversal (no `/` or `..` allowed).
 

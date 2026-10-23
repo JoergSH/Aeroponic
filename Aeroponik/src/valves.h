@@ -81,6 +81,11 @@ void loadUmwaelzConfig();
 void        output_test_mode(bool enable);
 void        output_test_set(uint8_t index, bool on);
 bool        output_test_active();
+// true, solange output_test_mode(true) angefordert wurde, aber noch auf das Ende eines gerade
+// laufenden automatischen Zyklus wartet (kein Ventil wird mitten im Giessen unterbrochen) --
+// siehe loopVentile(). Wird automatisch false, sobald der Test wirklich aktiv wird oder
+// output_test_mode(false) die Anfrage zurueckzieht.
+bool        output_test_pending();
 uint8_t     output_test_get_state();   // Bitmaske, Bit i = Ausgang i an/aus
 const char* output_test_name(uint8_t index);
 

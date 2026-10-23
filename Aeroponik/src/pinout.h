@@ -23,10 +23,10 @@
 #define GEHAEUSE_FAN_PIN  6
 
 // ========== Magnetventile (direkte GPIO, kein PCF8574 mehr) ==========
-#define VENTIL1_PIN        7   // Behälter 1
-#define VENTIL2_PIN        8   // Behälter 2
-#define VENTIL3_PIN        9   // Behälter 3
-#define VENTIL4_PIN       10   // Rücklaufventil
+#define VENTIL1_PIN        8   // Behälter 1
+#define VENTIL2_PIN        7   // Behälter 2
+#define VENTIL3_PIN        10   // Behälter 3
+#define VENTIL4_PIN       9   // Rücklaufventil
 
 // Treiber-Polaritaet aller direkten Ausgaenge (Ventile 1-4, Pumpe, Umwälzpumpe):
 // 0 = High-aktiv (GPIO HIGH -> Ausgang AN, Annahme/Default), 1 = Low-aktiv

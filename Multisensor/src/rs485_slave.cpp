@@ -2,8 +2,10 @@
 #include <HardwareSerial.h>
 #include <Arduino.h>
 
-#define RS485_BAUD         9600
-#define FRAME_TIMEOUT_US   4000   // >3.5ms Pause = Frame-Ende (bei 9600 Baud)
+#define RS485_BAUD         115200
+#define FRAME_TIMEOUT_US   4000   // >3.5 Zeichen Pause = Frame-Ende (unveraendert sicher: bei
+                                  // 115200 Baud liegen Byte-Luecken innerhalb eines Frames weit
+                                  // darunter, nur die erkannte Frame-Ende-Latenz ist etwas hoeher)
 #define RX_BUF_SIZE        64
 
 static HardwareSerial RS485(1);

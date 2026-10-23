@@ -125,3 +125,29 @@ bool storage_delete_log(const char *name) {
     if (!SD.exists(path)) return false;
     return SD.remove(path);
 }
+
+// Sucht und loescht jeweils eine passende Datei pro Durchlauf, statt waehrend des Iterierens ueber
+// openNextFile() zu loeschen -- manche SD-Implementierungen verhalten sich dabei undefiniert.
+uint32_t storage_delete_all_logs() {
+    if (!sdOk) return 0;
+    uint32_t count = 0;
+    for (;;) {
+        File root = SD.open("/");
+        if (!root) break;
+        String found = "";
+        File file = root.openNextFile();
+        while (file) {
+            if (!file.isDirectory()) {
+                String name = file.name();
+                if (name.startsWith("/")) name = name.substring(1);
+                if (name.endsWith(".csv") || name.endsWith(".txt")) { found = name; break; }
+            }
+            file = root.openNextFile();
+        }
+        root.close();
+        if (found.isEmpty()) break;
+        if (SD.remove("/" + found)) count++;
+        else break;  // Abbruch statt Endlosschleife, falls eine Datei nicht geloescht werden kann
+    }
+    return count;
+}

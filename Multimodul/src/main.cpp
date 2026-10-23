@@ -70,17 +70,35 @@ static bool i2cProbe(uint8_t addr) {
 
 // Ueberträgt einen Sensor-Messzyklus in den MS2-Register-Satz (0x20) -- Skalierung und
 // Layout sind identisch zum Multisensor, damit die Parse-Logik am Master unveraendert passt.
-static void updateMs2Regs(const sensor_data_t& d, bool scd41Ok, bool as7341Ok) {
-    rs485_slave_update_ms2(RS485_MS2_REG_CO2, d.co2_ppm);
-    int16_t t = d.temperature_cdeg;
-    rs485_slave_update_ms2(RS485_MS2_REG_TEMP, (uint16_t)((t < 0 ? t - 5 : t + 5) / 10));
-    rs485_slave_update_ms2(RS485_MS2_REG_HUMI, (d.humidity_cpct + 5) / 10);
+//
+// SCD41- und AS7341-Teil werden UNABHAENGIG voneinander geschrieben (siehe
+// sensor_manager_scd41_ready()/_data_ready()): ein haengender/deaktivierter AS7341 darf eine
+// laengst fertige, gueltige SCD41-Messung (CO2/Temp/Feuchte) nicht mehr zurueckhalten -- sonst
+// sieht der Master dauerhaft Feuchte=0% und laesst z.B. die Feuchteregelung durchlaufen,
+// obwohl SCD41 die ganze Zeit korrekte Werte geliefert hat.
+static bool knownScd41Ok   = false;
+static bool knownAs7341Ok  = false;
+
+static void writeMs2Status() {
+    rs485_slave_update_ms2(RS485_MS2_REG_STATUS, (knownScd41Ok ? 0x01 : 0) | (knownAs7341Ok ? 0x02 : 0));
+}
+
+static void updateMs2RegsScd41(int16_t temp_cdeg, uint16_t hum_cpct, uint16_t co2_ppm, bool scd41Ok) {
+    rs485_slave_update_ms2(RS485_MS2_REG_CO2, co2_ppm);
+    rs485_slave_update_ms2(RS485_MS2_REG_TEMP, (uint16_t)((temp_cdeg < 0 ? temp_cdeg - 5 : temp_cdeg + 5) / 10));
+    rs485_slave_update_ms2(RS485_MS2_REG_HUMI, (hum_cpct + 5) / 10);
+    knownScd41Ok = scd41Ok;
+    writeMs2Status();
+}
+
+static void updateMs2RegsAs7341(const sensor_data_t& d, bool as7341Ok) {
     rs485_slave_update_ms2(RS485_MS2_REG_PPFD, d.ppfd_dppfd);
     uint16_t ch[8] = {d.ch_415nm, d.ch_445nm, d.ch_480nm, d.ch_515nm,
                        d.ch_555nm, d.ch_590nm, d.ch_630nm, d.ch_680nm};
     for (int i = 0; i < 8; i++) rs485_slave_update_ms2(RS485_MS2_REG_CH0 + i, (uint8_t)ch[i]);
     rs485_slave_update_ms2(RS485_MS2_REG_GAIN, d.as7341_gain);
-    rs485_slave_update_ms2(RS485_MS2_REG_STATUS, (scd41Ok ? 0x01 : 0) | (as7341Ok ? 0x02 : 0));
+    knownAs7341Ok = as7341Ok;
+    writeMs2Status();
 }
 
 void setup() {
@@ -193,10 +211,15 @@ void loop() {
 
     if (scd41Present) {
         sensor_manager_loop();
+        if (sensor_manager_scd41_ready()) {
+            int16_t  t; uint16_t h, co2;
+            sensor_manager_get_scd41(&t, &h, &co2);
+            updateMs2RegsScd41(t, h, co2, !scd41_has_error());
+        }
         if (sensor_manager_data_ready()) {
             sensor_data_t d;
             sensor_manager_get_data(&d);
-            updateMs2Regs(d, !scd41_has_error(), sensor_manager_as7341_ok());
+            updateMs2RegsAs7341(d, sensor_manager_as7341_ok());
         }
     }
 
