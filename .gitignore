@@ -20,6 +20,9 @@ STL/
 # Interne Notizen (Kalkulation, PCB-Fotos, Grow-Protokoll) — nicht für öffentliches Repo
 DokuEtc/
 
+# Private Projekt-Fotos/STLs (z. B. Demineralisierungsanlage) — nur lokal, nicht für öffentliches Repo
+Doku/
+
 # OS
 .DS_Store
 Thumbs.db
