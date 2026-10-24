@@ -1,5 +1,6 @@
 #include "as7341_handler.h"
 #include <Adafruit_AS7341.h>
+#include <Wire.h>
 #include <Arduino.h>
 
 // Gain-Tabelle: Index → enum, Multiplikator
@@ -69,6 +70,7 @@ static bool      initialized = false;
 static int       gain_idx    = GAIN_DEFAULT_IDX;
 static as_state_t as_state  = AS_IDLE;
 static as7341_data_t result;
+static void start_reading();  // siehe unten (setzt zusaetzlich sat_flags zurueck)
 
 bool as7341_init() {
     initialized = as7341.begin();
@@ -111,8 +113,29 @@ void as7341_start() {
         as_state = AS_DONE;
         return;
     }
-    as7341.startReading();
+    start_reading();
     as_state = AS_FIRST_MEASURE;
+}
+
+// Saettigungs-Flags aus STATUS2 (0xA3): Bit4 = ASAT_DIG (Zaehler voll), Bit3 = ASAT_ANA
+// (analoger Frontend-Teil gesaettigt). Waehrend einer laufenden Messung (beide SMUX-Phasen)
+// gesammelt, da die Lib nur auf AVALID schaut. Noetig, weil bei hohem Gain und langsam
+// steigendem Licht zuerst die ANALOGE Saettigung einsetzt -- die Zaehlwerte bleiben dann auf
+// einem Plateau unterhalb von SAT_THRESHOLD stehen, die reine Zaehlwert-Pruefung greift nie
+// und der Gain wird nicht heruntergeregelt.
+static uint8_t sat_flags = 0;
+
+static uint8_t read_status2() {
+    Wire.beginTransmission(AS7341_I2CADDR_DEFAULT);
+    Wire.write(0xA3);
+    if (Wire.endTransmission(false) != 0) return 0;
+    if (Wire.requestFrom((uint8_t)AS7341_I2CADDR_DEFAULT, (uint8_t)1) != 1) return 0;
+    return Wire.read();
+}
+
+static void start_reading() {
+    sat_flags = 0;
+    as7341.startReading();
 }
 
 static bool process_reading() {
@@ -144,11 +167,14 @@ static bool process_reading() {
     // (z.B. gestaffelte Lichtsteigerung) der Gain in einem Zyklus bis zum richtigen Wert
     // konvergiert, statt pro Poll-Zyklus nur einen Schritt zu machen.
     if (as_state == AS_FIRST_MEASURE || as_state == AS_REMEASURE) {
-        if (max_ch > SAT_THRESHOLD && gain_idx > 0) {
+        bool saturated = (max_ch > SAT_THRESHOLD) || (sat_flags & 0x18);
+        if (saturated && gain_idx > 0) {
             gain_idx--;
             as7341.setGain(GAIN_ENUM[gain_idx]);
-            Serial.printf("[AS7341] Sättigung → Gain idx %d\n", gain_idx);
-            as7341.startReading();
+            Serial.printf("[AS7341] Sättigung (max=%u%s%s) → Gain idx %d\n", max_ch,
+                          (sat_flags & 0x08) ? " ANA" : "", (sat_flags & 0x10) ? " DIG" : "",
+                          gain_idx);
+            start_reading();
             as_state = AS_REMEASURE;
             return false;
         }
@@ -156,7 +182,7 @@ static bool process_reading() {
             gain_idx++;
             as7341.setGain(GAIN_ENUM[gain_idx]);
             Serial.printf("[AS7341] Zu dunkel → Gain idx %d\n", gain_idx);
-            as7341.startReading();
+            start_reading();
             as_state = AS_REMEASURE;
             return false;
         }
@@ -181,6 +207,10 @@ static bool process_reading() {
     result.ch_680nm   = ch[7];
     result.gain       = (uint8_t)gain_idx;
 
+    Serial.printf("[AS7341] Gain %sx  max=%u  PPFD=%s%s\n",
+                  String(GAIN_FACTOR[gain_idx], 1).c_str(), max_ch, String(ppfd, 1).c_str(),
+                  (sat_flags & 0x18) ? "  (gesaettigt, Gain bereits minimal!)" : "");
+
     as_state = AS_DONE;
     return true;
 }
@@ -189,6 +219,7 @@ bool as7341_update() {
     if (!initialized) return as_state == AS_DONE;  // kein Sensor: sofort "fertig" mit 0er-Werten
     if (as_state == AS_IDLE || as_state == AS_DONE) return as_state == AS_DONE;
 
+    sat_flags |= read_status2() & 0x18;
     if (as7341.checkReadingProgress()) {
         return process_reading();
     }

@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <EEPROM.h>
 #include <Update.h>
+#include <MD5Builder.h>
 #include <esp_wifi.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
@@ -2028,6 +2029,111 @@ void handleApiFanGet() {
     server.send(200, "application/json", response);
 }
 
+// ========== Firmware-Update des Multimodul ueber RS485 ==========
+// Upload landet komplett im PSRAM, danach uebertraegt loopRS485() das Image blockweise (siehe
+// rs485_ota_*() in rs485.cpp, Protokoll in Multimodul/src/fw_update.h). Der Puffer muss bis zum
+// Ende des Updates gueltig bleiben -- ein zweiter Upload waehrend eines laufenden Updates wird
+// deshalb verworfen statt den Puffer zu ueberschreiben.
+#define RS485_OTA_BUF_MAX  (1024UL * 1024)
+static uint8_t* rs485OtaBuf    = nullptr;
+static size_t   rs485OtaLen    = 0;
+static bool     rs485OtaTooBig = false;
+static bool     rs485OtaReject = false;
+
+void handleApiRs485OtaUpload() {
+    HTTPUpload& u = server.upload();
+    if (u.status == UPLOAD_FILE_START) {
+        rs485OtaReject = rs485_ota_busy();
+        if (rs485OtaReject) return;
+        if (!rs485OtaBuf)
+            rs485OtaBuf = (uint8_t*)heap_caps_malloc(RS485_OTA_BUF_MAX, MALLOC_CAP_SPIRAM);
+        rs485OtaLen    = 0;
+        rs485OtaTooBig = false;
+        dbgPrintf("[RS485-OTA] Upload Start: %s\n", u.filename.c_str());
+    } else if (u.status == UPLOAD_FILE_WRITE) {
+        esp_task_wdt_reset();
+        if (rs485OtaReject || !rs485OtaBuf) return;
+        if (rs485OtaLen + u.currentSize > RS485_OTA_BUF_MAX) { rs485OtaTooBig = true; return; }
+        memcpy(rs485OtaBuf + rs485OtaLen, u.buf, u.currentSize);
+        rs485OtaLen += u.currentSize;
+    }
+}
+
+static void sendRs485OtaError(const char* msg) {
+    JsonDocument doc;
+    doc["ok"]    = false;
+    doc["error"] = msg;
+    String r;
+    serializeJson(doc, r);
+    server.send(400, "application/json", r);
+}
+
+void handleApiRs485OtaUploadDone() {
+    if (rs485OtaReject || rs485_ota_busy()) { sendRs485OtaError("Es laeuft bereits ein Update"); return; }
+    if (!rs485OtaBuf)                       { sendRs485OtaError("Kein Speicher (PSRAM) fuer die Firmware"); return; }
+    if (rs485OtaTooBig)                     { sendRs485OtaError("Datei zu gross"); return; }
+    if (rs485OtaLen < 1024)                 { sendRs485OtaError("Datei zu klein / leer"); return; }
+    // Haeufige Verwechslungen gleich hier abfangen -- der Slave prueft zusaetzlich den boot2-Block.
+    if (rs485OtaBuf[0] == 0xE9) {
+        sendRs485OtaError("Das ist eine ESP32-Firmware -- benoetigt wird die firmware.bin aus Multimodul/.pio/build");
+        return;
+    }
+    if (memcmp(rs485OtaBuf, "UF2\n", 4) == 0) {
+        sendRs485OtaError("Das ist eine .uf2-Datei -- benoetigt wird die firmware.bin (gleicher Ordner)");
+        return;
+    }
+    MD5Builder md5;
+    md5.begin();
+    md5.add(rs485OtaBuf, rs485OtaLen);
+    md5.calculate();
+    uint8_t digest[16];
+    md5.getBytes(digest);
+    if (!rs485_ota_start(rs485OtaBuf, rs485OtaLen, digest)) {
+        sendRs485OtaError("Update konnte nicht gestartet werden");
+        return;
+    }
+    dbgPrintf("[RS485-OTA] Upload fertig: %u Bytes, MD5 %s\n", (unsigned)rs485OtaLen, md5.toString().c_str());
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"size\":%u}", (unsigned)rs485OtaLen);
+    server.send(200, "application/json", resp);
+}
+
+void handleApiRs485OtaStatus() {
+    static const char* STATE_NAMES[] = {"idle", "version", "info", "begin", "data", "end",
+                                        "reboot", "done", "error"};
+    const Rs485OtaStatus& st = rs485_ota_status();
+    JsonDocument doc;
+    doc["state"] = STATE_NAMES[st.state];
+    doc["busy"]  = rs485_ota_busy();
+    doc["sent"]  = st.sent;
+    doc["total"] = st.total;
+    char v[16];
+    if (st.version_valid) {
+        snprintf(v, sizeof(v), "%u.%u.%u", (unsigned)(st.version >> 16),
+                 (unsigned)((st.version >> 8) & 0xFF), (unsigned)(st.version & 0xFF));
+        doc["version"] = v;
+    }
+    if (st.version_before) {
+        snprintf(v, sizeof(v), "%u.%u.%u", (unsigned)(st.version_before >> 16),
+                 (unsigned)((st.version_before >> 8) & 0xFF), (unsigned)(st.version_before & 0xFF));
+        doc["version_before"] = v;
+    }
+    if (st.error[0]) doc["error"] = st.error;
+    String r;
+    serializeJson(doc, r);
+    server.send(200, "application/json", r);
+}
+
+void handleApiRs485OtaVersion() {
+    rs485_ota_query_version();
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleApiRs485OtaAbort() {
+    rs485_ota_abort();
+    server.send(200, "application/json", "{\"ok\":true}");
+}
+
 // Diagnose bei Verdacht auf eine verschobene/zurueckgesetzte MARS-Hydro-Adresse (Standard 6,
 // siehe rs485.h): probiert FC03 auf Register 11 (RPM) nacheinander fuer jede Adresse im Bereich
 // durch und meldet, welche antworten. Bekannte eigene Adressen (MS2 0x20, Lichtx4 0x40, Analog
@@ -2429,6 +2535,10 @@ void setup() {
   server.on("/api/ds18b20/assign",  HTTP_POST, handleApiDs18b20Assign);
   server.on("/api/fan",             HTTP_GET,  handleApiFanGet);
   server.on("/api/rs485/scanfan",   HTTP_POST, handleApiRs485ScanFan);
+  server.on("/api/rs485/ota/upload",  HTTP_POST, handleApiRs485OtaUploadDone, handleApiRs485OtaUpload);
+  server.on("/api/rs485/ota/status",  HTTP_GET,  handleApiRs485OtaStatus);
+  server.on("/api/rs485/ota/version", HTTP_POST, handleApiRs485OtaVersion);
+  server.on("/api/rs485/ota/abort",   HTTP_POST, handleApiRs485OtaAbort);
   server.on("/api/fan/save",        HTTP_POST, handleApiFanSave);
   server.on("/api/output",          HTTP_GET,  handleApiOutputGet);
   server.on("/api/output/save",     HTTP_POST, handleApiOutputSave);

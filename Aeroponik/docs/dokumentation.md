@@ -433,6 +433,14 @@ Ein Multimodul kann also je nach Bestückung ein reines Lüftermodul, ein Lüfte
 
 > **SCD41 und AS7341 unabhängig:** CO₂/Temperatur/Feuchte (SCD41) werden sofort nach jeder Messung in die `0x20`-Register geschrieben, unabhängig vom AS7341. Bleibt eine AS7341-Messung länger als 6 s hängen, wird nur der AS7341 neu initialisiert (kein I2C-Bus-Reset, der den SCD41 mitreißen würde); nach 3 erfolglosen Versuchen wird er für 10 min deaktiviert (Lichtwerte = 0, Gain = `0xFF`, Status-Bit 1 = 0) und danach automatisch neu versucht — Board, SCD41, Lüfter und Analogausgang bleiben die ganze Zeit online.
 
+#### Firmware-Update über RS485
+
+Das Multimodul lässt sich im eingebauten Zustand über den RS485-Bus aktualisieren: Weboberfläche → System → **Multimodul-Update (RS485)**, Datei `Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin` (nicht `.uf2`). Die Update-Funktion muss dafür einmalig per USB aufgespielt sein (ab Firmware 1.1.0).
+
+Ablauf: Der Master puffert die Datei im PSRAM, berechnet die MD5 und überträgt sie in Blöcken zu 200 Byte über einen eigenen Funktionscode `0x41` an Adresse `0x51` (Protokoll: `Multimodul/src/fw_update.h`). Das normale Polling pausiert währenddessen. Das Multimodul schreibt das Image zunächst als Datei in sein LittleFS (`board_build.filesystem_size = 0.5m`), prüft die MD5 und merkt es erst dann für den OTA-Bootloader vor, der es beim Neustart übernimmt. Danach fragt der Master die neue Version ab; die Lüfter- und Analog-Sollwerte werden über die Boot-ID wie nach jedem Neustart automatisch neu geschrieben.
+
+Sicherungen: Bricht die Übertragung ab (Timeout nach 5 Wiederholungen, Abbrechen-Button, Master-Neustart), bleibt die laufende Firmware unangetastet. Verlorene Antworten führen nicht zu doppelt geschriebenen Blöcken — der Slave meldet immer den nächsten erwarteten Offset. Der Master lehnt ESP32- und `.uf2`-Dateien ab, und das Multimodul vergleicht den ersten Block (boot2) mit seinem eigenen Flash, sodass keine Firmware für ein anderes Board geflasht wird. Die Firmware-Version (`FW_VERSION_*` in `fw_update.h`) sollte bei jedem Update erhöht werden, sonst meldet die Oberfläche einen Hinweis.
+
 ### Analog-Ausgangsmodul
 
 0-10V. 2-Kanal RS485-zu-0-10V-Wandler (ATO), Standard-Modbus-RTU. Wahlweise Alternative zu Lichtx4 (Kanal 2, stufenlose Helligkeit statt Relais-Stufen) und/oder zum MARS-Hydro-Lüfter (Kanal 1) — z. B. für generische Lüfter oder Dimmer mit 0-10V-Steuereingang. Dasselbe Register-Layout wird auch vom optionalen GP8403-Ausgang des [Multimodul](#multimodul) bedient.
@@ -1135,6 +1143,14 @@ Depending on what's populated, a Multimodul can therefore be a plain fan module,
 > **Boot order:** `rs485_slave_init()` deliberately runs at the very start of `setup()`, **before** the I2C scan/sensor init — otherwise the DI line (GP28) would stay unconfigured/high-impedance for as long as the I2C scan or `scd41_init()`/`gp8403_init()` run (which can take arbitrarily long if an I2C transaction hangs), leaving the bus without a defined idle level. The firmware also logs the reset reason at boot (`rp2040.getResetReason()`: power-on, watchdog, brownout, glitch, …) — useful for diagnosing unexplained reboots, since the project itself doesn't use a software watchdog.
 
 > **SCD41 and AS7341 independent:** CO₂/temperature/humidity (SCD41) are written to the `0x20` registers right after each measurement, independently of the AS7341. If an AS7341 measurement hangs for more than 6 s, only the AS7341 is reinitialized (no I2C bus reset that would take the SCD41 down with it); after 3 failed attempts it is disabled for 10 min (light values = 0, gain = `0xFF`, status bit 1 = 0) and then retried automatically — the board, SCD41, fans, and analog output stay online the whole time.
+
+#### Firmware Update via RS485
+
+The Multimodul can be updated in place over the RS485 bus: web interface → System → **Multimodul Update (RS485)**, file `Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin` (not `.uf2`). The update function must have been flashed once via USB for this (firmware 1.1.0 or later).
+
+Flow: the master buffers the file in PSRAM, computes its MD5, and transfers it in 200-byte blocks via a dedicated function code `0x41` to address `0x51` (protocol: `Multimodul/src/fw_update.h`). Normal polling is paused meanwhile. The Multimodul first writes the image as a file into its LittleFS (`board_build.filesystem_size = 0.5m`), verifies the MD5, and only then stages it for the OTA bootloader, which applies it on restart. Afterwards the master queries the new version; fan and analog setpoints are rewritten automatically via the boot ID, as after any restart.
+
+Safeguards: if the transfer is interrupted (timeout after 5 retries, abort button, master restart), the running firmware stays untouched. Lost responses don't cause blocks to be written twice — the slave always reports the next expected offset. The master rejects ESP32 and `.uf2` files, and the Multimodul compares the first block (boot2) against its own flash, so firmware for a different board can't be flashed. The firmware version (`FW_VERSION_*` in `fw_update.h`) should be bumped with every update, otherwise the UI shows a notice.
 
 ### Analog Output Module
 

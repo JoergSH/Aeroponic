@@ -210,7 +210,7 @@ R"rawliteral(
             ventilKonfigGeladen = false;
             updateData(); updateVentile(); updateNodes(); updateRs485();
             updateCo2Status(); updateHumidStatus(); updateFanStatus(); updateDwcStatus(); updateRaumlichtStatus(); updateGehaeuseFanStatus(); updateLueftmodulStatus();
-            loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadHumidConfig(); loadDwcConfig(); loadRaumlichtConfig(); loadGehaeuseFanConfig(); loadUmwaelzConfig(); loadDruckSensorConfigForm(); loadFanConfig(); loadLueftmodulConfig();
+            loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadHumidConfig(); loadDwcConfig(); loadRaumlichtConfig(); loadGehaeuseFanConfig(); loadUmwaelzConfig(); loadDruckSensorConfigForm(); loadFanConfig(); loadLueftmodulConfig(); rs485OtaStartPolling();
             loadWifiConfigForm(); loadLogFileList(); loadOutputConfig(); loadNotifyConfigForm();
             updateSchedPhase();
             updatePcfUi();
@@ -660,6 +660,102 @@ R"rawliteral(
                 st.textContent = t('errorPrefix') + e.message;
             }
             input.value = '';
+        }
+
+        // ===== Multimodul-Update ueber RS485 =====
+        // Upload -> Master puffert im PSRAM -> loopRS485() uebertraegt blockweise; Fortschritt per
+        // /api/rs485/ota/status pollen, bis "done"/"error"/"idle".
+        let rs485OtaTimer = null;
+        const otaL = (de, en) => currentLang === 'en' ? en : de;
+
+        function rs485OtaShow(busy) {
+            document.getElementById('rs485OtaBtn').disabled = busy;
+            document.getElementById('rs485OtaAbortBtn').style.display = busy ? 'inline-block' : 'none';
+        }
+
+        function rs485OtaSetStatus(text, color) {
+            const el = document.getElementById('rs485OtaStatus');
+            el.style.color = color || '';
+            el.textContent = text;
+        }
+
+        async function rs485OtaPoll() {
+            let d;
+            try {
+                d = await (await fetch('/api/rs485/ota/status')).json();
+            } catch (e) {
+                return;   // Master kurz nicht erreichbar -- naechster Versuch
+            }
+            if (d.version) document.getElementById('rs485OtaVersion').textContent = d.version;
+            const fill = document.getElementById('rs485OtaFill');
+            const pct = d.total ? Math.floor(d.sent * 100 / d.total) : 0;
+            fill.style.width = pct + '%';
+            fill.textContent = pct + '%';
+            const phase = {
+                info:   otaL('Verbinde mit Multimodul...', 'Connecting to Multimodul...'),
+                begin:  otaL('Update wird vorbereitet...', 'Preparing update...'),
+                data:   otaL('Übertrage ', 'Transferring ') + Math.round(d.sent / 1024) + ' / ' + Math.round(d.total / 1024) + ' KB',
+                end:    otaL('Prüfe Firmware (MD5)...', 'Verifying firmware (MD5)...'),
+                reboot: otaL('Multimodul startet neu...', 'Multimodul is restarting...'),
+                version: otaL('Frage Version ab...', 'Querying version...')
+            };
+            if (d.busy) {
+                rs485OtaShow(true);
+                rs485OtaSetStatus(phase[d.state] || d.state);
+                return;
+            }
+            clearInterval(rs485OtaTimer);
+            rs485OtaTimer = null;
+            rs485OtaShow(false);
+            if (d.state === 'done') {
+                fill.style.width = '100%';
+                fill.textContent = '100%';
+                rs485OtaSetStatus(otaL('✅ Update erfolgreich – Version ', '✅ Update successful – version ') + (d.version || '?') +
+                                  (d.version_before ? otaL(' (vorher ', ' (before ') + d.version_before + ')' : '') +
+                                  (d.error ? ' – ' + d.error : ''), '#28a745');
+            } else if (d.state === 'error') {
+                rs485OtaSetStatus('❌ ' + (d.error || otaL('Fehler', 'Error')), '#dc3545');
+            } else {
+                rs485OtaSetStatus(d.version ? '' : (d.error || ''), d.error ? '#dc3545' : '');
+            }
+        }
+
+        function rs485OtaStartPolling() {
+            if (!rs485OtaTimer) rs485OtaTimer = setInterval(rs485OtaPoll, 1000);
+            rs485OtaPoll();
+        }
+
+        async function rs485OtaQueryVersion() {
+            document.getElementById('rs485OtaVersion').textContent = '…';
+            await fetch('/api/rs485/ota/version', {method: 'POST'});
+            rs485OtaStartPolling();
+        }
+
+        async function rs485OtaUpload() {
+            const input = document.getElementById('rs485OtaFile');
+            const file = input.files[0];
+            if (!file) { rs485OtaSetStatus(otaL('Bitte zuerst eine .bin-Datei wählen', 'Please choose a .bin file first'), '#dc3545'); return; }
+            if (!confirm(otaL('Multimodul-Firmware jetzt über RS485 aktualisieren?', 'Update the Multimodul firmware via RS485 now?'))) return;
+            rs485OtaShow(true);
+            document.getElementById('rs485OtaProgress').style.display = 'block';
+            rs485OtaSetStatus(otaL('Lade Datei auf den Master hoch...', 'Uploading file to the master...'));
+            const fd = new FormData();
+            fd.append('firmware', file, 'firmware.bin');
+            try {
+                const r = await fetch('/api/rs485/ota/upload', {method: 'POST', body: fd});
+                const d = await r.json();
+                if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                rs485OtaStartPolling();
+            } catch (e) {
+                rs485OtaShow(false);
+                rs485OtaSetStatus('❌ ' + e.message, '#dc3545');
+            }
+            input.value = '';
+        }
+
+        async function rs485OtaAbort() {
+            await fetch('/api/rs485/ota/abort', {method: 'POST'});
+            rs485OtaPoll();
         }
 
         // ===== Tank =====

@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include "pinout.h"
 #include "rs485_slave.h"
+#include "fw_update.h"
 #include "gp8403.h"
 #include "sensors/sensor_manager.h"
 #include "sensors/scd41_handler.h"
@@ -131,6 +132,8 @@ void setup() {
     uint16_t bootId = (uint16_t)(rp2040.hwrand32() & 0xFFFF);
     rs485_slave_update_lueft(RS485_LUEFT_REG_BOOTID, bootId);
     Serial.printf("[BOOT] Boot-ID: 0x%04X\n", bootId);
+    Serial.printf("[BOOT] Firmware %d.%d.%d (Update ueber RS485 moeglich, siehe fw_update.h)\n",
+                  FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH);
 
     // RS485 ganz an den Anfang, VOR den I2C-Scan/Sensor-Init unten: DI (GP28) bleibt sonst
     // unkonfiguriert/hochohmig, solange I2C-Scan + scd41_init()/gp8403_init() laufen (koennen

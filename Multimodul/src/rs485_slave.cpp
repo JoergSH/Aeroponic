@@ -1,4 +1,5 @@
 #include "rs485_slave.h"
+#include "fw_update.h"
 #include <Arduino.h>
 
 // UART0 des RP2040 = Serial1 im arduino-pico Core. Pins werden vor begin() via
@@ -8,7 +9,7 @@
 #define FRAME_TIMEOUT_US   4000   // >3.5 Zeichen Pause = Frame-Ende (unveraendert sicher: bei
                                   // 115200 Baud liegen Byte-Luecken innerhalb eines Frames weit
                                   // darunter, nur die erkannte Frame-Ende-Latenz ist etwas hoeher)
-#define RX_BUF_SIZE        64
+#define RX_BUF_SIZE        256   // gross genug fuer FW-Update-Datenframes (FW_DATA_MAX + Header)
 
 static uint16_t lueftRegs[RS485_LUEFT_NUM_REGS]   = {0};
 static uint16_t ms2Regs[RS485_MS2_NUM_REGS]       = {0};
@@ -21,7 +22,7 @@ static rs485_slave_write_cb_t lueftWriteCb  = nullptr;
 static rs485_slave_write_cb_t analogWriteCb = nullptr;
 
 static uint8_t  rx_buf[RX_BUF_SIZE];
-static uint8_t  rx_len = 0;
+static uint16_t rx_len = 0;
 static uint32_t last_byte_us = 0;
 
 static uint16_t crc16(const uint8_t* d, size_t n) {
@@ -84,6 +85,24 @@ static void handle_write(uint8_t addr, uint16_t* regs, uint8_t numRegs, uint16_t
     send_response(reqFrame, 8);
 }
 
+// FC41: Firmware-Update (Protokoll siehe fw_update.h). Antwort immer 10 Bytes.
+static void handle_fwupdate(uint8_t addr) {
+    uint8_t  status;
+    uint32_t value;
+    bool reboot = fw_update_handle(rx_buf, (uint8_t)rx_len, &status, &value);
+    uint8_t r[10] = {addr, RS485_FC_FWUPDATE, rx_buf[2], status,
+                     (uint8_t)(value >> 24), (uint8_t)(value >> 16), (uint8_t)(value >> 8), (uint8_t)value,
+                     0, 0};
+    uint16_t c = crc16(r, 8);
+    r[8] = c & 0xFF;
+    r[9] = c >> 8;
+    send_response(r, 10);
+    if (reboot) {
+        delay(100);   // Serial-Ausgaben/Antwort sicher raus
+        rp2040.reboot();
+    }
+}
+
 static void handle_frame() {
     if (rx_len < 8) return;
 
@@ -99,6 +118,7 @@ static void handle_frame() {
     if (addr == RS485_ADDR_LUEFT) {
         if (func == 0x03)      handle_read(addr, lueftRegs, RS485_LUEFT_NUM_REGS, p1, p2);
         else if (func == 0x06) handle_write(addr, lueftRegs, RS485_LUEFT_NUM_REGS, p1, p2, rx_buf, lueftWriteCb);
+        else if (func == RS485_FC_FWUPDATE) handle_fwupdate(addr);
         else                   send_exception(addr, func, 0x01);
     } else if (addr == RS485_ADDR_MS2 && ms2Active) {
         if (func == 0x03) handle_read(addr, ms2Regs, RS485_MS2_NUM_REGS, p1, p2);
@@ -108,7 +128,8 @@ static void handle_frame() {
         else if (func == 0x06) handle_write(addr, analogRegs, RS485_ANALOG_NUM_REGS, p1, p2, rx_buf, analogWriteCb);
         else                   send_exception(addr, func, 0x01);
     }
-    // sonst: fremde oder (mangels Hardware) inaktive Adresse -- bewusst keine Antwort,
+    // FC41 (Firmware-Update, siehe fw_update.h) wird oben bei addr == RS485_ADDR_LUEFT
+    // behandelt. Sonst: fremde oder (mangels Hardware) inaktive Adresse -- bewusst keine Antwort,
     // genau wie ein nicht angeschlossenes Geraet. Der Master erkennt das per Timeout.
 }
 

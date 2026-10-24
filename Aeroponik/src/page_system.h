@@ -117,6 +117,30 @@ R"rawliteral(
                 </form>
             </div>
 
+            <!-- Firmware-Update Multimodul ueber RS485 (siehe rs485_ota_*() in rs485.cpp) -->
+            <h3 class="section-heading">🔌 <span class="de">Multimodul-Update (RS485)</span><span class="en">Multimodul Update (RS485)</span></h3>
+            <div class="update-section">
+                <div class="warning">
+                    <span class="de">• Datei: <code>Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin</code> (nicht .uf2)<br>• Dauer ca. 30–60 s, währenddessen pausiert der RS485-Bus (Lüfter/Sensoren/Analog melden kurz keine Werte)<br>• Danach startet das Multimodul neu, die Sollwerte werden automatisch neu gesetzt<br>• Bricht die Übertragung ab, bleibt die alte Firmware aktiv</span>
+                    <span class="en">• File: <code>Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin</code> (not .uf2)<br>• Takes about 30–60 s; the RS485 bus is paused meanwhile (fans/sensors/analog briefly report no values)<br>• The Multimodul then restarts, setpoints are restored automatically<br>• If the transfer is interrupted, the old firmware stays active</span>
+                </div>
+                <div style="margin:10px 0;">
+                    <span class="de">Installierte Version:</span><span class="en">Installed version:</span>
+                    <strong id="rs485OtaVersion">–</strong>
+                    <button type="button" class="button" style="margin-left:10px;padding:4px 10px;" onclick="rs485OtaQueryVersion()"><span class="de">Abfragen</span><span class="en">Query</span></button>
+                </div>
+                <label>Firmware (.bin):</label>
+                <input type="file" id="rs485OtaFile" accept=".bin" class="file-input">
+                <div style="text-align:center;margin:20px 0;">
+                    <button type="button" class="button button-update" id="rs485OtaBtn" onclick="rs485OtaUpload()"><span class="de">Update starten</span><span class="en">Start update</span></button>
+                    <button type="button" class="button" id="rs485OtaAbortBtn" onclick="rs485OtaAbort()" style="display:none;"><span class="de">Abbrechen</span><span class="en">Abort</span></button>
+                </div>
+                <div id="rs485OtaProgress" class="progress-bar" style="display:none;">
+                    <div id="rs485OtaFill" class="progress-fill">0%</div>
+                </div>
+                <div id="rs485OtaStatus" style="text-align:center;"></div>
+            </div>
+
             <!-- Daten-Log -->
             <h3 class="section-heading">📥 <span class="de">Daten-Log (SD-Karte)</span><span class="en">Data Log (SD Card)</span></h3>
             <div class="status-box-info">
