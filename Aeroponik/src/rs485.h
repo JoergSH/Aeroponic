@@ -123,8 +123,9 @@ void rs485_set_lueft_polling(bool enabled);
 // in main.cpp). Rueckgabe: Anzahl empfangener Bytes (0 = keine Antwort).
 uint8_t rs485_probe_fc03(uint8_t addr, uint16_t start, uint16_t count, uint8_t* out_buf, uint8_t max_len);
 
-// ========== Firmware-Update eines RS485-Slaves (Multimodul, Adresse 0x51) ==========
-// Eigener Funktionscode 0x41, Protokoll siehe Multimodul/src/fw_update.h. Waehrend eines
+// ========== Firmware-Update eines RS485-Slaves (Multimodul 0x51, Lichtx4 0x40) ==========
+// Eigener Funktionscode 0x41, Protokoll siehe Multimodul/src/fw_update.h bzw.
+// Lichtx4/src/fw_update.h (identisch). Waehrend eines
 // Updates pausiert das normale Polling komplett (nur eine Anfrage gleichzeitig auf dem Bus);
 // danach startet der Slave neu, der Master fragt die neue Version ab und synchronisiert die
 // Sollwerte ueber die Boot-ID wie nach jedem Slave-Neustart.
@@ -142,6 +143,7 @@ enum Rs485OtaState {
 
 struct Rs485OtaStatus {
     Rs485OtaState state;
+    uint8_t  addr;            // Ziel-Slave des laufenden/letzten Vorgangs
     uint32_t sent;            // bestaetigte Bytes
     uint32_t total;
     bool     version_valid;
@@ -152,9 +154,9 @@ struct Rs485OtaStatus {
 
 // Startet das Update. `image` muss bis zum Ende (DONE/ERROR) gueltig bleiben. Rueckgabe false,
 // wenn schon ein Update laeuft.
-bool rs485_ota_start(const uint8_t* image, uint32_t size, const uint8_t md5[16]);
+bool rs485_ota_start(uint8_t addr, const uint8_t* image, uint32_t size, const uint8_t md5[16]);
 // Fragt nur die aktuelle Firmware-Version des Slaves ab (asynchron, Ergebnis in rs485_ota_status()).
-void rs485_ota_query_version();
+void rs485_ota_query_version(uint8_t addr);
 void rs485_ota_abort();
 bool rs485_ota_busy();
 const Rs485OtaStatus& rs485_ota_status();

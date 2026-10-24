@@ -2029,7 +2029,7 @@ void handleApiFanGet() {
     server.send(200, "application/json", response);
 }
 
-// ========== Firmware-Update des Multimodul ueber RS485 ==========
+// ========== Firmware-Update eines RS485-Slaves (Multimodul / Lichtx4) ==========
 // Upload landet komplett im PSRAM, danach uebertraegt loopRS485() das Image blockweise (siehe
 // rs485_ota_*() in rs485.cpp, Protokoll in Multimodul/src/fw_update.h). Der Puffer muss bis zum
 // Ende des Updates gueltig bleiben -- ein zweiter Upload waehrend eines laufenden Updates wird
@@ -2039,6 +2039,11 @@ static uint8_t* rs485OtaBuf    = nullptr;
 static size_t   rs485OtaLen    = 0;
 static bool     rs485OtaTooBig = false;
 static bool     rs485OtaReject = false;
+
+// Ziel aus ?target=lichtx4|multimodul (Default Multimodul).
+static uint8_t rs485OtaTargetArg() {
+    return server.arg("target") == "lichtx4" ? RS485_ADDR_LICHT : RS485_ADDR_LUEFT;
+}
 
 void handleApiRs485OtaUpload() {
     HTTPUpload& u = server.upload();
@@ -2073,14 +2078,23 @@ void handleApiRs485OtaUploadDone() {
     if (!rs485OtaBuf)                       { sendRs485OtaError("Kein Speicher (PSRAM) fuer die Firmware"); return; }
     if (rs485OtaTooBig)                     { sendRs485OtaError("Datei zu gross"); return; }
     if (rs485OtaLen < 1024)                 { sendRs485OtaError("Datei zu klein / leer"); return; }
-    // Haeufige Verwechslungen gleich hier abfangen -- der Slave prueft zusaetzlich den boot2-Block.
-    if (rs485OtaBuf[0] == 0xE9) {
-        sendRs485OtaError("Das ist eine ESP32-Firmware -- benoetigt wird die firmware.bin aus Multimodul/.pio/build");
-        return;
-    }
-    if (memcmp(rs485OtaBuf, "UF2\n", 4) == 0) {
-        sendRs485OtaError("Das ist eine .uf2-Datei -- benoetigt wird die firmware.bin (gleicher Ordner)");
-        return;
+    // Haeufige Verwechslungen gleich hier abfangen -- der Slave prueft zusaetzlich selbst
+    // (Multimodul: boot2-Block, Lichtx4: ESP-Image-Header mit Chip-ID).
+    uint8_t target = rs485OtaTargetArg();
+    if (target == RS485_ADDR_LICHT) {
+        if (rs485OtaBuf[0] != 0xE9) {
+            sendRs485OtaError("Keine ESP32-Firmware -- benoetigt wird die firmware.bin aus Lichtx4/.pio/build");
+            return;
+        }
+    } else {
+        if (rs485OtaBuf[0] == 0xE9) {
+            sendRs485OtaError("Das ist eine ESP32-Firmware -- benoetigt wird die firmware.bin aus Multimodul/.pio/build");
+            return;
+        }
+        if (memcmp(rs485OtaBuf, "UF2\n", 4) == 0) {
+            sendRs485OtaError("Das ist eine .uf2-Datei -- benoetigt wird die firmware.bin (gleicher Ordner)");
+            return;
+        }
     }
     MD5Builder md5;
     md5.begin();
@@ -2088,7 +2102,7 @@ void handleApiRs485OtaUploadDone() {
     md5.calculate();
     uint8_t digest[16];
     md5.getBytes(digest);
-    if (!rs485_ota_start(rs485OtaBuf, rs485OtaLen, digest)) {
+    if (!rs485_ota_start(target, rs485OtaBuf, rs485OtaLen, digest)) {
         sendRs485OtaError("Update konnte nicht gestartet werden");
         return;
     }
@@ -2104,6 +2118,7 @@ void handleApiRs485OtaStatus() {
     const Rs485OtaStatus& st = rs485_ota_status();
     JsonDocument doc;
     doc["state"] = STATE_NAMES[st.state];
+    doc["target"] = st.addr == RS485_ADDR_LICHT ? "lichtx4" : "multimodul";
     doc["busy"]  = rs485_ota_busy();
     doc["sent"]  = st.sent;
     doc["total"] = st.total;
@@ -2125,7 +2140,7 @@ void handleApiRs485OtaStatus() {
 }
 
 void handleApiRs485OtaVersion() {
-    rs485_ota_query_version();
+    rs485_ota_query_version(rs485OtaTargetArg());
     server.send(200, "application/json", "{\"ok\":true}");
 }
 

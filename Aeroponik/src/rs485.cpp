@@ -485,10 +485,10 @@ static void parse_lueft_write_ack(const uint8_t* buf, uint8_t len, uint8_t chann
 // ========== Public ==========
 
 // ========== Firmware-Update eines Slaves (FC41) ==========
-// Protokoll/Konstanten identisch zu Multimodul/src/fw_update.h. Laeuft als eigene kleine
+// Protokoll/Konstanten identisch zu Multimodul/src/fw_update.h und Lichtx4/src/fw_update.h.
+// Laeuft als eigene kleine
 // Zustandsmaschine, die den Bus komplett uebernimmt (siehe loopRS485()), damit sich Update-
 // Frames und normale Polls nie ueberschneiden.
-#define OTA_ADDR             RS485_ADDR_LUEFT
 #define OTA_FC               0x41
 #define OTA_SUB_INFO         0x00
 #define OTA_SUB_BEGIN        0x01
@@ -506,7 +506,7 @@ static void parse_lueft_write_ack(const uint8_t* buf, uint8_t len, uint8_t chann
 #define OTA_REBOOT_POLL_MS   1500UL
 #define OTA_REBOOT_TRY_MS    500UL
 
-static Rs485OtaStatus ota = {RS485_OTA_IDLE, 0, 0, false, 0, 0, ""};
+static Rs485OtaStatus ota = {RS485_OTA_IDLE, RS485_ADDR_LUEFT, 0, 0, false, 0, 0, ""};
 static const uint8_t* ota_img = nullptr;
 static uint8_t  ota_md5[16];
 static bool     ota_requested  = false;  // wartet darauf, dass die laufende normale Abfrage fertig ist
@@ -542,7 +542,7 @@ static void ota_fail(const char* msg) {
 static void ota_send(uint8_t sub, const uint8_t* arg, uint8_t argLen, uint32_t timeout_ms) {
     uint8_t f[3 + 5 + OTA_CHUNK + 2];
     uint8_t n = argLen < 4 ? 4 : argLen;   // Frames immer >= 8 Bytes, kuerzere verwirft der Slave
-    f[0] = OTA_ADDR;
+    f[0] = ota.addr;
     f[1] = OTA_FC;
     f[2] = sub;
     memset(f + 3, 0, n);
@@ -604,7 +604,7 @@ static void ota_handle_reply(uint8_t st, uint32_t val, uint32_t now) {
     case RS485_OTA_INFO:
         if (st == OTA_ST_OK) { ota.version = ota.version_before = val; ota.version_valid = true; }
         dbgPrintf("[RS485-OTA] Start: %u Bytes an 0x%02X (bisherige Version %u.%u.%u)\n",
-                  (unsigned)ota.total, OTA_ADDR, (unsigned)(val >> 16), (unsigned)((val >> 8) & 0xFF),
+                  (unsigned)ota.total, ota.addr, (unsigned)(val >> 16), (unsigned)((val >> 8) & 0xFF),
                   (unsigned)(val & 0xFF));
         ota.state = RS485_OTA_BEGIN;
         break;
@@ -620,7 +620,9 @@ static void ota_handle_reply(uint8_t st, uint32_t val, uint32_t now) {
         break;
     case RS485_OTA_DATA:
         if (st == OTA_ST_BAD_IMAGE) {
-            ota_fail("Datei passt nicht zum Multimodul (keine RP2040-Firmware fuer dieses Board?)");
+            ota_fail(ota.addr == RS485_ADDR_LICHT
+                         ? "Datei passt nicht zum Lichtx4 (keine ESP32-C3-Firmware?)"
+                         : "Datei passt nicht zum Multimodul (keine RP2040-Firmware fuer dieses Board?)");
             return;
         }
         if ((st != OTA_ST_OK && st != OTA_ST_OFFSET) || val > ota.total) {
@@ -649,7 +651,7 @@ static void ota_handle_reply(uint8_t st, uint32_t val, uint32_t now) {
         ota.version_valid = true;
         if (ota.version_before != 0 && val == ota.version_before)
             snprintf(ota.error, sizeof(ota.error),
-                     "Hinweis: Versionsnummer unveraendert (FW_VERSION_* im Multimodul nicht erhoeht?)");
+                     "Hinweis: Versionsnummer unveraendert (FW_VERSION_* in fw_update.h nicht erhoeht?)");
         dbgPrintf("[RS485-OTA] Fertig, Slave meldet Version %u.%u.%u\n", (unsigned)(val >> 16),
                   (unsigned)((val >> 8) & 0xFF), (unsigned)(val & 0xFF));
         ota_finish(RS485_OTA_DONE);
@@ -681,7 +683,7 @@ static void ota_loop(uint32_t now) {
 
     bool frame_done = (rx_len > 0) && ((micros() - last_byte_us) > FRAME_TIMEOUT_US);
     if (frame_done) {
-        bool ok = rx_len >= 10 && rx_buf[0] == OTA_ADDR && rx_buf[1] == OTA_FC &&
+        bool ok = rx_len >= 10 && rx_buf[0] == ota.addr && rx_buf[1] == OTA_FC &&
                   rx_buf[2] == ota_last_sub &&
                   crc16(rx_buf, 8) == ((uint16_t)rx_buf[9] << 8 | rx_buf[8]);
         uint8_t  st  = rx_buf[3];
@@ -702,9 +704,14 @@ static void ota_loop(uint32_t now) {
     rx_len      = 0;
     if (ota.state == RS485_OTA_REBOOT_WAIT) return;   // Slave bootet noch -- spaeter erneut fragen
     if (++ota_retries > OTA_MAX_RETRIES) {
-        ota_fail(ota.state == RS485_OTA_VERSION || ota.state == RS485_OTA_INFO
-                     ? "Multimodul (0x51) antwortet nicht auf Update-Anfragen (Firmware ohne Update-Funktion?)"
-                     : "Keine Antwort vom Multimodul (0x51) -- Update abgebrochen, alte Firmware bleibt aktiv");
+        char msg[96];
+        if (ota.state == RS485_OTA_VERSION || ota.state == RS485_OTA_INFO)
+            snprintf(msg, sizeof(msg), "Slave 0x%02X antwortet nicht auf Update-Anfragen "
+                     "(Firmware ohne Update-Funktion / falsche Baudrate?)", ota.addr);
+        else
+            snprintf(msg, sizeof(msg), "Keine Antwort von Slave 0x%02X -- Update abgebrochen, "
+                     "alte Firmware bleibt aktiv", ota.addr);
+        ota_fail(msg);
         return;
     }
     dbgPrintf("[RS485-OTA] Keine/ungueltige Antwort (Sub %u), Wiederholung %u/%u\n",
@@ -713,8 +720,9 @@ static void ota_loop(uint32_t now) {
 
 bool rs485_ota_busy() { return ota_requested || ota_running; }
 
-bool rs485_ota_start(const uint8_t* image, uint32_t size, const uint8_t md5[16]) {
+bool rs485_ota_start(uint8_t addr, const uint8_t* image, uint32_t size, const uint8_t md5[16]) {
     if (rs485_ota_busy() || !image || size == 0) return false;
+    ota.addr           = addr;
     ota_img            = image;
     ota.total          = size;
     ota.sent           = 0;
@@ -727,8 +735,10 @@ bool rs485_ota_start(const uint8_t* image, uint32_t size, const uint8_t md5[16])
     return true;
 }
 
-void rs485_ota_query_version() {
+void rs485_ota_query_version(uint8_t addr) {
     if (rs485_ota_busy()) return;
+    ota.addr          = addr;
+    ota.version_valid = false;   // Anzeige darf nicht die Version eines anderen Slaves zeigen
     ota.error[0]  = '\0';
     ota.state     = RS485_OTA_VERSION;
     ota_retries   = 0;

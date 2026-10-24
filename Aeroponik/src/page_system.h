@@ -118,11 +118,18 @@ R"rawliteral(
             </div>
 
             <!-- Firmware-Update Multimodul ueber RS485 (siehe rs485_ota_*() in rs485.cpp) -->
-            <h3 class="section-heading">🔌 <span class="de">Multimodul-Update (RS485)</span><span class="en">Multimodul Update (RS485)</span></h3>
+            <h3 class="section-heading">🔌 <span class="de">Modul-Update (RS485)</span><span class="en">Module Update (RS485)</span></h3>
             <div class="update-section">
                 <div class="warning">
-                    <span class="de">• Datei: <code>Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin</code> (nicht .uf2)<br>• Dauer ca. 30–60 s, währenddessen pausiert der RS485-Bus (Lüfter/Sensoren/Analog melden kurz keine Werte)<br>• Danach startet das Multimodul neu, die Sollwerte werden automatisch neu gesetzt<br>• Bricht die Übertragung ab, bleibt die alte Firmware aktiv</span>
-                    <span class="en">• File: <code>Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin</code> (not .uf2)<br>• Takes about 30–60 s; the RS485 bus is paused meanwhile (fans/sensors/analog briefly report no values)<br>• The Multimodul then restarts, setpoints are restored automatically<br>• If the transfer is interrupted, the old firmware stays active</span>
+                    <span class="de">• Datei: <code>&lt;Modul&gt;/.pio/build/&lt;board&gt;/firmware.bin</code> (beim Multimodul nicht die .uf2)<br>• Dauer: Multimodul ca. 30–60 s, Lichtx4 ca. 1–2 min — währenddessen pausiert der RS485-Bus (Geräte melden kurz keine Werte)<br>• Danach startet das Modul neu, die Sollwerte werden automatisch neu gesetzt<br>• Bricht die Übertragung ab, bleibt die alte Firmware aktiv</span>
+                    <span class="en">• File: <code>&lt;module&gt;/.pio/build/&lt;board&gt;/firmware.bin</code> (for the Multimodul not the .uf2)<br>• Duration: Multimodul about 30–60 s, Lichtx4 about 1–2 min — the RS485 bus is paused meanwhile (devices briefly report no values)<br>• The module then restarts, setpoints are restored automatically<br>• If the transfer is interrupted, the old firmware stays active</span>
+                </div>
+                <div style="margin:10px 0;">
+                    <span class="de">Modul:</span><span class="en">Module:</span>
+                    <select id="rs485OtaTarget" onchange="rs485OtaTargetChanged()" style="padding:5px;margin-left:6px;">
+                        <option value="multimodul">Multimodul (0x51)</option>
+                        <option value="lichtx4">Lichtx4 (0x40)</option>
+                    </select>
                 </div>
                 <div style="margin:10px 0;">
                     <span class="de">Installierte Version:</span><span class="en">Installed version:</span>

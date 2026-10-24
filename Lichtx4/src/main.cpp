@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "pinout.h"
 #include "rs485_slave.h"
+#include "fw_update.h"
 #include "relay/relay_manager.h"
 
 // ========== RS485-Schreibbefehl vom Master ==========
@@ -50,6 +51,8 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n[MAIN] Lichtx4 startet...");
+    Serial.printf("[MAIN] Firmware %d.%d.%d (Update ueber RS485 moeglich, siehe fw_update.h)\n",
+                  FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH);
 
     relay_manager_init();
     rs485_slave_update(relay_manager_get_mask());  // Preferences-Zustand sofort fuer Poll sichtbar

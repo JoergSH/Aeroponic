@@ -668,8 +668,18 @@ R"rawliteral(
         let rs485OtaTimer = null;
         const otaL = (de, en) => currentLang === 'en' ? en : de;
 
+        function rs485OtaTarget() {
+            return document.getElementById('rs485OtaTarget').value;
+        }
+
+        function rs485OtaTargetChanged() {
+            document.getElementById('rs485OtaVersion').textContent = '–';
+            rs485OtaSetStatus('');
+        }
+
         function rs485OtaShow(busy) {
             document.getElementById('rs485OtaBtn').disabled = busy;
+            document.getElementById('rs485OtaTarget').disabled = busy;
             document.getElementById('rs485OtaAbortBtn').style.display = busy ? 'inline-block' : 'none';
         }
 
@@ -686,7 +696,10 @@ R"rawliteral(
             } catch (e) {
                 return;   // Master kurz nicht erreichbar -- naechster Versuch
             }
-            if (d.version) document.getElementById('rs485OtaVersion').textContent = d.version;
+            // Laeuft/lief der Vorgang fuer ein Modul, folgt die Auswahl ihm (z.B. nach Neuladen der Seite)
+            if (d.target && (d.busy || d.state !== 'idle')) document.getElementById('rs485OtaTarget').value = d.target;
+            if (d.version && d.target === rs485OtaTarget())
+                document.getElementById('rs485OtaVersion').textContent = d.version;
             const fill = document.getElementById('rs485OtaFill');
             const pct = d.total ? Math.floor(d.sent * 100 / d.total) : 0;
             fill.style.width = pct + '%';
@@ -727,7 +740,7 @@ R"rawliteral(
 
         async function rs485OtaQueryVersion() {
             document.getElementById('rs485OtaVersion').textContent = '…';
-            await fetch('/api/rs485/ota/version', {method: 'POST'});
+            await fetch('/api/rs485/ota/version?target=' + rs485OtaTarget(), {method: 'POST'});
             rs485OtaStartPolling();
         }
 
@@ -735,14 +748,16 @@ R"rawliteral(
             const input = document.getElementById('rs485OtaFile');
             const file = input.files[0];
             if (!file) { rs485OtaSetStatus(otaL('Bitte zuerst eine .bin-Datei wählen', 'Please choose a .bin file first'), '#dc3545'); return; }
-            if (!confirm(otaL('Multimodul-Firmware jetzt über RS485 aktualisieren?', 'Update the Multimodul firmware via RS485 now?'))) return;
+            const target = rs485OtaTarget();
+            const name = target === 'lichtx4' ? 'Lichtx4' : 'Multimodul';
+            if (!confirm(otaL(name + '-Firmware jetzt über RS485 aktualisieren?', 'Update the ' + name + ' firmware via RS485 now?'))) return;
             rs485OtaShow(true);
             document.getElementById('rs485OtaProgress').style.display = 'block';
             rs485OtaSetStatus(otaL('Lade Datei auf den Master hoch...', 'Uploading file to the master...'));
             const fd = new FormData();
             fd.append('firmware', file, 'firmware.bin');
             try {
-                const r = await fetch('/api/rs485/ota/upload', {method: 'POST', body: fd});
+                const r = await fetch('/api/rs485/ota/upload?target=' + target, {method: 'POST', body: fd});
                 const d = await r.json();
                 if (!d.ok) throw new Error(d.error || ('HTTP ' + r.status));
                 rs485OtaStartPolling();

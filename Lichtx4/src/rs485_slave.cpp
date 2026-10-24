@@ -1,4 +1,5 @@
 #include "rs485_slave.h"
+#include "fw_update.h"
 #include <HardwareSerial.h>
 #include <Arduino.h>
 
@@ -6,14 +7,14 @@
 #define FRAME_TIMEOUT_US   4000   // >3.5 Zeichen Pause = Frame-Ende (unveraendert sicher: bei
                                   // 115200 Baud liegen Byte-Luecken innerhalb eines Frames weit
                                   // darunter, nur die erkannte Frame-Ende-Latenz ist etwas hoeher)
-#define RX_BUF_SIZE        64
+#define RX_BUF_SIZE        256   // gross genug fuer FW-Update-Datenframes (FW_DATA_MAX + Header)
 
 static HardwareSerial RS485(1);
 
 static uint16_t regs[RS485_NUM_REGS] = {0};
 static bool     request_received     = false;
 static uint8_t  rx_buf[RX_BUF_SIZE];
-static uint8_t  rx_len = 0;
+static uint16_t rx_len = 0;
 static uint32_t last_byte_us = 0;
 static rs485_slave_write_cb_t write_cb = nullptr;
 
@@ -83,9 +84,32 @@ static void log_hex(const uint8_t* buf, uint8_t len) {
     Serial.println();
 }
 
+// FC41: Firmware-Update (Protokoll siehe fw_update.h). Antwort immer 10 Bytes.
+static void handle_fwupdate() {
+    uint8_t  status;
+    uint32_t value;
+    bool reboot = fw_update_handle(rx_buf, (uint8_t)rx_len, &status, &value);
+    uint8_t r[10] = {RS485_SLAVE_ADDR, RS485_FC_FWUPDATE, rx_buf[2], status,
+                     (uint8_t)(value >> 24), (uint8_t)(value >> 16), (uint8_t)(value >> 8), (uint8_t)value,
+                     0, 0};
+    uint16_t c = crc16(r, 8);
+    r[8] = c & 0xFF;
+    r[9] = c >> 8;
+    send_response(r, 10);
+    if (reboot) {
+        delay(100);   // Serial-Ausgaben/Antwort sicher raus
+        ESP.restart();
+    }
+}
+
 static void handle_frame() {
-    Serial.printf("[RS485] Rx %d Byte: ", rx_len);
-    log_hex(rx_buf, rx_len);
+    // Update-Datenframes (bis ~210 Byte, mehrere hundert pro Update) nicht als Hex loggen --
+    // das wuerde die Uebertragung unnoetig ausbremsen. fw_update.cpp loggt selbst das Wichtige.
+    bool isFwUpdate = rx_len >= 2 && rx_buf[0] == RS485_SLAVE_ADDR && rx_buf[1] == RS485_FC_FWUPDATE;
+    if (!isFwUpdate) {
+        Serial.printf("[RS485] Rx %d Byte: ", rx_len);
+        log_hex(rx_buf, rx_len);
+    }
 
     if (rx_len < 8) {
         Serial.println("[RS485]   -> verworfen: Frame zu kurz (< 8 Byte)");
@@ -107,6 +131,10 @@ static void handle_frame() {
 
     request_received = true;
     uint8_t  func = rx_buf[1];
+    if (func == RS485_FC_FWUPDATE) {
+        handle_fwupdate();
+        return;
+    }
     Serial.printf("[RS485]   -> gueltig: addr=0x%02X func=0x%02X\n", rx_buf[0], func);
 
     if (func == 0x03) {
@@ -128,6 +156,11 @@ bool rs485_slave_got_request() { return request_received; }
 
 void rs485_slave_init(uint8_t tx_pin, uint8_t rx_pin) {
     RS485.begin(RS485_BAUD, SERIAL_8N1, rx_pin, tx_pin);
+    // Der UART reicht empfangene Bytes standardmaessig erst bei 120 Byte im Hardware-FIFO (oder
+    // nach einer Leitungspause) an die Software weiter -- bei 115200 Baud ~10 ms ohne neue Bytes,
+    // die FRAME_TIMEOUT_US-Erkennung (4 ms) zerlegt dadurch lange Frames (FW-Update-Daten,
+    // ~210 Byte) in zwei Stuecke mit kaputter CRC. Mit 16 Byte (~1,4 ms) bleibt jeder Frame am Stueck.
+    RS485.setRxFIFOFull(16);
     Serial.printf("[RS485] Slave 0x%02X bereit (%d Baud, TX=%d RX=%d)\n",
                   RS485_SLAVE_ADDR, RS485_BAUD, tx_pin, rx_pin);
 }

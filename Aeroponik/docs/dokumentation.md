@@ -357,6 +357,12 @@ RS485-Lichtsteuerung. Eigenständige Firmware (`Lichtx4`) mit 4 Relais-/SSR-Ausg
 
 Wird vom bestehenden [Beleuchtungs-Scheduler](#beleuchtungs-scheduler) angesteuert — statt eines ESP-NOW `CMD_SET_ONOFF`-Pakets schreibt der Master bei Maskenänderung direkt per FC06 auf Register 0.
 
+#### Firmware-Update über RS485
+
+Ab Firmware 1.1.0 (einmalig per USB/Programmier-Pads aufzuspielen) lässt sich auch das Lichtx4 im eingebauten Zustand aktualisieren: Weboberfläche → System → **Modul-Update (RS485)**, Modul „Lichtx4“ wählen, Datei `Lichtx4/.pio/build/nologo_esp32c3_super_mini/firmware.bin`. Gleiches Protokoll wie beim [Multimodul](#multimodul) (Funktionscode `0x41`, hier an Adresse `0x40`, `Lichtx4/src/fw_update.h`). Das Image landet in der zweiten OTA-App-Partition und wird erst nach erfolgreicher MD5-Prüfung aktiviert; der erste Block muss ein ESP-Image (Magic `0xE9`) mit der Chip-ID des ESP32-C3 sein. Dauer ca. 1–2 min (~320 KB). Die Relaismaske bleibt per `Preferences` über den Neustart erhalten.
+
+> Ab dieser Firmware läuft das Lichtx4 mit 115200 Baud — danach `#define LICHTX4_LEGACY_9600` aus `Aeroponik/src/local_config.h` entfernen (siehe [RS485-Bus](#rs485-bus)), sonst spricht der Master es weiter mit 9600 an.
+
 ### Abluftlüfter
 
 MARS Hydro (RS485). Werksseitig fertige Lüfterplatine, RS485-Adresse `6`, ursprünglich per MARS-Hydro-*iControl*-App gesteuert. Der Master kann die Steuerung optional vollständig übernehmen.
@@ -435,7 +441,7 @@ Ein Multimodul kann also je nach Bestückung ein reines Lüftermodul, ein Lüfte
 
 #### Firmware-Update über RS485
 
-Das Multimodul lässt sich im eingebauten Zustand über den RS485-Bus aktualisieren: Weboberfläche → System → **Multimodul-Update (RS485)**, Datei `Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin` (nicht `.uf2`). Die Update-Funktion muss dafür einmalig per USB aufgespielt sein (ab Firmware 1.1.0).
+Das Multimodul lässt sich im eingebauten Zustand über den RS485-Bus aktualisieren: Weboberfläche → System → **Modul-Update (RS485)** (Modul „Multimodul“ wählen), Datei `Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin` (nicht `.uf2`). Die Update-Funktion muss dafür einmalig per USB aufgespielt sein (ab Firmware 1.1.0).
 
 Ablauf: Der Master puffert die Datei im PSRAM, berechnet die MD5 und überträgt sie in Blöcken zu 200 Byte über einen eigenen Funktionscode `0x41` an Adresse `0x51` (Protokoll: `Multimodul/src/fw_update.h`). Das normale Polling pausiert währenddessen. Das Multimodul schreibt das Image zunächst als Datei in sein LittleFS (`board_build.filesystem_size = 0.5m`), prüft die MD5 und merkt es erst dann für den OTA-Bootloader vor, der es beim Neustart übernimmt. Danach fragt der Master die neue Version ab; die Lüfter- und Analog-Sollwerte werden über die Boot-ID wie nach jedem Neustart automatisch neu geschrieben.
 
@@ -1068,6 +1074,12 @@ RS485 light control. Standalone firmware (`Lichtx4`) with 4 relay/SSR outputs, c
 
 Driven by the existing [lighting scheduler](#lighting-scheduler) — instead of an ESP-NOW `CMD_SET_ONOFF` packet, the master writes directly via FC06 to register 0 on mask change.
 
+#### Firmware Update via RS485
+
+From firmware 1.1.0 on (to be flashed once via USB/programming pads), the Lichtx4 can also be updated in place: web interface → System → **Module Update (RS485)**, select "Lichtx4", file `Lichtx4/.pio/build/nologo_esp32c3_super_mini/firmware.bin`. Same protocol as the [Multimodul](#multimodul-1) (function code `0x41`, here at address `0x40`, `Lichtx4/src/fw_update.h`). The image is written to the second OTA app partition and only activated after a successful MD5 check; the first block must be an ESP image (magic `0xE9`) with the ESP32-C3 chip ID. Takes about 1–2 min (~320 KB). The relay mask survives the restart via `Preferences`.
+
+> From this firmware on, the Lichtx4 runs at 115200 baud — afterwards remove `#define LICHTX4_LEGACY_9600` from `Aeroponik/src/local_config.h` (see [RS485 Bus](#rs485-bus-1)), otherwise the master keeps talking to it at 9600.
+
 ### Exhaust Fan
 
 MARS Hydro (RS485). Factory-built fan controller board, RS485 address `6`, originally controlled via the MARS Hydro *iControl* app. The master can optionally take over control entirely.
@@ -1146,7 +1158,7 @@ Depending on what's populated, a Multimodul can therefore be a plain fan module,
 
 #### Firmware Update via RS485
 
-The Multimodul can be updated in place over the RS485 bus: web interface → System → **Multimodul Update (RS485)**, file `Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin` (not `.uf2`). The update function must have been flashed once via USB for this (firmware 1.1.0 or later).
+The Multimodul can be updated in place over the RS485 bus: web interface → System → **Module Update (RS485)** (select "Multimodul"), file `Multimodul/.pio/build/waveshare_rp2040_zero/firmware.bin` (not `.uf2`). The update function must have been flashed once via USB for this (firmware 1.1.0 or later).
 
 Flow: the master buffers the file in PSRAM, computes its MD5, and transfers it in 200-byte blocks via a dedicated function code `0x41` to address `0x51` (protocol: `Multimodul/src/fw_update.h`). Normal polling is paused meanwhile. The Multimodul first writes the image as a file into its LittleFS (`board_build.filesystem_size = 0.5m`), verifies the MD5, and only then stages it for the OTA bootloader, which applies it on restart. Afterwards the master queries the new version; fan and analog setpoints are rewritten automatically via the boot ID, as after any restart.
 
