@@ -8,7 +8,7 @@
 // FW_SUB_INFO ab und zeigt sie an (vor und nach einem Update), damit erkennbar ist, ob ein
 // Update tatsaechlich angekommen ist.
 #define FW_VERSION_MAJOR  1
-#define FW_VERSION_MINOR  1
+#define FW_VERSION_MINOR  2
 #define FW_VERSION_PATCH  0
 
 // Firmware-Update ueber RS485 -- eigener Funktionscode im benutzerdefinierten Modbus-Bereich

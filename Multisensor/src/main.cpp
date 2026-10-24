@@ -361,12 +361,15 @@ void loop() {
                         send_sensor_data(d);
                     }
                 }
-                uint8_t ch[8] = {
-                    (uint8_t)d.ch_415nm, (uint8_t)d.ch_445nm,
-                    (uint8_t)d.ch_480nm, (uint8_t)d.ch_515nm,
-                    (uint8_t)d.ch_555nm, (uint8_t)d.ch_590nm,
-                    (uint8_t)d.ch_630nm, (uint8_t)d.ch_680nm
-                };
+                // Relativ zum staerksten Kanal auf 0-255 skalieren (wie send_sensor_data() im
+                // ESP-NOW-Pfad) -- ein simples (uint8_t) lieferte nur den Rest nach 256.
+                uint16_t chRaw[8] = {d.ch_415nm, d.ch_445nm, d.ch_480nm, d.ch_515nm,
+                                     d.ch_555nm, d.ch_590nm, d.ch_630nm, d.ch_680nm};
+                uint16_t maxCh = 0;
+                for (int i = 0; i < 8; i++) if (chRaw[i] > maxCh) maxCh = chRaw[i];
+                uint8_t ch[8];
+                for (int i = 0; i < 8; i++)
+                    ch[i] = maxCh ? (uint8_t)((uint32_t)chRaw[i] * 255 / maxCh) : 0;
                 rs485_slave_update(d.co2_ppm, d.temperature_cdeg, d.humidity_cpct,
                                    d.ppfd_dppfd, ch, d.as7341_gain,
                                    !scd41_has_error(), sensor_manager_as7341_ok());

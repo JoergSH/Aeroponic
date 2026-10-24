@@ -96,7 +96,14 @@ static void updateMs2RegsAs7341(const sensor_data_t& d, bool as7341Ok) {
     rs485_slave_update_ms2(RS485_MS2_REG_PPFD, d.ppfd_dppfd);
     uint16_t ch[8] = {d.ch_415nm, d.ch_445nm, d.ch_480nm, d.ch_515nm,
                        d.ch_555nm, d.ch_590nm, d.ch_630nm, d.ch_680nm};
-    for (int i = 0; i < 8; i++) rs485_slave_update_ms2(RS485_MS2_REG_CH0 + i, (uint8_t)ch[i]);
+    // Kanaele relativ zum staerksten auf 0-255 skalieren (wie der ESP-NOW-Pfad des Multisensors) --
+    // der Master speichert sie als uint8 und zeigt ohnehin nur Prozent vom Maximum. Ein simples
+    // (uint8_t)ch[i] lieferte nur den Rest nach 256 und damit ein voellig verzerrtes Spektrum.
+    uint16_t maxCh = 0;
+    for (int i = 0; i < 8; i++) if (ch[i] > maxCh) maxCh = ch[i];
+    for (int i = 0; i < 8; i++)
+        rs485_slave_update_ms2(RS485_MS2_REG_CH0 + i,
+                               maxCh ? (uint16_t)((uint32_t)ch[i] * 255 / maxCh) : 0);
     rs485_slave_update_ms2(RS485_MS2_REG_GAIN, d.as7341_gain);
     knownAs7341Ok = as7341Ok;
     writeMs2Status();
