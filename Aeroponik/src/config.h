@@ -7,7 +7,7 @@
 // ========== Firmware-Version ==========
 // Bei jeder Änderung hochzählen — wird im Webinterface unter System angezeigt,
 // damit erkennbar ist ob ein Upload tatsächlich angekommen ist.
-#define FW_VERSION "1.12.0"
+#define FW_VERSION "1.12.1"
 
 // ========== WiFi Konfiguration ==========
 // SSID/Passwort des Heim-WLANs liegen NICHT mehr im Quellcode — siehe wifictrl.h.

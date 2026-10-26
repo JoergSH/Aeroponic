@@ -23,6 +23,9 @@ DokuEtc/
 # Private Projekt-Fotos/STLs (z. B. Demineralisierungsanlage) — nur lokal, nicht für öffentliches Repo
 Doku/
 
+# Füllstand-Steuerung — vorerst nur lokal
+Fuellstand/
+
 # OS
 .DS_Store
 Thumbs.db

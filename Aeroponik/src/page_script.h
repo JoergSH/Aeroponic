@@ -852,15 +852,28 @@ R"rawliteral(
         // die Begruendung: Auf-/Untergang brauchen getrennte Formeln, nicht dieselbe
         // "t"-Variable mit ceil() fuer beide — sonst dimmt der Untergang erst nach 1/n
         // des Fensters ab statt sofort).
+        // Spiegelt schedRel() aus scheduler.cpp: alle Zeitpunkte relativ zum Sonnenaufgang
+        // (dawnStart = 0), damit Fenster ueber Mitternacht (z.B. Untergang 23:00-00:10)
+        // ohne Sonderfaelle funktionieren. duskEnd == dawnStart = 24 h Licht.
+        function schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
+            const rel = x => (((x - dawnStart) % 1440) + 1440) % 1440;
+            const r = { t: rel(nowMin), de: rel(dawnEnd), ds: rel(duskStart), dd: rel(duskEnd) };
+            if (r.dd === 0) r.dd = 1440;
+            if (r.ds < r.de) r.ds = r.de;
+            if (r.dd < r.ds) r.dd = r.ds;
+            return r;
+        }
+
         function schedComputeActive(nowMin, n, dawnStart, dawnEnd, duskStart, duskEnd) {
-            if (n <= 0 || nowMin < dawnStart || nowMin >= duskEnd) return 0;
-            if (nowMin >= dawnEnd && nowMin < duskStart) return n;
-            if (nowMin < dawnEnd) {
-                let e = (nowMin - dawnStart) / (dawnEnd - dawnStart);
+            const r = schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd);
+            if (n <= 0 || r.t >= r.dd) return 0;
+            if (r.t >= r.de && r.t < r.ds) return n;
+            if (r.t < r.de) {
+                let e = r.t / r.de;
                 e = Math.max(0, Math.min(1, e));
                 return Math.min(n, Math.ceil(e * n));
             }
-            let e = (nowMin - duskStart) / (duskEnd - duskStart);
+            let e = (r.t - r.ds) / (r.dd - r.ds);
             e = Math.max(0, Math.min(1, e));
             const drop = Math.ceil(e * n);
             return (drop >= n) ? 0 : n - drop;
@@ -869,11 +882,12 @@ R"rawliteral(
         // Spiegelt schedComputeBrightnessPercent() aus scheduler.cpp: stufenlose Rampe
         // 0-100%, genutzt fuer den Chart wenn Licht-Ausgang = Analogmodul (kein n-Kanal-Stufen).
         function schedComputeBrightnessPercent(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
-            if (nowMin < dawnStart || nowMin >= duskEnd) return 0;
-            if (nowMin >= dawnEnd && nowMin < duskStart) return 100;
+            const r = schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd);
+            if (r.t >= r.dd) return 0;
+            if (r.t >= r.de && r.t < r.ds) return 100;
             let frac;
-            if (nowMin < dawnEnd) frac = (nowMin - dawnStart) / (dawnEnd - dawnStart);
-            else frac = 1 - (nowMin - duskStart) / (duskEnd - duskStart);
+            if (r.t < r.de) frac = r.t / r.de;
+            else frac = 1 - (r.t - r.ds) / (r.dd - r.ds);
             frac = Math.max(0, Math.min(1, frac));
             return Math.round(frac * 100);
         }
@@ -966,9 +980,10 @@ R"rawliteral(
             const n         = parseInt(document.getElementById('schedNumSsr').value) || 4;
 
             let phaseKey = 'phaseNight', isTransition = false, isDay = false;
-            if (schedNowMin >= dawnStart && schedNowMin < dawnEnd)   { phaseKey = 'phaseDawn'; isTransition = true; }
-            else if (schedNowMin >= dawnEnd && schedNowMin < duskStart) { phaseKey = 'phaseDay'; isDay = true; }
-            else if (schedNowMin >= duskStart && schedNowMin < duskEnd) { phaseKey = 'phaseDusk'; isTransition = true; }
+            const r = schedRel(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd);
+            if (r.t < r.de)                     { phaseKey = 'phaseDawn'; isTransition = true; }
+            else if (r.t < r.ds)                { phaseKey = 'phaseDay'; isDay = true; }
+            else if (r.t < r.dd)                { phaseKey = 'phaseDusk'; isTransition = true; }
             el.style.background = isDay ? '#fff3cd' : (isTransition ? '#d4edda' : '#e2e3e5');
             el.style.color = '#333';
             if (outputLightMode == 1) {

@@ -839,9 +839,9 @@ void handleApiSchedulerSave() {
     if (doc["enabled"].is<bool>())    schedConfig.enabled     = doc["enabled"];
     if (doc["manual_percent"].is<int>()) schedConfig.manual_percent = constrain((int)doc["manual_percent"], 0, 100);
     if (doc["dawn_start"].is<int>())  schedConfig.dawn_start  = constrain((int)doc["dawn_start"], 0, 1439);
-    if (doc["dawn_end"].is<int>())    schedConfig.dawn_end    = constrain((int)doc["dawn_end"],   1, 1439);
+    if (doc["dawn_end"].is<int>())    schedConfig.dawn_end    = constrain((int)doc["dawn_end"],   0, 1439);
     if (doc["dusk_start"].is<int>())  schedConfig.dusk_start  = constrain((int)doc["dusk_start"], 0, 1439);
-    if (doc["dusk_end"].is<int>())    schedConfig.dusk_end    = constrain((int)doc["dusk_end"],   1, 1439);
+    if (doc["dusk_end"].is<int>())    schedConfig.dusk_end    = constrain((int)doc["dusk_end"],   0, 1439);  // 0 = 00:00, Fenster duerfen ueber Mitternacht gehen (siehe schedRel())
     if (doc["num_ssr"].is<int>())     schedConfig.num_ssr     = constrain((int)doc["num_ssr"],    1, 4);
     saveScheduleConfig();
     sched_force_check = true;
