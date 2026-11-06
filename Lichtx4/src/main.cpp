@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include "pinout.h"
 #include "rs485_slave.h"
 #include "fw_update.h"
@@ -48,13 +49,26 @@ static void handle_serial_command(const String& cmd) {
 // ========== Setup / Loop ==========
 
 void setup() {
+    // Relais zuerst: nach einem Reset sind alle SSRs aus, bis die gespeicherte Maske wieder
+    // anliegt -- jede Verzoegerung davor (frueher delay(500) fuer Serial) ist Dunkelzeit im Zelt.
+    relay_manager_init();
+
     Serial.begin(115200);
-    delay(500);
     Serial.println("\n[MAIN] Lichtx4 startet...");
     Serial.printf("[MAIN] Firmware %d.%d.%d (Update ueber RS485 moeglich, siehe fw_update.h)\n",
                   FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH);
 
-    relay_manager_init();
+    // Neustart-Diagnose fuer den Master (siehe rs485_slave.h): Startzaehler + Reset-Grund
+    Preferences sys;
+    sys.begin("sys", false);
+    uint16_t boots = sys.getUShort("boots", 0) + 1;
+    sys.putUShort("boots", boots);
+    sys.end();
+    esp_reset_reason_t reason = esp_reset_reason();
+    Serial.printf("[MAIN] Start Nr. %u, Reset-Grund %d\n", boots, (int)reason);
+    rs485_slave_set_reg(RS485_REG_BOOTS, boots);
+    rs485_slave_set_reg(RS485_REG_RESET, (uint16_t)reason);
+
     rs485_slave_update(relay_manager_get_mask());  // Preferences-Zustand sofort fuer Poll sichtbar
     rs485_slave_set_write_cb(on_rs485_write);
     rs485_slave_init(RS485_TX, RS485_RX);
@@ -68,4 +82,5 @@ void loop() {
     }
 
     rs485_slave_loop();
+    rs485_slave_set_reg(RS485_REG_UPTIME, (uint16_t)(millis() / 60000UL));
 }

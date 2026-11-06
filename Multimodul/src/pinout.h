@@ -33,6 +33,9 @@
 #define I2C_ADDR_SCD41   0x62
 #define I2C_ADDR_AS7341  0x39
 #define I2C_ADDR_GP8403  0x58
+#define I2C_ADDR_AHT21   0x38   // Alternative zum SCD41: AHT21 (Temp/Feuchte) ...
+#define I2C_ADDR_ENS160  0x53   // ... + ENS160 (eCO2), je nach Modul 0x53 oder 0x52
+#define I2C_ADDR_ENS160_ALT 0x52
 
 // Onboard WS2812 RGB-Status-LED
 #define LED_PIN    16

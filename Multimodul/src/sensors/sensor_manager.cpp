@@ -37,6 +37,7 @@ static sensor_data_t latest;
 static uint8_t g_sda          = 10;
 static uint8_t g_scl          = 11;
 static uint8_t g_recovery_cnt = 0;
+static bool    g_scd_present  = true;   // false: AS7341 allein, eigener 10-s-Takt statt SCD41-Takt
 
 // I2C1-Bus-Recovery (Bit-Bang-Clockout), identisch zum Multisensor-Original, nur auf
 // Wire1/setSDA/setSCL (RP2040-I2C1) umgestellt statt Wire.begin(sda,scl) (ESP32-Stil).
@@ -69,19 +70,22 @@ static void i2c_hard_reset() {
     delay(200);
 }
 
-bool sensor_manager_init(uint8_t sda_pin, uint8_t scl_pin) {
+bool sensor_manager_init(uint8_t sda_pin, uint8_t scl_pin, bool scd41_present) {
     g_sda = sda_pin;
     g_scl = scl_pin;
-    bool scd_ok = scd41_init();
+    g_scd_present = scd41_present;
+    bool scd_ok = scd41_present && scd41_init();
     bool as_ok  = as7341_init();
     Serial.printf("[SM] Sensor-Init: SCD41=%d AS7341=%d\n", scd_ok, as_ok);
     return scd_ok;
 }
 
 static void start_cycle() {
-    bool ok = scd41_read(&latest.temperature_cdeg, &latest.humidity_cpct, &latest.co2_ppm);
-    if (!ok) return;
-    scd41_ready = true;   // unabhaengig von AS7341 sofort verfuegbar, siehe sensor_manager.h
+    if (g_scd_present) {
+        bool ok = scd41_read(&latest.temperature_cdeg, &latest.humidity_cpct, &latest.co2_ppm);
+        if (!ok) return;
+        scd41_ready = true;   // unabhaengig von AS7341 sofort verfuegbar, siehe sensor_manager.h
+    }
 
     if (as7341_disabled) return;   // wartet nur noch auf Reaktivierung, siehe SM_IDLE unten
     as7341_start();
@@ -100,7 +104,8 @@ void sensor_manager_loop() {
             as7341_init();
         }
         bool time_ok = (now - last_measure_ms >= SENSOR_READ_INTERVAL_MS) || (last_measure_ms == 0);
-        if (time_ok && scd41_data_ready()) {
+        // Ohne SCD41 taktet der Messabstand allein, sonst wartet der Zyklus auf dessen Messwert
+        if (time_ok && (!g_scd_present || scd41_data_ready())) {
             last_measure_ms = now;
             start_cycle();
         }
@@ -159,7 +164,7 @@ void sensor_manager_loop() {
         }
     }
 
-    if (scd41_has_error()) {
+    if (g_scd_present && scd41_has_error()) {
         g_recovery_cnt++;
         if (g_recovery_cnt >= 3) {
             Serial.printf("[SM] %d× Recovery erfolglos — Neustart!\n", g_recovery_cnt);

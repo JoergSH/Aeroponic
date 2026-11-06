@@ -20,6 +20,7 @@
 #include <RTClib.h>
 #include <Adafruit_AHTX0.h>
 #include <DFRobot_ENS160.h>
+#include <Preferences.h>
 #include "time.h"
 
 #include "config.h"
@@ -44,6 +45,7 @@
 #include "notify.h"
 #include "lueftmodul.h"
 #include "dbg.h"
+#include "rs485log.h"
 #include "espnow/espnow_master.h"
 
 // HSPI (SPI3) für W5500 + SD: GPIO-Matrix erzwingt korrekte MOSI=13/MISO=11 Richtungen
@@ -98,6 +100,28 @@ float   volumenLiter      = 0.0;
 // RTC
 RTC_DS3231 rtc;
 bool rtcOK = false;
+
+// rtc.now() mit Plausibilitaetspruefung fuer alles, was SCHALTET (Licht, DWC, Licht-/Dunkelphase).
+// Bei einem gestoerten I2C-Lesevorgang liefert RTClib Muell (0xFF-Bytes -> z. B. 165:165 Uhr),
+// den schedRel() per % 1440 auf eine beliebige Uhrzeit abbildet -- oft "Nacht", das Licht ging
+// dann fuer einen Scheduler-Takt (30 s) aus. Daher zweimal lesen und nur bei gueltigen, sich
+// deckenden Werten verwenden; sonst den Takt auslassen (der letzte Zustand bleibt einfach stehen).
+static bool rtcNowValid(DateTime& out) {
+  DateTime a = rtc.now();
+  DateTime b = rtc.now();
+  bool ok = a.year() >= 2024 && a.year() <= 2099 && a.month() >= 1 && a.month() <= 12 &&
+            a.day() >= 1 && a.day() <= 31 && a.hour() < 24 && a.minute() < 60 && a.second() < 60 &&
+            b.unixtime() >= a.unixtime() && b.unixtime() - a.unixtime() <= 2;
+  if (!ok) {
+    static uint32_t errCount = 0;
+    errCount++;
+    dbgPrintf("[RTC] Unplausibler Lesewert verworfen (%04d-%02d-%02d %02d:%02d:%02d, %lu x seit Start)\n",
+              a.year(), a.month(), a.day(), a.hour(), a.minute(), a.second(), (unsigned long)errCount);
+    return false;
+  }
+  out = b;
+  return true;
+}
 unsigned long lastNtpSync = 0;
 unsigned long lastRtcRetryMs = 0;
 // Aktueller Lichtstatus fuer die licht-/dunkelphasenabhaengige Bewaesserung — Fallback ohne
@@ -138,8 +162,38 @@ static bool     netzOkRaw       = true;
 static uint32_t netzOkChangedMs = 0;
 #define NETZ_OK_DEBOUNCE_MS 2000UL
 
+// Kurze Netzaussetzer: netzOk oben ist bewusst 2 s entprellt und verschluckt damit genau die Einbrueche,
+// bei denen die USV nahtlos uebernimmt (Master/Module laufen weiter), die LED-Treiber hinter den SSRs
+// aber kurz ausgehen. Deshalb zusaetzlich per Interrupt jede LOW-Phase an GPIO38 mit Dauer erfassen.
+#define NETZ_DROP_MIN_MS 2   // kuerzere Impulse als Stoerung ignorieren
+static volatile bool     netzDropActive  = false;
+static volatile uint32_t netzDropStartMs = 0;
+static volatile uint32_t netzDropLastMs  = 0;     // Dauer des zuletzt beendeten Aussetzers
+static volatile bool     netzDropPending = false; // neuer Aussetzer, in loop() noch nicht gemeldet
+static volatile uint16_t netzDropCount   = 0;     // seit der letzten Log-Zeile
+static volatile uint32_t netzDropMaxMs   = 0;     // laengster seit der letzten Log-Zeile
+
+static void IRAM_ATTR onNetzOkChange() {
+  bool high = digitalRead(NETZ_OK_PIN);
+  uint32_t now = millis();
+  if (!high && !netzDropActive) {
+    netzDropActive  = true;
+    netzDropStartMs = now;
+  } else if (high && netzDropActive) {
+    netzDropActive = false;
+    uint32_t dur = now - netzDropStartMs;
+    if (dur >= NETZ_DROP_MIN_MS) {
+      netzDropLastMs  = dur;
+      netzDropPending = true;
+      netzDropCount++;
+      if (dur > netzDropMaxMs) netzDropMaxMs = dur;
+    }
+  }
+}
+
 // Forward-Deklaration
 void syncRtcMitNtp();
+static void wifiWatchdogBootCheck();
 
 // Ethernet
 static bool ethConnected = false;
@@ -147,6 +201,10 @@ static bool ethPresent   = false;  // Modul beim Boot per SPI erkannt? (siehe w5
 
 static volatile bool ethJustConnected = false;
 static bool phyConfigured = false;
+
+// WLAN-Abbrueche (Grund aus dem Disconnect-Event, siehe onNetworkEvent / loopWifiWatchdog)
+static volatile uint8_t  wifiLastReason     = 0;
+static volatile uint16_t wifiDisconnectCnt  = 0;   // seit der letzten Log-Zeile (CSV-Spalte)
 
 // Liest das VERSIONR-Register (Common-Register-Block, Adresse 0x0039) direkt per SPI,
 // noch bevor ETH.begin() den Chip uebernimmt — ein echter W5500 antwortet dort immer mit
@@ -201,6 +259,12 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
         case ARDUINO_EVENT_ETH_DISCONNECTED:
             dbgPrintln("[ETH] Kabel getrennt");
             ethConnected = false;
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            // Kommt bei jedem gescheiterten (Auto-)Reconnect-Versuch erneut -- nur zaehlen,
+            // die eigentliche Auswertung macht loopWifiWatchdog()
+            wifiLastReason = info.wifi_sta_disconnected.reason;
+            wifiDisconnectCnt++;
             break;
         default: break;
     }
@@ -317,6 +381,14 @@ static int findNodeIndex(uint8_t node_id) {
     return -1;
 }
 
+// Zuletzt von der Steckdose selbst gemeldeter Zustand eines Relais (0/1), -1 = Steckdose
+// offline oder hat noch keinen Status geschickt -- im Gegensatz zum Wunschzustand der Regelung.
+static int8_t steckdoseRelais(uint8_t node_id, uint8_t bit) {
+    int idx = findNodeIndex(node_id);
+    if (idx < 0 || !espnow_nodes[idx].online || !nodeData[idx].has_relays) return -1;
+    return (nodeData[idx].relay_mask >> (bit & 0x03)) & 1;
+}
+
 void onEspNowSensor(uint8_t node_id, uint8_t /*node_type*/, const uint8_t* payload, uint8_t len) {
     int idx = findNodeIndex(node_id);
     if (idx < 0 || len < 1) return;
@@ -373,7 +445,9 @@ void handleApiRs485() {
         // Status-Byte (siehe RS485_REG_STATUS im Multisensor): Bit0=SCD41 ok, Bit1=AS7341 ok.
         // Kein Fake mehr bei fehlendem AS7341 (siehe as7341_handler.cpp) — stattdessen hier
         // explizit als "nicht ok" markiert, damit das Webinterface das anzeigen kann.
-        ms2["co2_sensor_ok"]   = (d.status & 0x01) != 0;
+        ms2["co2_sensor_ok"]   = (d.status & 0x01) != 0;   // eigentlich "Klima ok" (SCD41 oder AHT21)
+        ms2["co2_valid"]       = (d.status & 0x05) == 0x01;
+        ms2["co2_estimate"]    = (d.status & 0x08) != 0;
         ms2["light_sensor_ok"] = (d.status & 0x02) != 0;
         JsonArray ch = ms2["channels"].to<JsonArray>();
         for (int i = 0; i < 8; i++) ch.add(d.channels[i]);
@@ -777,9 +851,51 @@ void handleApiEspNow() {
         count++;
     }
     doc["count"] = count;
+    // Nicht gekoppelte Nodes, die sich gemeldet haben (siehe espnow_pair())
+    JsonArray disc = doc["discovered"].to<JsonArray>();
+    for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++) {
+        const espnow_discovered_t& d = espnow_discovered[i];
+        if (!d.valid) continue;
+        JsonObject o = disc.add<JsonObject>();
+        char mac[18];
+        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+        o["mac"]         = mac;
+        o["id"]          = d.node_id;
+        o["type"]        = d.node_type;
+        o["age_s"]       = (now - d.last_seen_ms) / 1000;
+        o["id_conflict"] = findNodeIndex(d.node_id) >= 0;
+    }
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
+}
+
+void handleApiEspNowPair() {
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    const char* macStr = doc["mac"] | "";
+    unsigned int m[6];
+    if (sscanf(macStr, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+        server.send(400, "application/json", "{\"success\":false,\"error\":\"MAC ungueltig\"}");
+        return;
+    }
+    uint8_t mac[6];
+    for (int i = 0; i < 6; i++) mac[i] = (uint8_t)m[i];
+    const char* err = espnow_pair(mac);
+    JsonDocument res;
+    res["success"] = (err == nullptr);
+    if (err) res["error"] = err;
+    String response;
+    serializeJson(res, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiEspNowUnpair() {
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    int idx = espnow_unpair((uint8_t)(doc["node_id"] | 0));
+    if (idx >= 0) memset(&nodeData[idx], 0, sizeof(nodeData[idx]));
+    server.send(200, "application/json", idx >= 0 ? "{\"success\":true}" : "{\"success\":false,\"error\":\"Node unbekannt\"}");
 }
 
 void handleApiPwmSet() {
@@ -810,6 +926,9 @@ void handleApiRelaySet() {
 // zu 30s, bis eine per Regler/Formular gesetzte Aenderung tatsaechlich an Lichtx4/Analog
 // rausgeschrieben wird.
 static bool sched_force_check = false;
+static int16_t lichtKalibOverride = -1;   // >= 0: Lampen-Kennlinie setzt den 0-10V-Lichtausgang (siehe loopLichtKalib())
+static bool sched_force_write = false;    // Lichtausgang neu schreiben, auch wenn sich pct nicht geaendert hat
+static float lkKorrigiert(uint8_t pct);   // Kennlinien-Korrektur, siehe unten
 
 void handleApiSchedulerGet() {
     JsonDocument doc;
@@ -911,6 +1030,7 @@ void handleApiVentilStatus() {
   }
   doc["vorlaufzeit_s"]      = ventilConfig.vorlaufzeit_s;
   doc["vorlauf_aktiv"]      = ventilConfig.vorlauf_aktiv;
+  doc["druckaufbau_s"]      = ventilConfig.druckaufbau_s;
   doc["gleiche_zeiten"]     = ventilConfig.gleiche_zeiten;
   doc["rueck_offen"]        = ventilRueckOffen();
   doc["pumpe_aktiv"]        = pumpeAktiv();
@@ -969,6 +1089,8 @@ void handleApiVentilConfig() {
     ventilConfig.vorlaufzeit_s = constrain((int)doc["vorlaufzeit_s"], 0, 30);
   if (doc["vorlauf_aktiv"].is<bool>())
     ventilConfig.vorlauf_aktiv = doc["vorlauf_aktiv"];
+  if (doc["druckaufbau_s"].is<int>())
+    ventilConfig.druckaufbau_s = constrain((int)doc["druckaufbau_s"], 0, 30);
   if (doc["gleiche_zeiten"].is<bool>())
     ventilConfig.gleiche_zeiten = doc["gleiche_zeiten"];
 
@@ -995,7 +1117,9 @@ void handleApiVentilConfig() {
 // schliesst danach automatisch wieder. Nutzt denselben Ausgangs-Direkttest wie beim
 // Verkabelungstest/der Durchflussmesser-Kalibrierung -- pausiert dabei die normale Automatik.
 static int8_t   manualDoseBehaelter = -1;   // -1 = inaktiv, sonst Index 0-2
-static uint32_t manualDoseEndMs     = 0;
+static uint32_t manualDoseEndMs     = 0;   // Ende Druckaufbau bzw. (Ventil offen) Ende Oeffnungszeit
+static uint8_t  manualDoseSekunden  = 0;
+static bool     manualDoseValveOpen = false;
 
 void handleApiManualDoseStatus() {
     JsonDocument doc;
@@ -1003,7 +1127,9 @@ void handleApiManualDoseStatus() {
     if (manualDoseBehaelter >= 0) {
         doc["index"] = manualDoseBehaelter;
         uint32_t now = millis();
-        doc["remaining_s"] = (manualDoseEndMs > now) ? (manualDoseEndMs - now + 999) / 1000 : 0;
+        uint32_t rest = (manualDoseEndMs > now) ? (manualDoseEndMs - now + 999) / 1000 : 0;
+        if (!manualDoseValveOpen) rest += manualDoseSekunden;   // Druckaufbau + folgende Spruehzeit
+        doc["remaining_s"] = rest;
     }
     String response;
     serializeJson(doc, response);
@@ -1026,10 +1152,11 @@ void handleApiManualDoseStart() {
     uint8_t sekunden = lichtAnCached ? ventilConfig.behaelter[idx].oeffnungszeit_s
                                      : ventilConfig.behaelter[idx].oeffnungszeit_s_dunkel;
     output_test_mode(true);
-    output_test_set((uint8_t)idx, true);
-    output_test_set(5, true);   // Pumpe an -- sonst kommt am Duesenventil kein Druck an
-    manualDoseBehaelter = idx;
-    manualDoseEndMs     = millis() + (uint32_t)sekunden * 1000UL;
+    output_test_set(5, true);   // Pumpe an -- erst Druck aufbauen (wie im Automatikbetrieb)
+    manualDoseBehaelter  = idx;
+    manualDoseSekunden   = sekunden;
+    manualDoseValveOpen  = false;
+    manualDoseEndMs      = millis() + (uint32_t)ventilConfig.druckaufbau_s * 1000UL;   // Ende Druckaufbau
     server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -1046,6 +1173,15 @@ void handleApiManualDoseCancel() {
 
 void loopManualDose() {
     if (manualDoseBehaelter < 0) return;
+    if (!manualDoseValveOpen) {
+        // Druckaufbau vorbei -> Duesenventil auf, ab jetzt laeuft die eigentliche Oeffnungszeit
+        if (millis() >= manualDoseEndMs) {
+            output_test_set((uint8_t)manualDoseBehaelter, true);
+            manualDoseValveOpen = true;
+            manualDoseEndMs     = millis() + (uint32_t)manualDoseSekunden * 1000UL;
+        }
+        return;
+    }
     if (millis() >= manualDoseEndMs) {
         output_test_set((uint8_t)manualDoseBehaelter, false);
         output_test_set(5, false);
@@ -1220,9 +1356,12 @@ void loopScheduler() {
                            outputConfig.light_output == LIGHT_OUTPUT_GP8403);
 
     uint8_t pct;
-    if (schedConfig.enabled) {
+    if (lichtStufenlos && lichtKalibOverride >= 0) {
+        pct = (uint8_t)lichtKalibOverride;   // Lampen-Kennlinie laeuft, siehe loopLichtKalib()
+    } else if (schedConfig.enabled) {
         if (!rtcOK) return;  // Rampe braucht die Uhrzeit, manuelle Vorgabe unten nicht
-        DateTime now = rtc.now();
+        DateTime now;
+        if (!rtcNowValid(now)) return;   // gestoerter Lesewert -- Maske nicht anfassen
         uint16_t now_min = now.hour() * 60 + now.minute();
         pct = lichtStufenlos
             ? schedComputeBrightnessPercent(now_min)
@@ -1258,15 +1397,265 @@ void loopScheduler() {
         }
     }
 
-    if (pct != last_percent) {
-        uint16_t raw = (uint16_t)roundf(pct / 100.0f * 4095);
+    if (pct != last_percent || sched_force_write) {
+        sched_force_write = false;
+        // Waehrend der Kennlinien-Messung roh ausgeben, sonst ggf. ueber die gemessene Kennlinie
+        // in die Steuerspannung umrechnen, bei der die Lampe pct % ihrer vollen PPFD liefert.
+        float outPct = (lichtKalibOverride >= 0) ? pct : lkKorrigiert(pct);
+        uint16_t raw = (uint16_t)roundf(outPct / 100.0f * 4095);
         const char* out;
         if (outputConfig.light_output == LIGHT_OUTPUT_GP8403) { gp8403_set_channel(1, raw); out = "GP8403"; }
         else                                                  { rs485_set_analog_ch2(raw);  out = "Analog"; }
         last_percent = pct;
-        dbgPrintf("[Sched] Licht-Helligkeit (%s%s)=%u%%\n",
-                      schedConfig.enabled ? "" : "manuell, ", out, pct);
+        dbgPrintf("[Sched] Licht-Helligkeit (%s%s)=%u%% -> Steuerspannung %.1f%%\n",
+                      lichtKalibOverride >= 0 ? "Kennlinie, " : schedConfig.enabled ? "" : "manuell, ", out, pct, outPct);
     }
+}
+
+// ========== Lampen-Kennlinie (0-10V-Lichtausgang gegen PPFD) ==========
+// Faehrt den stufenlosen Lichtausgang in 5-%-Schritten von 0 bis 100 % und misst je Schritt
+// die PPFD des Multisensors (MS2, AS7341). Zeigt, wie linear die Lampe auf 0-10 V reagiert.
+// Je Schritt: LK_SETTLE_MS warten (ein Messtakt des Sensors, damit kein Wert von vor dem
+// Umschalten mitzaehlt), dann den MS2 alle 5 s abfragen (rs485_set_ms2_fast_poll) und weiter,
+// sobald LK_SAMPLES Werte in Folge innerhalb der Toleranz liegen -- deren Mittel ist der Wert
+// der Stufe. Waehrenddessen ist der Zeitplan ueber lichtKalibOverride ueberstimmt.
+#define LK_SCHRITT           5             // % je Stufe
+#define LK_STUFEN            (100 / LK_SCHRITT + 1)   // 0, 5, ..., 100 %
+#define LK_SETTLE_MS         10000UL       // = Messtakt AS7341 im Multimodul/Multisensor
+#define LK_SAMPLES           3             // so viele Werte in Folge "gleich"
+#define LK_TOL_REL           0.01f         // "gleich": max - min <= 1 % ...
+#define LK_TOL_ABS           0.5f          // ... mindestens aber 0,5 umol/m2/s (Dunkelstufen)
+#define LK_STEP_TIMEOUT_MS   90000UL       // nie stabil -> letzte Werte nehmen; gar keine -> Abbruch
+#define LK_NVS_NS            "lichtkal"
+
+enum LkState : uint8_t { LK_IDLE, LK_SETTLE, LK_SAMPLE, LK_DONE, LK_ERROR };
+
+static struct {
+    LkState  state = LK_IDLE;
+    uint8_t  step  = 0;
+    uint32_t phaseStartMs = 0;
+    uint32_t lastSampleMs = 0;     // ms2.last_update_ms des zuletzt verwendeten Werts
+    uint8_t  nSamples = 0;          // gueltige Werte in win[] (max. LK_SAMPLES)
+    float    win[LK_SAMPLES];       // letzte Werte, aeltester zuerst
+    float    ppfd[LK_STUFEN];
+    float    spread[LK_STUFEN];    // max - min der gemittelten Werte (Stabilitaet)
+    char     error[80] = "";
+} lk;
+
+static bool     lkSavedLoaded = false, lkSavedValid = false;
+static float    lkSaved[LK_STUFEN];
+static uint32_t lkSavedTs = 0;     // Unixzeit (lokal) der gespeicherten Messung
+static bool     lkApply = false;   // Korrektur ueber die gespeicherte Kennlinie aktiv (lkKorrigiert())
+
+static void lkLoadSaved() {
+    if (lkSavedLoaded) return;
+    lkSavedLoaded = true;
+    Preferences p;
+    if (!p.begin(LK_NVS_NS, true)) return;
+    lkSavedValid = p.getBytes("ppfd5", lkSaved, sizeof(lkSaved)) == sizeof(lkSaved);
+    lkSavedTs    = p.getUInt("ts", 0);
+    lkApply      = p.getBool("apply", false);
+    p.end();
+}
+
+// Kennlinien-Korrektur: gewuenschter Lichtanteil (0-100 % der vollen PPFD) -> Steuerspannung
+// in %, laut gespeicherter Messung. 0 bleibt 0 (aus). Unterhalb der kleinsten Stufe, ab der die
+// Lampe ueberhaupt leuchtet, kommt diese Stufe (weiter runter dimmt sie nicht). 100 % wird die
+// erste Stufe, ab der sie nicht mehr heller wird. Dazwischen linear zwischen den Messpunkten.
+// Ohne gueltige Messung oder mit ausgeschalteter Korrektur: unveraendert.
+static float lkKorrigiert(uint8_t pct) {
+    lkLoadSaved();
+    if (!lkApply || !lkSavedValid || pct == 0) return pct;
+    float basis = lkSaved[0], top = basis;
+    for (uint8_t i = 0; i < LK_STUFEN; i++) if (lkSaved[i] > top) top = lkSaved[i];
+    if (top - basis < 5.0f) return pct;   // keine brauchbare Messung (Lampe nie an?)
+
+    // relativer Lichtanteil je Stufe, monoton gemacht (Messrauschen darf nicht rueckwaerts laufen)
+    float rel[LK_STUFEN], lauf = 0;
+    for (uint8_t i = 0; i < LK_STUFEN; i++) {
+        float r = (lkSaved[i] - basis) / (top - basis) * 100.0f;
+        lauf = max(lauf, min(r, 100.0f));
+        rel[i] = lauf;
+    }
+    float want = pct;
+    for (uint8_t i = 1; i < LK_STUFEN; i++) {
+        if (rel[i] <= rel[i - 1]) continue;   // flaches Stueck (aus bzw. schon voll) ueberspringen
+        if (want <= rel[i]) {
+            if (rel[i - 1] <= 0.0f) return i * LK_SCHRITT;   // unterste Stufe, ab der sie leuchtet
+            return (i - 1) * LK_SCHRITT + (want - rel[i - 1]) / (rel[i] - rel[i - 1]) * LK_SCHRITT;
+        }
+    }
+    return 100.0f;
+}
+
+static void lkSetOutput(int16_t pct) {
+    lichtKalibOverride = pct;
+    sched_force_check  = true;   // loopScheduler() schreibt sofort statt erst nach 30 s
+    rs485_set_ms2_fast_poll(pct >= 0);
+}
+
+static void lkStop(LkState endState, const char* error) {
+    lk.state = endState;
+    strlcpy(lk.error, error ? error : "", sizeof(lk.error));
+    lkSetOutput(-1);             // Zeitplan/manuelle Vorgabe uebernimmt wieder
+    if (endState == LK_DONE) {
+        lkLoadSaved();
+        memcpy(lkSaved, lk.ppfd, sizeof(lkSaved));
+        DateTime now;
+        lkSavedTs    = (rtcOK && rtcNowValid(now)) ? now.unixtime() : 0;
+        lkSavedValid = true;
+        Preferences p;
+        p.begin(LK_NVS_NS, false);
+        p.putBytes("ppfd5", lkSaved, sizeof(lkSaved));
+        p.putUInt("ts", lkSavedTs);
+        p.end();
+        dbgPrintln("[Kennlinie] fertig, gespeichert");
+    } else {
+        dbgPrintf("[Kennlinie] beendet: %s\n", lk.error);
+    }
+}
+
+static void lkStartStep(uint8_t step) {
+    lk.step         = step;
+    lk.state        = LK_SETTLE;
+    lk.phaseStartMs = millis();
+    lkSetOutput(step * LK_SCHRITT);
+    dbgPrintf("[Kennlinie] Stufe %u%%\n", step * LK_SCHRITT);
+}
+
+static const char* lkStartError() {
+    if (lk.state == LK_SETTLE || lk.state == LK_SAMPLE) return "Messung laeuft bereits";
+    if (outputConfig.light_output != LIGHT_OUTPUT_ANALOG && outputConfig.light_output != LIGHT_OUTPUT_GP8403)
+        return "Lichtausgang ist kein 0-10V-Ausgang (Klima -> Geraete)";
+    const Rs485SensorData& ms2 = rs485_get_ms2();
+    if (!ms2.online || !(ms2.status & 0x02)) return "Kein PPFD-Wert vom Multisensor (AS7341)";
+    return nullptr;
+}
+
+void loopLichtKalib() {
+    if (lk.state != LK_SETTLE && lk.state != LK_SAMPLE) return;
+    // Geraete-Auswahl waehrend der Messung geaendert -> Override wirkt nicht mehr
+    if (outputConfig.light_output != LIGHT_OUTPUT_ANALOG && outputConfig.light_output != LIGHT_OUTPUT_GP8403) {
+        lkStop(LK_ERROR, "Lichtausgang waehrend der Messung umgestellt");
+        return;
+    }
+    const Rs485SensorData& ms2 = rs485_get_ms2();
+    uint32_t now = millis();
+
+    if (lk.state == LK_SETTLE) {
+        if (now - lk.phaseStartMs < LK_SETTLE_MS) return;
+        lk.state        = LK_SAMPLE;
+        lk.lastSampleMs = ms2.last_update_ms;   // erst den naechsten, neuen Wert nehmen
+        lk.nSamples     = 0;
+        return;
+    }
+
+    // LK_SAMPLE: jeden neuen Poll-Wert ins Fenster schieben
+    bool ppfdOk = ms2.online && (ms2.status & 0x02);
+    bool stabil = false;
+    if (ppfdOk && ms2.last_update_ms != lk.lastSampleMs) {
+        lk.lastSampleMs = ms2.last_update_ms;
+        if (lk.nSamples == LK_SAMPLES) {
+            memmove(lk.win, lk.win + 1, (LK_SAMPLES - 1) * sizeof(float));
+            lk.nSamples--;
+        }
+        lk.win[lk.nSamples++] = ms2.ppfd;
+        if (lk.nSamples == LK_SAMPLES) {
+            float mn = lk.win[0], mx = lk.win[0];
+            for (uint8_t i = 1; i < LK_SAMPLES; i++) { mn = min(mn, lk.win[i]); mx = max(mx, lk.win[i]); }
+            stabil = (mx - mn) <= max(LK_TOL_ABS, mx * LK_TOL_REL);
+        }
+    }
+    bool timeout = now - lk.phaseStartMs > LK_STEP_TIMEOUT_MS;
+    if (!stabil && !timeout) return;
+    if (lk.nSamples == 0) {
+        lkStop(LK_ERROR, "Keine PPFD-Werte mehr vom Multisensor (AS7341)");
+        return;
+    }
+    float sum = 0, mn = lk.win[0], mx = lk.win[0];
+    for (uint8_t i = 0; i < lk.nSamples; i++) { sum += lk.win[i]; mn = min(mn, lk.win[i]); mx = max(mx, lk.win[i]); }
+    lk.ppfd[lk.step]   = sum / lk.nSamples;
+    lk.spread[lk.step] = mx - mn;
+    dbgPrintf("[Kennlinie] %u%% -> %.1f umol/m2/s (Streuung %.1f%s) nach %lu s\n",
+              lk.step * LK_SCHRITT, lk.ppfd[lk.step], lk.spread[lk.step],
+              stabil ? "" : ", nicht stabil geworden", (unsigned long)((now - lk.phaseStartMs) / 1000));
+    if (lk.step + 1 < LK_STUFEN) lkStartStep(lk.step + 1);
+    else                         lkStop(LK_DONE, nullptr);
+}
+
+void handleApiLichtKalib() {
+    lkLoadSaved();
+    JsonDocument doc;
+    static const char* names[] = { "idle", "running", "running", "done", "error" };
+    doc["state"] = names[lk.state];
+    doc["schritt"] = LK_SCHRITT;
+    if (lk.state == LK_SETTLE || lk.state == LK_SAMPLE) {
+        doc["step_pct"] = lk.step * LK_SCHRITT;
+        doc["phase"]    = lk.state == LK_SETTLE ? "settle" : "sample";
+        doc["samples"]  = lk.nSamples;
+        // grobe Restzeit: je offener Stufe Einschwingen + LK_SAMPLES Polls a 5 s
+        uint32_t perStep = LK_SETTLE_MS / 1000 + LK_SAMPLES * 5;
+        doc["remaining_s"] = (LK_STUFEN - lk.step) * perStep;
+    }
+    if (lk.error[0]) doc["error"] = lk.error;
+    if (lk.state != LK_IDLE) {
+        JsonArray cur = doc["current"].to<JsonArray>();
+        uint8_t done = (lk.state == LK_DONE) ? LK_STUFEN : lk.step;
+        for (uint8_t i = 0; i < done; i++) cur.add(serialized(String(lk.ppfd[i], 1)));
+    }
+    if (lkSavedValid) {
+        JsonObject s = doc["saved"].to<JsonObject>();
+        s["ts"] = lkSavedTs;
+        JsonArray a = s["ppfd"].to<JsonArray>();
+        for (uint8_t i = 0; i < LK_STUFEN; i++) a.add(serialized(String(lkSaved[i], 1)));
+    }
+    doc["start_error"] = lkStartError() ? lkStartError() : "";
+    doc["apply"]       = lkApply;
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiLichtKalibStart() {
+    const char* err = lkStartError();
+    if (err) {
+        JsonDocument doc;
+        doc["success"] = false;
+        doc["error"]   = err;
+        String response;
+        serializeJson(doc, response);
+        server.send(200, "application/json", response);
+        return;
+    }
+    for (uint8_t i = 0; i < LK_STUFEN; i++) { lk.ppfd[i] = NAN; lk.spread[i] = 0; }
+    lk.error[0] = 0;
+    lkStartStep(0);
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiLichtKalibAbort() {
+    if (lk.state == LK_SETTLE || lk.state == LK_SAMPLE) lkStop(LK_ERROR, "Abgebrochen");
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleApiLichtKalibApply() {
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    lkLoadSaved();
+    bool on = doc["apply"] | false;
+    if (on && !lkSavedValid) {
+        server.send(200, "application/json", "{\"success\":false,\"error\":\"Noch keine vollstaendige Messung gespeichert\"}");
+        return;
+    }
+    lkApply = on;
+    Preferences p;
+    p.begin(LK_NVS_NS, false);
+    p.putBool("apply", lkApply);
+    p.end();
+    sched_force_write = true;   // Lichtausgang sofort mit/ohne Korrektur neu schreiben
+    sched_force_check = true;
+    dbgPrintf("[Kennlinie] Korrektur %s\n", lkApply ? "an" : "aus");
+    server.send(200, "application/json", "{\"success\":true}");
 }
 
 // ========== CO2-Steuerung ==========
@@ -1282,7 +1671,7 @@ void loopCo2Ctrl() {
     last_check = millis();
 
     const Rs485SensorData& ms2 = rs485_get_ms2();
-    if (!ms2.online) return;  // keine verlaessliche CO2-Messung
+    if (!ms2_co2_ok(ms2)) return;  // keine verlaessliche CO2-Messung (offline, kein CO2-Sensor, ENS160 waermt auf)
 
     if (ms2.co2_ppm <= co2Config.co2_min)      co2OutputOn = true;
     else if (ms2.co2_ppm >= co2Config.co2_max) co2OutputOn = false;
@@ -1310,9 +1699,11 @@ void handleApiCo2Get() {
     doc["co2_min"]          = co2Config.co2_min;
     doc["co2_max"]          = co2Config.co2_max;
     doc["output_on"]        = co2OutputOn;
+    doc["node_state"]       = steckdoseRelais(co2Config.target_node_id, co2Config.target_relay_bit);   // -1 = offline
     const Rs485SensorData& ms2 = rs485_get_ms2();
-    doc["co2_online"]       = ms2.online;
-    if (ms2.online) doc["co2_now"] = ms2.co2_ppm;
+    doc["co2_online"]       = ms2_co2_ok(ms2);
+    if (ms2_co2_ok(ms2)) doc["co2_now"] = ms2.co2_ppm;
+    doc["co2_geschaetzt"]   = ms2_co2_geschaetzt(ms2);
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -1388,9 +1779,10 @@ void handleApiHumidGet() {
     doc["humid_min"]        = humidConfig.humid_min;
     doc["humid_max"]        = humidConfig.humid_max;
     doc["output_on"]        = humidOutputOn;
+    doc["node_state"]       = steckdoseRelais(humidConfig.target_node_id, humidConfig.target_relay_bit);   // -1 = offline
     const Rs485SensorData& ms2 = rs485_get_ms2();
-    doc["humid_online"]     = ms2.online;
-    if (ms2.online) doc["humid_now"] = serialized(String(ms2.hum_pct, 1));
+    doc["humid_online"]     = ms2_klima_ok(ms2);
+    if (ms2_klima_ok(ms2)) doc["humid_now"] = serialized(String(ms2.hum_pct, 1));
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -1424,7 +1816,8 @@ void loopDwcCtrl() {
     last_check      = millis();
     if (!rtcOK) return;
 
-    DateTime now = rtc.now();
+    DateTime now;
+    if (!rtcNowValid(now)) return;
     uint16_t now_min = now.hour() * 60 + now.minute();
 
     if (dwcConfig.on_min <= dwcConfig.off_min)
@@ -1639,12 +2032,50 @@ void handleApiLueftmodulSave() {
 // zusaetzlich ein knappes Rate-Limit (siehe notify.cpp).
 #define NOTIFY_REMINDER_MS (30UL * 60000UL)   // Erinnerung alle 30 Minuten, solange ein Alarm aktiv bleibt
 
-struct NotifyAlertState { bool aktiv = false; unsigned long lastSentMs = 0; };
-static NotifyAlertState alertNetz, alertSensor, alertFeuchte, alertTemperatur, alertTank, alertLueft;
+#define NOTIFY_LUEFT_DELAY_MS (3UL * 60000UL) // Zeltluefter: Anlauf nach Sollwertwechsel/Modul-Neustart abwarten
 
-static void checkAlert(NotifyAlertState& st, bool enabled, bool problemNow, const String& onMsg, const String& offMsg) {
-    if (!notifyConfig.global_enabled || !enabled) { st.aktiv = false; return; }
+#define NOTIFY_NODE_DELAY_MS (2UL * 60000UL)  // ESP-NOW-Node: so lange offline, bevor gemeldet wird
+
+struct NotifyAlertState { bool aktiv = false; unsigned long lastSentMs = 0; bool problem = false; unsigned long problemSinceMs = 0; };
+static NotifyAlertState alertNetz, alertSensor, alertFeuchte, alertTemperatur, alertTank, alertLueft, alertNodes;
+
+// Alarm "Verbindung" (WLAN-Ausfall, ESP-NOW-Node offline). Eigener NVS-Eintrag statt
+// NotifyConfig, weil dessen EEPROM-Block keinen Platz mehr fuer ein weiteres Feld hat.
+static bool notifyVerbindungEnabled = true;
+#define NOTIFY_VERB_NVS_NS "notify3"
+
+static void loadNotifyVerbindung() {
+    Preferences p;
+    p.begin(NOTIFY_VERB_NVS_NS, true);
+    notifyVerbindungEnabled = p.getBool("verb", true);
+    p.end();
+}
+
+static void saveNotifyVerbindung() {
+    Preferences p;
+    p.begin(NOTIFY_VERB_NVS_NS, false);
+    p.putBool("verb", notifyVerbindungEnabled);
+    p.end();
+}
+
+static const char* nodeTypName(uint8_t type) {
+    switch (type) {
+        case NODE_TYPE_LIGHT:     return "Licht";
+        case NODE_TYPE_SENSOR:    return "Multisensor";
+        case NODE_TYPE_SOCKET:    return "Steckdose";
+        case NODE_TYPE_LIGHT_SSR: return "Licht-SSR";
+        default:                  return "Node";
+    }
+}
+
+// delayMs: Problem muss so lange ununterbrochen anstehen, bevor die erste Meldung rausgeht
+static void checkAlert(NotifyAlertState& st, bool enabled, bool problemNow, const String& onMsg, const String& offMsg,
+                       unsigned long delayMs = 0) {
+    if (!notifyConfig.global_enabled || !enabled) { st.aktiv = false; st.problem = false; return; }
     unsigned long now = millis();
+    if (problemNow && !st.problem) { st.problem = true; st.problemSinceMs = now; }
+    if (!problemNow) st.problem = false;
+    if (problemNow && !st.aktiv && now - st.problemSinceMs < delayMs) return;
     if (problemNow) {
         if (!st.aktiv || (now - st.lastSentMs >= NOTIFY_REMINDER_MS)) {
             st.aktiv      = true;
@@ -1673,7 +2104,7 @@ void loopNotify() {
     if (tempPflanze <= -100)  sensorProblem += "DS18B20 Pflanze\n";
     {
         const Rs485SensorData& ms2 = rs485_get_ms2();
-        if (ms2.online && !(ms2.status & 0x01)) sensorProblem += "Multisensor CO2 (SCD41)\n";
+        if (ms2.online && !(ms2.status & 0x01)) sensorProblem += "Multisensor Klima (SCD41/AHT21)\n";
         if (ms2.online && !(ms2.status & 0x02)) sensorProblem += "Multisensor Licht (AS7341)\n";
     }
     checkAlert(alertSensor, notifyConfig.sensorausfall_enabled, sensorProblem.length() > 0,
@@ -1681,7 +2112,7 @@ void loopNotify() {
                "✅ Alle Sensoren wieder erreichbar.");
 
     const Rs485SensorData& ms2 = rs485_get_ms2();
-    if (ms2.online) {
+    if (ms2_klima_ok(ms2)) {
         char fmsg[100];
         snprintf(fmsg, sizeof(fmsg), "💧 Luftfeuchte außerhalb des Bereichs: %.0f%% (Soll %d–%d%%)",
                  ms2.hum_pct, notifyConfig.feuchte_min, notifyConfig.feuchte_max);
@@ -1705,6 +2136,25 @@ void loopNotify() {
                    tkmsg, "✅ Vorratsbehälter wieder ausreichend gefüllt.");
     }
 
+    {
+        // Gekoppelte ESP-NOW-Nodes offline -- mit Hinweis, welche Regelung dadurch nicht mehr
+        // schalten kann (die CSV-Spalte HumidAusgang zeigt sonst weiter den Wunsch "EIN")
+        String nodeProblem = "";
+        for (int i = 0; i < ESPNOW_MAX_NODES; i++) {
+            const espnow_node_t& n = espnow_nodes[i];
+            if (!n.registered || n.online) continue;
+            nodeProblem += String(nodeTypName(n.node_type)) + " (Node " + String(n.node_id) + ")";
+            if (humidConfig.enabled && humidConfig.target_node_id == n.node_id)         nodeProblem += ", Befeuchter";
+            if (co2Config.enabled && co2Config.target_node_id == n.node_id)             nodeProblem += ", CO2";
+            if (dwcConfig.enabled && dwcConfig.target_node_id == n.node_id)             nodeProblem += ", DWC-Licht";
+            if (raumlichtConfig.target_node_id == n.node_id)                            nodeProblem += ", Raumlicht";
+            nodeProblem += "\n";
+        }
+        checkAlert(alertNodes, notifyVerbindungEnabled, nodeProblem.length() > 0,
+                   "📡 Funk-Gerät nicht erreichbar, Schaltbefehle kommen nicht an:\n" + nodeProblem,
+                   "✅ Alle Funk-Geräte wieder erreichbar.", NOTIFY_NODE_DELAY_MS);
+    }
+
     if (lueftmodulConfig.enabled && lueftmodulConfig.monitor_enabled) {
         const Rs485LueftData& lft = rs485_get_lueft();
         if (lft.online) {
@@ -1724,7 +2174,9 @@ void loopNotify() {
             }
             checkAlert(alertLueft, notifyConfig.lueftmodul_enabled, lueftProblem.length() > 0,
                        "🌀 Zeltlüfter-Drehzahl auffällig:\n" + lueftProblem,
-                       "✅ Zeltlüfter-Drehzahl wieder im Normalbereich.");
+                       "✅ Zeltlüfter-Drehzahl wieder im Normalbereich.", NOTIFY_LUEFT_DELAY_MS);
+        } else {
+            alertLueft.problem = false;  // Modul offline: Wartezeit nach Wiederkehr neu beginnen
         }
     }
 }
@@ -1745,6 +2197,7 @@ void handleApiNotifyGet() {
     doc["tank_enabled"]         = notifyConfig.tank_enabled;
     doc["tank_min_prozent"]     = notifyConfig.tank_min_prozent;
     doc["lueftmodul_enabled"]   = notifyConfig.lueftmodul_enabled;
+    doc["verbindung_enabled"]   = notifyVerbindungEnabled;
     doc["ms2_online"]           = rs485_get_ms2().online;
 
     doc["whatsapp_enabled"]     = notifyExtra.whatsapp_enabled;
@@ -1789,6 +2242,10 @@ void handleApiNotifySave() {
     if (doc["tank_enabled"].is<bool>())          notifyConfig.tank_enabled          = doc["tank_enabled"];
     if (doc["tank_min_prozent"].is<int>())       notifyConfig.tank_min_prozent      = constrain((int)doc["tank_min_prozent"], 0, 100);
     if (doc["lueftmodul_enabled"].is<bool>())    notifyConfig.lueftmodul_enabled    = doc["lueftmodul_enabled"];
+    if (doc["verbindung_enabled"].is<bool>()) {
+        notifyVerbindungEnabled = doc["verbindung_enabled"];
+        saveNotifyVerbindung();
+    }
     saveNotifyConfig();
 
     if (doc["whatsapp_enabled"].is<bool>()) notifyExtra.whatsapp_enabled = doc["whatsapp_enabled"];
@@ -1830,19 +2287,19 @@ void handleApiNotifySave() {
 
 void handleApiNotifyTest() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
-    sendWhatsApp("✅ Testnachricht vom Grow Center — WhatsApp-Benachrichtigung funktioniert!");
+    notifyTestWhatsApp("✅ Testnachricht vom Grow Center — WhatsApp-Benachrichtigung funktioniert!");
     server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleApiNotifyTestTelegram() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
-    sendTelegram("✅ Testnachricht vom Grow Center — Telegram-Benachrichtigung funktioniert!");
+    notifyTestTelegram("✅ Testnachricht vom Grow Center — Telegram-Benachrichtigung funktioniert!");
     server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleApiNotifyTestEmail() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
-    sendEmailSmtp("✅ Testnachricht vom Grow Center — E-Mail-Benachrichtigung funktioniert!");
+    notifyTestEmail("✅ Testnachricht vom Grow Center — E-Mail-Benachrichtigung funktioniert!");
     server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -1923,14 +2380,15 @@ void handleApiDs18b20Assign() {
 
 // ========== Abluftluefter-Steuerung (MARS Hydro, RS485-Adresse 6) ==========
 // Manuell: fester %-Wert. Automodi: linearer Ramp zwischen Mindestdrehzahl (bei/unter Min)
-// und 100% (bei/ueber Max), Quelle Luftfeuchte bzw. Temperatur vom RS485-Multisensor (MS2).
+// und Hoechstdrehzahl (bei/ueber Max), Quelle Luftfeuchte bzw. Temperatur vom RS485-Multisensor (MS2).
 // enabled=false: keine eigenen Schreibbefehle, iControl behaelt die Kontrolle.
 
 static uint8_t fanRampPercent(float value, uint8_t minVal, uint8_t maxVal, uint8_t minSpeed) {
     if (maxVal <= minVal) return minSpeed;  // Schutz gegen ungueltige Konfiguration
+    uint8_t maxSpeed = fanMaxSpeed < minSpeed ? minSpeed : fanMaxSpeed;
     float t = (value - minVal) / (float)(maxVal - minVal);
     t = constrain(t, 0.0f, 1.0f);
-    return minSpeed + (uint8_t)roundf(t * (100 - minSpeed));
+    return minSpeed + (uint8_t)roundf(t * (maxSpeed - minSpeed));
 }
 
 // Zuletzt berechnete Luefter-Ziel-Leistung (fuer Statusanzeige bei Ausgaengen ohne
@@ -1950,7 +2408,7 @@ void loopFanCtrl() {
         target = fanConfig.manual_percent;
     } else {
         const Rs485SensorData& ms2 = rs485_get_ms2();
-        if (!ms2.online) return;  // keine verlaessliche Feuchte-/Temperaturmessung
+        if (!ms2_klima_ok(ms2)) return;  // keine verlaessliche Feuchte-/Temperaturmessung
         if (fanConfig.mode == FAN_MODE_AUTO_HUMIDITY) {
             target = fanRampPercent(ms2.hum_pct, fanConfig.hum_min, fanConfig.hum_max, fanConfig.min_speed);
         } else if (fanConfig.temp_mode == FAN_TEMP_MODE_DIFF) {
@@ -1995,6 +2453,7 @@ void handleApiFanGet() {
     doc["mode"]            = fanConfig.mode;
     doc["manual_percent"]  = fanConfig.manual_percent;
     doc["min_speed"]       = fanConfig.min_speed;
+    doc["max_speed"]       = fanMaxSpeed;
     doc["hum_min"]         = fanConfig.hum_min;
     doc["hum_max"]         = fanConfig.hum_max;
     doc["temp_min"]        = fanConfig.temp_min;
@@ -2194,6 +2653,7 @@ void handleApiFanSave() {
     if (doc["mode"].is<int>())            fanConfig.mode           = constrain((int)doc["mode"], 0, 2);
     if (doc["manual_percent"].is<int>())  fanConfig.manual_percent = constrain((int)doc["manual_percent"], 0, 100);
     if (doc["min_speed"].is<int>())       fanConfig.min_speed      = constrain((int)doc["min_speed"], 0, 100);
+    if (doc["max_speed"].is<int>())       fanMaxSpeed              = constrain((int)doc["max_speed"], 0, 100);
     if (doc["hum_min"].is<int>())         fanConfig.hum_min        = constrain((int)doc["hum_min"], 0, 100);
     if (doc["hum_max"].is<int>())         fanConfig.hum_max        = constrain((int)doc["hum_max"], 0, 100);
     if (doc["temp_min"].is<int>())        fanConfig.temp_min       = constrain((int)doc["temp_min"], 0, 60);
@@ -2271,6 +2731,28 @@ void handleApiDebugCapture() {
     }
     dbgStartCapture(60000);
     server.send(200, "application/json", "{\"success\":true}");
+}
+
+// RS485-Dauermitschnitt (siehe rs485log.h): GET liefert den Zustand, POST {"enabled":true|false}
+// schaltet ihn (bleibt ueber Neustarts erhalten).
+void handleApiRs485Log() {
+    if (server.method() == HTTP_POST) {
+        JsonDocument in;
+        deserializeJson(in, server.arg("plain"));
+        bool on = in["enabled"] | false;
+        if (on && !storage_is_ok()) {
+            server.send(400, "application/json", "{\"success\":false,\"error\":\"keine SD-Karte\"}");
+            return;
+        }
+        rs485log_set_enabled(on);
+    }
+    JsonDocument doc;
+    doc["success"] = true;
+    doc["enabled"] = rs485log_enabled();
+    doc["file"]    = rs485log_current_file();
+    String out;
+    serializeJson(doc, out);
+    server.send(200, "application/json", out);
 }
 
 // ========== WLAN-Konfiguration ==========
@@ -2378,6 +2860,11 @@ void setup() {
 
   // MicroSD (gleicher physischer Bus, anderer CS)
   storage_init(BUS);
+  rs485log_init();
+  {
+    DateTime now;
+    if (rtcOK && rtcNowValid(now)) rs485log_set_time(now.unixtime());   // schon ab dem ersten Telegramm
+  }
 
   // AHT21B haengt am Haupt-I2C-Bus (Wire), zusammen mit RTC (und optional GP8403).
   TwoWire& ahtBus = Wire;
@@ -2494,6 +2981,7 @@ void setup() {
 
   // Netzspannungsueberwachung (HIGH = Netz vorhanden, LOW = USV-Betrieb)
   pinMode(NETZ_OK_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(NETZ_OK_PIN), onNetzOkChange, CHANGE);
 
   // Webserver
   server.on("/",         handleRoot);
@@ -2501,6 +2989,8 @@ void setup() {
   server.on("/api/espnow",            handleApiEspNow);
   server.on("/api/espnow/relay",     HTTP_POST, handleApiRelaySet);
   server.on("/api/espnow/pwm",      HTTP_POST, handleApiPwmSet);
+  server.on("/api/espnow/pair",     HTTP_POST, handleApiEspNowPair);
+  server.on("/api/espnow/unpair",   HTTP_POST, handleApiEspNowUnpair);
   server.on("/api/ventile",         handleApiVentilStatus);
   server.on("/api/output/test",     HTTP_POST, handleApiOutputTest);
   server.on("/api/output/test",     HTTP_GET,  handleApiOutputTestStatus);
@@ -2526,6 +3016,10 @@ void setup() {
   server.on("/api/umwaelz/save",     HTTP_POST, handleApiUmwaelzSave);
   server.on("/api/scheduler",       HTTP_GET,  handleApiSchedulerGet);
   server.on("/api/scheduler/save",  HTTP_POST, handleApiSchedulerSave);
+  server.on("/api/lichtkal",        HTTP_GET,  handleApiLichtKalib);
+  server.on("/api/lichtkal/start",  HTTP_POST, handleApiLichtKalibStart);
+  server.on("/api/lichtkal/abort",  HTTP_POST, handleApiLichtKalibAbort);
+  server.on("/api/lichtkal/apply",  HTTP_POST, handleApiLichtKalibApply);
   server.on("/api/co2",             HTTP_GET,  handleApiCo2Get);
   server.on("/api/co2/save",        HTTP_POST, handleApiCo2Save);
   server.on("/api/humid",           HTTP_GET,  handleApiHumidGet);
@@ -2561,6 +3055,7 @@ void setup() {
   server.on("/api/wifi/save",       HTTP_POST, handleApiWifiSave);
   server.on("/api/system/restart",  HTTP_POST, handleApiSystemRestart);
   server.on("/api/debug/capture",   HTTP_POST, handleApiDebugCapture);
+  server.on("/api/rs485log",        handleApiRs485Log);
   server.on("/api/tank",            handleApiTankConfig);
   server.on("/api/tank/config",     HTTP_POST, handleApiTankConfigSave);
   server.on("/update", HTTP_GET, []() {
@@ -2587,6 +3082,10 @@ void setup() {
   memset(nodeData, 0, sizeof(nodeData));
   setupEspNow();
   espnow_set_sensor_callback(onEspNowSensor);
+
+  notify_begin();            // Sende-Task fuer Benachrichtigungen (vor dem ersten sendNotification())
+  loadNotifyVerbindung();
+  wifiWatchdogBootCheck();   // Meldung von einem Neustart durch die WLAN-Ueberwachung nachreichen
 
   // Watchdog erst jetzt aktivieren, NACH den teils laengeren blockierenden Schritten oben
   // (WiFi-Verbindungsversuch bis 30s, SD/ETH-Init) — sonst wuerden die versehentlich einen
@@ -2733,6 +3232,116 @@ static float readDs18b20(bool addrSet, const uint8_t* addr, uint8_t fallbackInde
   return sensors.getTempCByIndex(fallbackIndex);
 }
 
+// ========== WLAN-Ueberwachung ==========
+// Der eingebaute Auto-Reconnect des ESP32 kann haengen bleiben -- dann sind Webinterface und
+// ESP-NOW (gleiches Funkmodul, Steckdosen schalten nicht mehr) weg, waehrend der Rest
+// weiterlaeuft (so am 04.11.2026 ab 17:43). Ablauf: nach 30 s ohne Verbindung einmal selbst neu
+// verbinden, klappt das 60 s lang nicht, Neustart. Die Meldung dazu geht nach dem
+// Wiederverbinden bzw. nach dem Neustart raus (vorher gibt es kein Internet).
+#define WIFI_RECONNECT_AFTER_MS 30000UL
+#define WIFI_RESTART_AFTER_MS   60000UL   // nach dem eigenen Reconnect-Versuch
+#define WIFI_WD_NVS_NS          "wifiwd"
+
+static String wifiReasonText(uint8_t r) {
+  const char* hint = "";
+  switch (r) {
+    case WIFI_REASON_BEACON_TIMEOUT:          hint = ", Router nicht mehr empfangen"; break;
+    case WIFI_REASON_NO_AP_FOUND:             hint = ", Router nicht gefunden"; break;
+    case WIFI_REASON_AUTH_EXPIRE:
+    case WIFI_REASON_ASSOC_EXPIRE:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_ASSOC_FAIL:              hint = ", Anmeldung am Router fehlgeschlagen"; break;
+    case WIFI_REASON_AUTH_LEAVE:
+    case WIFI_REASON_ASSOC_LEAVE:             hint = ", vom Router getrennt"; break;
+    default: break;
+  }
+  return String(r) + " " + WiFi.disconnectReasonName((wifi_err_reason_t)r) + hint;
+}
+
+static String minSecText(uint32_t ms) {
+  uint32_t s = ms / 1000;
+  char b[24];
+  if (s >= 60) snprintf(b, sizeof(b), "%lu min %lu s", (unsigned long)(s / 60), (unsigned long)(s % 60));
+  else         snprintf(b, sizeof(b), "%lu s", (unsigned long)s);
+  return String(b);
+}
+
+// Nach einem Neustart durch die WLAN-Ueberwachung: gespeicherte Meldung einreihen
+static void wifiWatchdogBootCheck() {
+  Preferences p;
+  if (!p.begin(WIFI_WD_NVS_NS, false)) return;
+  String msg = p.getString("msg", "");
+  if (msg.length()) {
+    p.remove("msg");
+    dbgPrintf("[WLAN] %s\n", msg.c_str());
+    if (notifyVerbindungEnabled) sendNotification(msg);
+  }
+  p.end();
+}
+
+void loopWifiWatchdog() {
+  static uint32_t lastCheck = 0;
+  if (millis() - lastCheck < 1000) return;
+  lastCheck = millis();
+
+  static bool     lost = false, reconnectTried = false;
+  static uint32_t lostSinceMs = 0, reconnectAtMs = 0;
+  static uint8_t  lostReason = 0;
+
+  wifi_mode_t mode = WiFi.getMode();
+  if (USE_ACCESS_POINT || strlen(wifiConfig.ssid) == 0) return;
+  if (mode != WIFI_STA && mode != WIFI_AP_STA) return;     // Fallback-Hotspot
+  if (wifiRestartPending || otaInProgress || ota_ap_active) return;
+
+  uint32_t now = millis();
+  if (WiFi.status() == WL_CONNECTED) {
+    if (lost) {
+      lost = false;
+      uint32_t dauer = now - lostSinceMs;
+      String msg = "📶 WLAN war " + minSecText(dauer) + " weg (Grund " + wifiReasonText(lostReason) + ")" +
+                   (reconnectTried ? ", erst nach erneutem Verbinden wieder da." : ", wieder verbunden.");
+      dbgPrintf("[WLAN] %s\n", msg.c_str());
+      rs485log_note(msg.c_str());
+      if (dauer >= WIFI_RECONNECT_AFTER_MS && notifyVerbindungEnabled) sendNotification(msg);
+    }
+    reconnectTried = false;
+    return;
+  }
+
+  if (!lost) {
+    lost        = true;
+    lostSinceMs = now;
+    lostReason  = wifiLastReason;
+    dbgPrintf("[WLAN] Verbindung verloren (Grund %s)\n", wifiReasonText(lostReason).c_str());
+    return;
+  }
+  if (!reconnectTried && now - lostSinceMs >= WIFI_RECONNECT_AFTER_MS) {
+    reconnectTried = true;
+    reconnectAtMs  = now;
+    dbgPrintf("[WLAN] Seit %s keine Verbindung (letzter Grund %s) -- verbinde selbst neu\n",
+              minSecText(now - lostSinceMs).c_str(), wifiReasonText(wifiLastReason).c_str());
+    WiFi.disconnect();
+    WiFi.begin(wifiConfig.ssid, wifiConfig.password);   // nicht-blockierend
+    return;
+  }
+  if (reconnectTried && now - reconnectAtMs >= WIFI_RESTART_AFTER_MS) {
+    String msg = "📶 WLAN-Verbindung " + minSecText(now - lostSinceMs) +
+                 " lang verloren, erneutes Verbinden erfolglos (Grund " + wifiReasonText(wifiLastReason) +
+                 ") -- Steuerung wurde neu gestartet.";
+    dbgPrintf("[WLAN] %s\n", msg.c_str());
+    rs485log_note(msg.c_str());
+    Preferences p;
+    p.begin(WIFI_WD_NVS_NS, false);
+    p.putString("msg", msg);
+    p.end();
+    rs485log_loop();   // Mitschnitt-Puffer noch auf die SD-Karte
+    delay(200);
+    ESP.restart();
+  }
+}
+
 void loop() {
   esp_task_wdt_reset();  // Watchdog "fuettern" — siehe Kommentar bei esp_task_wdt_init() in setup()
 
@@ -2757,9 +3366,10 @@ void loop() {
   static uint32_t lastLichtCheckMs = 0;
   if (millis() - lastLichtCheckMs >= 5000) {
     lastLichtCheckMs = millis();
-    if (rtcOK) {
-      DateTime now = rtc.now();
+    DateTime now;
+    if (rtcOK && rtcNowValid(now)) {
       lichtAnCached = schedLichtIstAn(now.hour() * 60 + now.minute());
+      rs485log_set_time(now.unixtime());   // Zeitstempel fuer den RS485-Mitschnitt
     }
   }
 
@@ -2773,6 +3383,13 @@ void loop() {
       netzOk = raw;
       dbgPrintln(netzOk ? "Netzspannung: wieder vorhanden" : "Netzspannung: AUSGEFALLEN (USV-Betrieb)");
     }
+    if (netzDropPending) {
+      netzDropPending = false;
+      char t[64];
+      snprintf(t, sizeof(t), "Netzaussetzer: %lu ms (USV hat uebernommen)", (unsigned long)netzDropLastMs);
+      dbgPrintf("[NETZ] %s\n", t);
+      rs485log_note(t);
+    }
   }
 
   loopVentile(lichtAnCached);
@@ -2780,6 +3397,7 @@ void loop() {
   loopFlowMonitor();
   loopRS485();
   loopEspNow();
+  loopLichtKalib();
   loopScheduler();
   loopCo2Ctrl();
   loopHumidCtrl();
@@ -2789,7 +3407,9 @@ void loop() {
   loopDruck();
   loopLueftmodul();
   loopNotify();
+  loopWifiWatchdog();
   dbgLoop();
+  rs485log_loop();
 
   if (ota_ap_active && millis() - ota_ap_start > OTA_AP_TIMEOUT) {
     WiFi.softAPdisconnect(true);
@@ -2851,11 +3471,14 @@ void loop() {
       e.raumTemp          = aht21Temp;
       e.raumFeuchte       = aht21Hum;
       const Rs485SensorData& ms2 = rs485_get_ms2();
-      e.zeltOk      = ms2.online;
+      e.zeltOk      = ms2_klima_ok(ms2);
+      e.zeltCo2Ok   = ms2_co2_ok(ms2);
       e.zeltTemp    = ms2.temp_c;
       e.zeltFeuchte = ms2.hum_pct;
       e.zeltCo2     = ms2.co2_ppm;
       e.zeltVpd     = ms2.online ? computeVpd(ms2.temp_c, ms2.hum_pct) : 0.0f;
+      e.ppfdOk      = ms2.online && (ms2.status & 0x02);   // Bit1 = AS7341 ok
+      e.zeltPpfd    = ms2.ppfd;
       e.lichtMaske  = rs485_get_licht().mask;
       const Rs485FanData& fan = rs485_get_fan();
       e.fanOk       = fan.online;
@@ -2863,10 +3486,37 @@ void loop() {
       e.fanRpm      = fan.rpm;
       e.co2Ausgang    = co2OutputOn;
       e.humidAusgang  = humidOutputOn;
-      e.flowBehaelter1Ml = flowMonitorState.total_ml[0];
-      e.flowBehaelter2Ml = flowMonitorState.total_ml[1];
-      e.flowBehaelter3Ml = flowMonitorState.total_ml[2];
-      e.flowGesamtMl     = flowMonitorState.total_ml_all;
+      for (uint8_t i = 0; i < 3; i++) {
+        e.flowValid[i]   = flowMonitorState.log_pending[i];
+        e.flowImpulse[i] = flowMonitorState.last_cycle_pulses[i];
+        e.flowDauerS[i]  = flowMonitorState.last_cycle_s[i];
+        flowMonitorState.log_pending[i] = false;   // jeder Sprühvorgang nur in einer Zeile
+      }
+      e.laufzeitMin   = millis() / 60000UL;
+      e.neustartGrund = bootResetReasonText.c_str();
+      const Rs485LichtData& lx = rs485_get_licht();
+      e.lichtDiagOk   = lx.diag_ok;
+      e.lichtStarts   = lx.boots;
+      e.lichtGrund    = resetReasonToText((esp_reset_reason_t)lx.reset_reason);
+      noInterrupts();
+      e.netzAussetzer      = netzDropCount;
+      e.netzAussetzerMaxMs = netzDropMaxMs;
+      netzDropCount = 0;
+      netzDropMaxMs = 0;
+      interrupts();
+      e.co2Steckdose   = co2Config.enabled   ? steckdoseRelais(co2Config.target_node_id,   co2Config.target_relay_bit)   : -1;
+      e.humidSteckdose = humidConfig.enabled ? steckdoseRelais(humidConfig.target_node_id, humidConfig.target_relay_bit) : -1;
+      e.wlanOk        = WiFi.status() == WL_CONNECTED;
+      e.wlanDbm       = e.wlanOk ? (int8_t)WiFi.RSSI() : 0;
+      e.wlanAbbrueche = wifiDisconnectCnt;
+      wifiDisconnectCnt = 0;
+      e.espnowOnline = e.espnowGekoppelt = 0;
+      for (int i = 0; i < ESPNOW_MAX_NODES; i++) {
+        if (!espnow_nodes[i].registered) continue;
+        e.espnowGekoppelt++;
+        if (espnow_nodes[i].online) e.espnowOnline++;
+      }
+      e.heapMinKb = ESP.getMinFreeHeap() / 1024;
       storage_log(rtc.now().unixtime(), e);
     }
     #ifdef DEBUG_DISTANZ

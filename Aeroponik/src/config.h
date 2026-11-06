@@ -7,7 +7,7 @@
 // ========== Firmware-Version ==========
 // Bei jeder Änderung hochzählen — wird im Webinterface unter System angezeigt,
 // damit erkennbar ist ob ein Upload tatsächlich angekommen ist.
-#define FW_VERSION "1.12.1"
+#define FW_VERSION "1.18.0"
 
 // ========== WiFi Konfiguration ==========
 // SSID/Passwort des Heim-WLANs liegen NICHT mehr im Quellcode — siehe wifictrl.h.
@@ -200,6 +200,18 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_DRUCKSENSOR_MAGIC_BYTE   0x19
 #define EEPROM_DRUCKSENSOR_BASE         555   // 1 Byte (bool enabled)
 
+// Druckaufbau: Pumpe laeuft so lange vor dem Oeffnen des Duesenventils (siehe valves.cpp)
+#define EEPROM_DRUCKAUFBAU_MAGIC_ADDR   556
+#define EEPROM_DRUCKAUFBAU_MAGIC_BYTE   0x5D
+#define EEPROM_DRUCKAUFBAU_BASE         557   // 1 Byte (Sekunden, 0 = aus)
+#define VENTIL_DRUCKAUFBAU_DEFAULT_S    5
+
+// Hoechstdrehzahl Abluftluefter fuer die Automodi -- eigener Block, damit FanConfig (64-73)
+// nicht waechst und den WLAN-Block ab 74 ueberschreibt
+#define EEPROM_FAN_MAX_MAGIC_ADDR       558
+#define EEPROM_FAN_MAX_MAGIC_BYTE       0x6B
+#define EEPROM_FAN_MAX_BASE             559   // 1 Byte (%)
+
 // Gehaeuseluefter-Config: eigener Magic-Bereich. Magic-Byte geaendert (0x4D -> 0x51), da
 // min_speed mit dem Wechsel von PWM auf reines An/Aus entfallen ist (dieser Lueftertyp
 // kommt mit PWM-Drosselung nicht klar).
@@ -234,6 +246,7 @@ extern bool USE_ACCESS_POINT;
 
 // ========== Abluftluefter-Steuerung Defaults ==========
 #define FAN_MIN_SPEED_DEFAULT      30   // % — Mindestdrehzahl fuer beide Automodi
+#define FAN_MAX_SPEED_DEFAULT     100   // % — Hoechstdrehzahl fuer beide Automodi
 #define FAN_HUM_MIN_DEFAULT        50   // %rH — darunter: Mindestdrehzahl
 #define FAN_HUM_MAX_DEFAULT        70   // %rH — darueber: 100%
 #define FAN_TEMP_MIN_DEFAULT       24   // °C — darunter: Mindestdrehzahl

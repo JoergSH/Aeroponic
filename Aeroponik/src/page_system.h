@@ -56,6 +56,11 @@ R"rawliteral(
 
             <!-- Node-Steuerung -->
             <h3 class="section-heading">📡 <span class="de">Node-Steuerung</span><span class="en">Node Control</span></h3>
+            <div style="font-size:0.78em;color:#888;margin-bottom:10px;">
+                <span class="de">Funk-Geräte (ESP-NOW) sind fest an diese Steuerung gekoppelt — eine zweite Steuerung in Reichweite beeinflusst sie nicht. Am Node selbst löst 3 s BOOT-Taster halten (im Betrieb) die Kopplung.</span>
+                <span class="en">Wireless devices (ESP-NOW) are paired to this controller — a second controller in range does not affect them. Holding the node's BOOT button for 3 s (while running) releases the pairing.</span>
+            </div>
+            <div id="espnowDiscoveredBox" class="status-box-info" style="display:none;margin-bottom:15px;border-left:4px solid #f39c12;"></div>
             <div id="nodesControlContainer" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:15px;">
                 <div id="nodes_control_loading" style="text-align:center;color:#888;padding:30px;grid-column:1/-1;"><span class="de">Lade...</span><span class="en">Loading...</span></div>
             </div>
@@ -172,6 +177,17 @@ R"rawliteral(
                 <div style="font-size:0.78em;color:#888;margin-top:6px;">
                     <span class="de">Schreibt 60 Sekunden lang alle seriellen Meldungen zusätzlich in eine Datei auf der SD-Karte — danach oben in der Liste als "debug_....txt" abrufbar (Dateiliste ggf. mit 🔄 aktualisieren).</span>
                     <span class="en">Writes all serial output to an SD card file for 60 seconds — afterwards available above as "debug_....txt" (refresh the list with 🔄 if needed).</span>
+                </div>
+                <div style="margin-top:12px;padding-top:12px;border-top:1px solid #eee;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;">
+                        <input type="checkbox" id="rs485LogEnabled" onchange="setRs485Log(this.checked)">
+                        🔌 <span class="de">RS485-Bus dauerhaft mitschneiden</span><span class="en">Log RS485 bus permanently</span>
+                    </label>
+                    <span id="rs485LogStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+                <div style="font-size:0.78em;color:#888;margin-top:6px;">
+                    <span class="de">Schreibt jedes Telegramm (gesendet, Antwort, Timeout, Bytes ohne Anfrage) mit Uhrzeit in eine Tagesdatei "rs485_JJJJ-MM-TT.txt" — bleibt auch nach einem Neustart eingeschaltet. Ca. 10–15 MB pro Tag.</span>
+                    <span class="en">Writes every frame (sent, reply, timeout, unsolicited bytes) with timestamp to a daily file "rs485_YYYY-MM-DD.txt" — stays enabled across restarts. About 10–15 MB per day.</span>
                 </div>
             </div>
 

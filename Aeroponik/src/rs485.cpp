@@ -1,6 +1,7 @@
 #include "rs485.h"
 #include "pinout.h"
 #include "dbg.h"
+#include "rs485log.h"
 #include <HardwareSerial.h>
 #include <Arduino.h>
 #include <string.h>
@@ -25,6 +26,8 @@
 #define LICHT_BAUD_END()     do {} while (0)
 #endif
 #define POLL_INTERVAL_MS     15000UL
+#define MS2_FAST_POLL_MS      5000UL  // waehrend der Lampen-Kennlinie (rs485_set_ms2_fast_poll)
+static bool ms2_fast_poll = false;
 #define LICHT_POLL_INTERVAL_MS 15000UL
 #define FAN_POLL_INTERVAL_MS  3000UL  // Luefter-Leistung aendert sich schneller als Zeitplan/Ventile
 #define FAN_HEARTBEAT_INTERVAL_MS 6000UL  // Takt des echten iControl-Broadcasts, siehe unten
@@ -47,7 +50,10 @@ static uint16_t crc16(const uint8_t* d, size_t n) {
 // ========== Gespeicherte Daten ==========
 
 static Rs485SensorData ms2    = {false, 0, 0, 0, 0, 0, {}, 0, 0};
-static Rs485LichtData  licht  = {false, 0, 0};
+static Rs485LichtData  licht  = {false, 0, 0, false, 0, 0, 0};
+// Aeltere Lichtx4-Firmware kennt nur Register 0 und antwortet auf eine Abfrage von 4 Registern mit
+// einer Exception -- dann bis zum naechsten Master-Neustart nur noch die Maske lesen.
+static uint8_t licht_read_count = RS485_LICHT_DIAG_REGS;
 static Rs485FanData    fan    = {false, 0, 0, 0};
 static Rs485AnalogData analog = {false, 0, 0, 0};
 static Rs485LueftData  lueft  = {false, {0,0,0,0}, {0,0,0,0}, 0};
@@ -85,18 +91,23 @@ static bool lueft_polling_enabled  = true;
 
 static bool    licht_write_pending = false;
 static uint8_t licht_write_value   = 0;
+static bool    licht_commanded     = false;   // seit dem Boot schon eine Maske kommandiert?
 
 static bool    fan_write_pending  = false;
 static uint8_t fan_write_value    = 0;
 static bool    fan_enable_pending = false;  // siehe RS485_FAN_REG_ENABLE in rs485.h
+static uint8_t fan_enable_value   = 1;      // 0 bei 0%: nur so steht der Luefter wirklich still
 
 static bool     analog_ch1_write_pending = false;
 static uint16_t analog_ch1_write_value   = 0;
 static bool     analog_ch2_write_pending = false;
 static uint16_t analog_ch2_write_value   = 0;
+static bool     analog_ch1_commanded     = false;   // wie licht_commanded: erst nach dem ersten
+static bool     analog_ch2_commanded     = false;   // Kommando seit Boot gibt es etwas zu resyncen
 
 static bool    lueft_write_pending[RS485_LUEFT_COUNT] = {false, false, false, false};
 static uint8_t lueft_write_value[RS485_LUEFT_COUNT]   = {0, 0, 0, 0};
+static bool    lueft_commanded[RS485_LUEFT_COUNT]     = {false, false, false, false};
 static uint8_t lueft_write_ch_active = 0;   // welcher Kanal gerade in Bearbeitung ist
 
 static uint8_t    rx_buf[RX_BUF_SIZE];
@@ -130,6 +141,7 @@ static void send_fc03(uint8_t addr, uint16_t start, uint16_t count) {
     RS485Serial.write(req, 8);
     drainSelfEcho();
     rx_len = 0;
+    rs485log_frame("TX", req, 8);
 }
 
 static void send_fc06(uint8_t addr, uint16_t reg, uint16_t value) {
@@ -146,6 +158,7 @@ static void send_fc06(uint8_t addr, uint16_t reg, uint16_t value) {
     RS485Serial.write(req, 8);
     drainSelfEcho();
     rx_len = 0;
+    rs485log_frame("TX", req, 8);
 }
 
 static void send_fan_heartbeat_broadcast() {
@@ -177,6 +190,7 @@ static void send_fan_heartbeat_broadcast() {
     RS485Serial.write(req, sizeof(req));
     drainSelfEcho();
     rx_len = 0;
+    rs485log_frame("TX", req, sizeof(req), "Fan-Heartbeat (Broadcast)");
 }
 
 static void parse_ms2_response(const uint8_t* buf, uint8_t len) {
@@ -214,11 +228,22 @@ static void parse_ms2_response(const uint8_t* buf, uint8_t len) {
 }
 
 static void parse_licht_read(const uint8_t* buf, uint8_t len) {
-    // Erwartet: [addr][0x03][byte_count=2][2 bytes][crc_lo][crc_hi]
-    if (len < 7) return;
-    if (buf[0] != RS485_ADDR_LICHT || buf[1] != 0x03) return;
+    // Erwartet: [addr][0x03][byte_count=2|8][1|4 Register][crc_lo][crc_hi]
+    if (len < 5) return;
+    if (buf[0] != RS485_ADDR_LICHT) return;
+    if (buf[1] == 0x83 && licht_read_count > 1) {   // Exception: alte Firmware ohne Diagnose-Register
+        uint16_t calc = crc16(buf, 3);
+        uint16_t recv = (uint16_t)buf[4] << 8 | buf[3];
+        if (calc != recv) return;
+        dbgPrintln("[RS485] Lichtx4 ohne Neustart-Diagnose (FW < 1.2.0) -- lese nur noch die Maske");
+        licht_read_count = 1;
+        licht.diag_ok    = false;
+        return;
+    }
+    if (len < 7 || buf[1] != 0x03) return;
     uint8_t byte_count = buf[2];
-    if (byte_count != 2) return;
+    if (byte_count != 2 && byte_count != RS485_LICHT_DIAG_REGS * 2) return;
+    if (len < (uint8_t)(3 + byte_count + 2)) return;
 
     uint16_t calc = crc16(buf, 3 + byte_count);
     uint16_t recv = (uint16_t)buf[3 + byte_count + 1] << 8 | buf[3 + byte_count];
@@ -231,12 +256,32 @@ static void parse_licht_read(const uint8_t* buf, uint8_t len) {
     // durch), hat er seinen letzten Zustand verloren -- der Master schreibt aber nur bei
     // Aenderung, sieht hier also keinen Grund zum Neuschreiben. Bei Wiederverbindung deshalb
     // einmalig die zuletzt kommandierte Maske erneut schreiben.
-    if (!licht.online) {
+    // Nur wenn seit dem Boot schon eine Maske kommandiert wurde: direkt nach einem Master-Neustart
+    // steht licht_write_value noch auf 0 -- das Neuschreiben schaltete dann das Licht fuer ein paar
+    // Sekunden aus, bis loopScheduler() die richtige Maske schickte.
+    if (!licht.online && licht_commanded) {
         dbgPrintln("[RS485] Licht wieder erreichbar -- synchronisiere Maske neu");
         licht_write_pending = true;
     }
 
     licht.mask           = (uint8_t)((uint16_t)buf[3] << 8 | buf[4]);
+    if (byte_count == RS485_LICHT_DIAG_REGS * 2) {
+        uint16_t boots  = (uint16_t)buf[5] << 8 | buf[6];
+        uint16_t reason = (uint16_t)buf[7] << 8 | buf[8];
+        // Startzaehler gestiegen = das Modul hat seit der letzten Abfrage neu gestartet (dabei
+        // waren alle SSRs kurz aus) -- auch wenn es zwischen zwei Abfragen schon wieder lief.
+        if (licht.diag_ok && boots != licht.boots) {
+            char t[96];
+            snprintf(t, sizeof(t), "Lichtx4 NEU GESTARTET: Start Nr. %u (vorher %u), Reset-Grund %u",
+                     boots, licht.boots, reason);
+            dbgPrintf("[RS485] %s\n", t);
+            rs485log_note(t);
+        }
+        licht.boots        = boots;
+        licht.reset_reason = reason;
+        licht.uptime_min   = (uint16_t)buf[9] << 8 | buf[10];
+        licht.diag_ok      = true;
+    }
     licht.online          = true;
     licht.last_update_ms = millis();
     dbgPrintf("[RS485] Licht: Maske=0x%02X\n", licht.mask);
@@ -287,8 +332,11 @@ static void parse_fan_read(const uint8_t* buf, uint8_t len) {
 
     uint8_t rpmOff = 3 + RS485_FAN_REG_RPM * 2;
     uint8_t pctOff = 3 + RS485_FAN_REG_PERCENT * 2;
+    uint8_t enOff  = 3 + RS485_FAN_REG_ENABLE * 2;
+    bool    on     = ((uint16_t)buf[enOff] << 8 | buf[enOff + 1]) != 0;
     fan.rpm            = (uint16_t)buf[rpmOff] << 8 | buf[rpmOff + 1];
-    fan.percent         = (uint8_t)((uint16_t)buf[pctOff] << 8 | buf[pctOff + 1]);
+    // Ausgeschaltet (reg15=0) meldet reg16 weiter seinen alten/Mindestwert (z. B. 25%)
+    fan.percent         = on ? (uint8_t)((uint16_t)buf[pctOff] << 8 | buf[pctOff + 1]) : 0;
     fan.online          = true;
     fan.last_update_ms  = millis();
     dbgPrintf("[RS485] Fan: %u%%  %u RPM\n", fan.percent, fan.rpm);
@@ -365,8 +413,8 @@ static void parse_analog_read(const uint8_t* buf, uint8_t len) {
     // zuletzt kommandierten Wert neu schreiben.
     if (!analog.online) {
         dbgPrintln("[RS485] Analog wieder erreichbar -- synchronisiere beide Kanaele neu");
-        analog_ch1_write_pending = true;
-        analog_ch2_write_pending = true;
+        analog_ch1_write_pending = analog_ch1_write_pending || analog_ch1_commanded;
+        analog_ch2_write_pending = analog_ch2_write_pending || analog_ch2_commanded;
     }
 
     analog.ch1_raw       = (uint16_t)buf[3] << 8 | buf[4];
@@ -434,7 +482,9 @@ static void parse_lueft_read(const uint8_t* buf, uint8_t len) {
     if (rebooted || !lueft.online) {
         dbgPrintf("[RS485] Lueftermodul %s -- synchronisiere PWM-Sollwerte neu (Boot-ID 0x%04X)\n",
                       rebooted ? "neu gestartet" : "wieder erreichbar", bootId);
-        for (int i = 0; i < RS485_LUEFT_COUNT; i++) lueft_write_pending[i] = true;
+        // Nur bereits kommandierte Kanaele -- direkt nach dem Master-Boot stuende sonst 0 % drin
+        for (int i = 0; i < RS485_LUEFT_COUNT; i++)
+            if (lueft_commanded[i]) lueft_write_pending[i] = true;
     }
     // Analog (0x50, GP8403) sitzt physisch auf demselben Multimodul-Board wie das Lueftermodul
     // (0x51) -- ein echter Neustart (Boot-ID-Wechsel) betrifft also immer beide gemeinsam. Eigene
@@ -442,8 +492,8 @@ static void parse_lueft_read(const uint8_t* buf, uint8_t len) {
     // echtem Neustart, nicht beim bloss ausgebliebenen Fallback, da der nicht zwingend das ganze
     // Board betrifft).
     if (rebooted) {
-        analog_ch1_write_pending = true;
-        analog_ch2_write_pending = true;
+        analog_ch1_write_pending = analog_ch1_write_pending || analog_ch1_commanded;
+        analog_ch2_write_pending = analog_ch2_write_pending || analog_ch2_commanded;
     }
     lastBootId = bootId;
 
@@ -531,6 +581,8 @@ static void ota_finish(Rs485OtaState state) {
     ota.state   = state;
     ota_running = false;
     ota_waiting = false;
+    licht_read_count = RS485_LICHT_DIAG_REGS;   // neue Lichtx4-Firmware kann die Diagnose-Register haben
+    rs485log_note("Slave-Firmware-Update beendet, Mitschnitt laeuft weiter");
 }
 
 static void ota_fail(const char* msg) {
@@ -763,6 +815,23 @@ void setupRS485() {
     dbgPrintf("RS485 bereit (%d Baud, UART1)\n", RS485_BAUD);
 }
 
+static const char* target_name(mb_target_t t) {
+    switch (t) {
+        case TARGET_MS2_READ:         return "Multisensor lesen";
+        case TARGET_LICHT_WRITE:      return "Licht schreiben";
+        case TARGET_LICHT_READ:       return "Licht lesen";
+        case TARGET_FAN_ENABLE_WRITE: return "Luefter-Enable schreiben";
+        case TARGET_FAN_WRITE:        return "Luefter schreiben";
+        case TARGET_FAN_READ:         return "Luefter lesen";
+        case TARGET_ANALOG_WRITE_CH1: return "Analog Ch1 schreiben";
+        case TARGET_ANALOG_WRITE_CH2: return "Analog Ch2 schreiben";
+        case TARGET_ANALOG_READ:      return "Analog lesen";
+        case TARGET_LUEFT_WRITE:      return "Lueftermodul schreiben";
+        case TARGET_LUEFT_READ:       return "Lueftermodul lesen";
+    }
+    return "?";
+}
+
 void loopRS485() {
     uint32_t now = millis();
 
@@ -784,8 +853,16 @@ void loopRS485() {
         ota_requested = false;
         ota_running   = true;
         ota_waiting   = false;
+        rs485log_note("Slave-Firmware-Update startet, Mitschnitt pausiert");
         ota_loop(now);
         return;
+    }
+
+    // Bytes ohne laufende Anfrage (Stoerung, fremder Sender, Slave bootet und gibt Muell aus):
+    // frueher still beim naechsten Senden verworfen -- jetzt fuer den Mitschnitt sichtbar machen.
+    if (mb_state == MB_IDLE && rx_len > 0 && (micros() - last_byte_us) > FRAME_TIMEOUT_US) {
+        rs485log_frame("RX?", rx_buf, rx_len, "ohne Anfrage");
+        rx_len = 0;
     }
 
     if (mb_state == MB_WAIT_RESPONSE) {
@@ -793,6 +870,12 @@ void loopRS485() {
         bool timed_out  = (now - send_ms) > RESPONSE_TIMEOUT_MS;
 
         if (frame_done) {
+            if (rs485log_enabled()) {
+                char info[48];
+                snprintf(info, sizeof(info), "%s, %lu ms", target_name(active_target),
+                         (unsigned long)(now - send_ms));
+                rs485log_frame("RX", rx_buf, rx_len, info);
+            }
             // Kein Selbst-Echo mehr im Puffer -- das wird schon direkt beim Senden aktiv
             // weggeraeumt (siehe drainSelfEcho()), rx_buf/rx_len enthaelt hier also nur noch
             // die echte Antwort (falls eine kam).
@@ -822,6 +905,11 @@ void loopRS485() {
             rx_len   = 0;
             mb_state = MB_IDLE;
         } else if (timed_out) {
+            if (rs485log_enabled()) {
+                char info[48];
+                snprintf(info, sizeof(info), "%s: keine Antwort", target_name(active_target));
+                rs485log_frame("TO", rx_buf, rx_len, info);
+            }
             switch (active_target) {
                 case TARGET_MS2_READ:
                     dbgPrintf("[RS485] MS2 Timeout (rx_len=%d)\n", rx_len);
@@ -870,8 +958,8 @@ void loopRS485() {
             // MARS_Hydro_RE_Notizen.md Abschnitt 5b, Fund 7/8).
             fan_enable_pending = false;
             send_ms            = now;
-            dbgPrintln("[RS485] Fan-Enable schreiben (reg15=1) ...");
-            send_fc06(RS485_ADDR_FAN, RS485_FAN_REG_ENABLE, 1);
+            dbgPrintf("[RS485] Fan-Enable schreiben (reg15=%u) ...\n", fan_enable_value);
+            send_fc06(RS485_ADDR_FAN, RS485_FAN_REG_ENABLE, fan_enable_value);
             active_target = TARGET_FAN_ENABLE_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (fan_write_pending) {
@@ -906,7 +994,7 @@ void loopRS485() {
             send_fc06(RS485_ADDR_LUEFT, RS485_LUEFT_REG_PWM_BASE + ch, lueft_write_value[ch]);
             active_target = TARGET_LUEFT_WRITE;
             mb_state      = MB_WAIT_RESPONSE;
-        } else if (first_poll || (now - poll_ms) >= POLL_INTERVAL_MS) {
+        } else if (first_poll || (now - poll_ms) >= (ms2_fast_poll ? MS2_FAST_POLL_MS : POLL_INTERVAL_MS)) {
             first_poll = false;
             poll_ms    = now;
             send_ms    = now;
@@ -919,7 +1007,7 @@ void loopRS485() {
             send_ms       = now;
             dbgPrintln("[RS485] Poll Licht (0x40) ...");
             LICHT_BAUD_BEGIN();
-            send_fc03(RS485_ADDR_LICHT, RS485_REG_MASK, 1);
+            send_fc03(RS485_ADDR_LICHT, RS485_REG_MASK, licht_read_count);
             active_target = TARGET_LICHT_READ;
             mb_state      = MB_WAIT_RESPONSE;
         } else if (fan_polling_enabled && (now - fan_poll_ms >= FAN_POLL_INTERVAL_MS)) {
@@ -954,8 +1042,10 @@ void loopRS485() {
 }
 
 const Rs485SensorData& rs485_get_ms2() { return ms2; }
+void rs485_set_ms2_fast_poll(bool fast) { ms2_fast_poll = fast; }
 
 bool rs485_set_licht_mask(uint8_t mask) {
+    licht_commanded     = true;
     licht_write_pending = true;
     licht_write_value   = mask & 0x0F;
     return true;
@@ -967,18 +1057,22 @@ bool rs485_set_fan_percent(uint8_t percent) {
     fan_enable_pending = true;   // immer vor der Leistung setzen, siehe fan_enable_pending oben
     fan_write_pending  = true;
     fan_write_value    = percent > 100 ? 100 : percent;
+    // Mit Enable=1 laeuft der Luefter auch bei 0% mit Mindestdrehzahl weiter (~880 RPM)
+    fan_enable_value   = fan_write_value > 0 ? 1 : 0;
     return true;
 }
 
 const Rs485FanData& rs485_get_fan() { return fan; }
 
 bool rs485_set_analog_ch1(uint16_t value) {
+    analog_ch1_commanded     = true;
     analog_ch1_write_pending = true;
     analog_ch1_write_value   = value > 4095 ? 4095 : value;
     return true;
 }
 
 bool rs485_set_analog_ch2(uint16_t value) {
+    analog_ch2_commanded     = true;
     analog_ch2_write_pending = true;
     analog_ch2_write_value   = value > 4095 ? 4095 : value;
     return true;
@@ -988,6 +1082,7 @@ const Rs485AnalogData& rs485_get_analog() { return analog; }
 
 bool rs485_set_lueft_percent(uint8_t channel, uint8_t percent) {
     if (channel >= RS485_LUEFT_COUNT) return false;
+    lueft_commanded[channel]     = true;
     lueft_write_pending[channel] = true;
     lueft_write_value[channel]   = percent > 100 ? 100 : percent;
     return true;

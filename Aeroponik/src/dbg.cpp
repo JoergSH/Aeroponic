@@ -6,8 +6,12 @@ static File     captureFile;
 static bool     captureActive = false;
 static uint32_t captureEndMs  = 0;
 
+static TaskHandle_t captureTask = nullptr;   // Task, der die Aufzeichnung gestartet hat (loop())
+
+// Nur aus dem Task schreiben, der die Datei geoeffnet hat -- der Benachrichtigungs-Task (siehe
+// notify.cpp) loggt ebenfalls, gleichzeitige SD-Zugriffe aus zwei Tasks waeren nicht sicher.
 static void writeToCapture(const char* s) {
-    if (captureActive && captureFile) captureFile.print(s);
+    if (captureActive && captureFile && xTaskGetCurrentTaskHandle() == captureTask) captureFile.print(s);
 }
 
 void dbgPrint(const String& s) { Serial.print(s); writeToCapture(s.c_str()); }
@@ -38,6 +42,7 @@ void dbgStartCapture(uint32_t durationMs) {
         return;
     }
     captureActive = true;
+    captureTask   = xTaskGetCurrentTaskHandle();
     captureEndMs  = millis() + durationMs;
     Serial.printf("[DBG] Aufzeichnung gestartet: %s (%lus)\n", filename, durationMs / 1000UL);
 }

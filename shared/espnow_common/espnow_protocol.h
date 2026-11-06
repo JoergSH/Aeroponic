@@ -34,6 +34,12 @@ typedef struct {
 #define MSG_OTA_START   0x40  // Master→Slave: payload[0..7] = AP-Passwort (8 Byte)
 #define MSG_OTA_ACK     0x41  // Slave→Master: OTA startet
 
+// ========== Feste Kopplung Node <-> Steuerung ==========
+// Ein Node merkt sich die MAC des Masters, der ihm zuerst ein REGISTER_ACK geschickt hat
+// (NVS), und nimmt danach nur noch Pakete von diesem Master an. Der Master antwortet nur
+// Nodes aus seiner Kopplungsliste -- so stoeren sich zwei Steuerungen in Funkreichweite nicht.
+#define MSG_UNPAIR      0x50  // Master→Slave: Kopplung loesen, Node vergisst seinen Master
+
 #define OTA_AP_SSID    "Aeroponik-OTA"
 #define OTA_MASTER_IP  "192.168.4.1"
 

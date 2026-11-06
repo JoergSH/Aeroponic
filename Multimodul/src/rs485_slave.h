@@ -10,7 +10,7 @@
 // 0x20, Analog-Ausgang 0x50) und toleriert laengst, dass eines der Geraete fehlt/offline
 // ist (Timeout -> online=false) -- dadurch sind am Master keine Code-Aenderungen noetig.
 #define RS485_ADDR_LUEFT   0x51   // immer aktiv (Luefter-PWM/Tacho, kein I2C noetig)
-#define RS485_ADDR_MS2     0x20   // aktiv, wenn SCD41 beim Boot gefunden wurde
+#define RS485_ADDR_MS2     0x20   // aktiv, wenn SCD41 und/oder AS7341 beim Boot gefunden wurde
 #define RS485_ADDR_ANALOG  0x50   // aktiv, wenn GP8403 beim Boot gefunden wurde
 
 #define RS485_LUEFT_NUM_REGS    9   // 0-3 PWM% (FC06/FC03), 4-7 RPM (read-only), 8 Boot-ID (read-only)
@@ -29,7 +29,9 @@
 #define RS485_MS2_REG_PPFD   3   // µmol/m²/s × 10
 #define RS485_MS2_REG_CH0    4   // 415nm .. Reg 11 = 680nm
 #define RS485_MS2_REG_GAIN   12
-#define RS485_MS2_REG_STATUS 13  // bit0=SCD41 ok, bit1=AS7341 ok
+#define RS485_MS2_REG_STATUS 13  // bit0=Klima (Temp/Feuchte) ok, bit1=AS7341 ok,
+                                  // bit2=CO2 ungueltig (kein CO2-Sensor / ENS160 waermt auf),
+                                  // bit3=CO2 nur Schaetzwert (ENS160-eCO2 statt SCD41)
 
 typedef void (*rs485_slave_write_cb_t)(uint16_t reg, uint16_t value);
 

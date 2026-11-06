@@ -2,50 +2,45 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include "espnow_protocol.h"
 #include "espnow_slave.h"
 #include "relay/relay_manager.h"
 
 #define STATUS_INTERVAL_MS  30000UL
 #define CHANNEL_RECHECK_INTERVAL_MS (12UL * 3600000UL)  // 12h -- siehe recheck_channel_if_needed()
+#define OFFLINE_RECHECK_MS          (2UL * 60000UL)     // so lange offline -> Kanal sofort pruefen
+#define OFFLINE_RECHECK_INTERVAL_MS (5UL * 60000UL)     // ...und danach hoechstens alle 5 min erneut
+#define WDT_TIMEOUT_MS              30000               // Kanal-Scan blockiert loop() ein paar Sekunden
+#define BOOT_BUTTON_PIN             9                   // BOOT-Taster der ESP32-C3 Super Mini (LOW = gedrueckt)
+#define UNPAIR_HOLD_MS              3000                // so lange im Betrieb halten -> Kopplung loesen
 
 static uint8_t  my_node_id    = 0x03;
-static uint8_t  my_node_type  = NODE_TYPE_SOCKET;
+static const uint8_t my_node_type = NODE_TYPE_SOCKET;
 static bool     online        = false;
 static uint32_t last_status_ms = 0;
 static Preferences prefs;
 
-// ========== Node-Typ und ID (Erststart) ==========
+// ========== Node-ID (Erststart) ==========
+// Der Typ ist immer NODE_TYPE_SOCKET -- die fruehere Variante "Licht-SSR" ist durch das
+// Lichtx4-Modul (RS485) ersetzt. Ein noch gespeicherter alter Typ wird ignoriert.
 
 static void node_setup() {
     prefs.begin("nodecfg", true);
-    uint8_t stored_type = prefs.getUChar("type", 0xFF);
-    uint8_t stored_id   = prefs.getUChar("id",   0xFF);
+    uint8_t stored_id = prefs.getUChar("id", 0xFF);
     prefs.end();
 
-    if (stored_type != 0xFF && stored_id != 0xFF) {
-        my_node_type = stored_type;
-        my_node_id   = stored_id;
-        const char* tname = (stored_type == NODE_TYPE_LIGHT_SSR) ? "Licht-SSR" : "Steckdose";
-        Serial.printf("[NODE] Typ=%s (0x%02X)  ID=0x%02X\n", tname, stored_type, stored_id);
+    if (stored_id != 0xFF) {
+        my_node_id = stored_id;
+        Serial.printf("[NODE] Steckdose  ID=0x%02X\n", stored_id);
         return;
     }
 
     // Erststart: interaktive Abfrage
     Serial.println("\n=== ERSTSTART: Node-Konfiguration ===");
-    Serial.println("Typ waehlen (60s Timeout):");
-    Serial.println("  1 = Steckdose  (allgemeine Steuerung)");
-    Serial.println("  2 = Licht-SSR  (Sonnenauf/-untergang via Scheduler)");
+    Serial.println("Node-ID eingeben (1-254) + Enter (60s Timeout, sonst 3):");
     while (Serial.available()) Serial.read();
-
     uint32_t t0 = millis();
-    while (!Serial.available() && millis() - t0 < 60000) delay(50);
-    int typ_choice = Serial.available() ? Serial.readStringUntil('\n').toInt() : 1;
-    uint8_t type = (typ_choice == 2) ? NODE_TYPE_LIGHT_SSR : NODE_TYPE_SOCKET;
-
-    Serial.println("Node-ID eingeben (1-254) + Enter:");
-    while (Serial.available()) Serial.read();
-    t0 = millis();
     while (!Serial.available() && millis() - t0 < 60000) delay(50);
     uint8_t id = 0x03;
     if (Serial.available()) {
@@ -54,14 +49,12 @@ static void node_setup() {
     }
 
     prefs.begin("nodecfg", false);
-    prefs.putUChar("type", type);
-    prefs.putUChar("id",   id);
+    prefs.remove("type");
+    prefs.putUChar("id", id);
     prefs.end();
 
-    my_node_type = type;
-    my_node_id   = id;
-    const char* tname = (type == NODE_TYPE_LIGHT_SSR) ? "Licht-SSR" : "Steckdose";
-    Serial.printf("[NODE] Gespeichert: Typ=%s  ID=0x%02X\n", tname, id);
+    my_node_id = id;
+    Serial.printf("[NODE] Gespeichert: Steckdose  ID=0x%02X\n", id);
 }
 
 // ========== WiFi-Kanal ==========
@@ -167,10 +160,12 @@ static uint8_t channel_setup() {
 // laufenden Betriebs wechselt (Node selbst laeuft ja oft monatelang durch, ohne neu zu
 // starten), wuerde das sonst erst beim naechsten Reboot auffallen. Scan stoert ESP-NOW kurz
 // (Kanal-Hopping), daher nur selten pruefen.
-static void recheck_channel_if_needed() {
+// force: sofort pruefen (Node ist schon laenger offline -- haeufigste Ursache ist ein
+// Kanalwechsel des Routers, den die 12-h-Pruefung erst viel spaeter bemerken wuerde).
+static void recheck_channel_if_needed(bool force = false) {
     static uint32_t last_check_ms = 0;
     uint32_t now = millis();
-    if (now - last_check_ms < CHANNEL_RECHECK_INTERVAL_MS) return;
+    if (!force && now - last_check_ms < CHANNEL_RECHECK_INTERVAL_MS) return;
     last_check_ms = now;
 
     prefs.begin("wificfg", true);
@@ -252,6 +247,17 @@ void setup() {
 
     espnow_slave_set_command_cb(on_command);
     espnow_slave_init(my_node_id, my_node_type, channel);
+
+    pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+    // Watchdog erst nach dem Setup (Erststart-Abfrage wartet bis zu 60 s auf Eingabe).
+    // Haengt loop() laenger als WDT_TIMEOUT_MS, startet der Node neu -- die Relais stellt
+    // relay_manager_init() danach aus dem NVS wieder her.
+    esp_task_wdt_config_t wdt_cfg = {};
+    wdt_cfg.timeout_ms     = WDT_TIMEOUT_MS;
+    wdt_cfg.trigger_panic  = true;
+    if (esp_task_wdt_reconfigure(&wdt_cfg) != ESP_OK) esp_task_wdt_init(&wdt_cfg);
+    enableLoopWDT();
 }
 
 void loop() {
@@ -302,21 +308,58 @@ void loop() {
             delay(300);
             ESP.restart();
         } else if (cmd == "NODEINFO") {
-            const char* tname = (my_node_type == NODE_TYPE_LIGHT_SSR) ? "Licht-SSR" : "Steckdose";
-            Serial.printf("[NODE] Typ=%s (0x%02X)  ID=0x%02X\n", tname, my_node_type, my_node_id);
+            Serial.printf("[NODE] Steckdose (0x%02X)  ID=0x%02X  gekoppelt=%s\n", my_node_type,
+                          my_node_id, espnow_slave_is_paired() ? "ja" : "nein");
+        } else if (cmd == "UNPAIR") {
+            espnow_slave_unpair();
         } else if (cmd.length() > 0) {
             Serial.println("[CMD] STATUS  MASK <0-15>  R<1-4> <0|1>");
-            Serial.println("      WIFICLEAR  WIFIINFO  NODECLEAR  NODEINFO");
+            Serial.println("      WIFICLEAR  WIFIINFO  NODECLEAR  NODEINFO  UNPAIR");
+        }
+    }
+
+    // BOOT-Taster 3 s im Betrieb halten -> Kopplung loesen (beim Einschalten gedrueckt
+    // startet der C3 dagegen in den Download-Modus, das bleibt davon unberuehrt).
+    {
+        static uint32_t pressed_since = 0;
+        static bool     done          = false;
+        if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+            if (pressed_since == 0) pressed_since = millis();
+            if (!done && millis() - pressed_since >= UNPAIR_HOLD_MS) {
+                done = true;
+                Serial.println("[MAIN] BOOT-Taster 3 s gehalten -> Kopplung loesen");
+                espnow_slave_unpair();
+            }
+        } else {
+            pressed_since = 0;
+            done          = false;
         }
     }
 
     espnow_slave_loop();
 
+    static uint32_t offline_since_ms   = 0;
+    static uint32_t last_offline_check = 0;
     if (!online && espnow_slave_is_online()) {
         online = true;
         Serial.println("[MAIN] *** ONLINE beim Master registriert! ***");
         send_status();
         last_status_ms = millis();
+    } else if (online && !espnow_slave_is_online()) {
+        online = false;
+        offline_since_ms = millis();
+        Serial.println("[MAIN] Verbindung zum Master verloren");
+    }
+    if (!online) {
+        uint32_t now = millis();
+        if (offline_since_ms == 0) offline_since_ms = now;   // nie online gewesen (Boot)
+        if (now - offline_since_ms >= OFFLINE_RECHECK_MS &&
+            (last_offline_check == 0 || now - last_offline_check >= OFFLINE_RECHECK_INTERVAL_MS)) {
+            last_offline_check = now;
+            recheck_channel_if_needed(true);   // startet bei geaendertem Kanal neu
+        }
+    } else {
+        last_offline_check = 0;
     }
 
     if (online) {

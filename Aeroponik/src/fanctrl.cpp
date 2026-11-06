@@ -3,6 +3,7 @@
 #include <EEPROM.h>
 
 FanConfig fanConfig;
+uint8_t   fanMaxSpeed = FAN_MAX_SPEED_DEFAULT;
 
 void loadFanConfig() {
     if (EEPROM.read(EEPROM_FAN_MAGIC_ADDR) == EEPROM_FAN_MAGIC_BYTE) {
@@ -20,10 +21,19 @@ void loadFanConfig() {
         fanConfig.temp_cap_diff  = 0;       // Bremse standardmaessig aus
         saveFanConfig();
     }
+    if (EEPROM.read(EEPROM_FAN_MAX_MAGIC_ADDR) == EEPROM_FAN_MAX_MAGIC_BYTE) {
+        fanMaxSpeed = EEPROM.read(EEPROM_FAN_MAX_BASE);
+        if (fanMaxSpeed > 100) fanMaxSpeed = FAN_MAX_SPEED_DEFAULT;
+    } else {
+        fanMaxSpeed = FAN_MAX_SPEED_DEFAULT;
+        saveFanConfig();
+    }
 }
 
 void saveFanConfig() {
     EEPROM.put(EEPROM_FAN_BASE, fanConfig);
     EEPROM.write(EEPROM_FAN_MAGIC_ADDR, EEPROM_FAN_MAGIC_BYTE);
+    EEPROM.write(EEPROM_FAN_MAX_BASE, fanMaxSpeed);
+    EEPROM.write(EEPROM_FAN_MAX_MAGIC_ADDR, EEPROM_FAN_MAX_MAGIC_BYTE);
     EEPROM.commit();
 }

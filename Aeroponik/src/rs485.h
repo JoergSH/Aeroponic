@@ -14,6 +14,7 @@
 
 #define RS485_ADDR_LICHT    0x40   // Lichtx4 (4× Relais)
 #define RS485_REG_MASK      0      // Relaismaske, Bit0-3 = Relais 1-4
+#define RS485_LICHT_DIAG_REGS 4    // Maske + Startzaehler + Reset-Grund + Laufzeit (Lichtx4 >= 1.2.0)
 
 #define RS485_ADDR_FAN       6     // MARS Hydro iControl Abluftluefter (fremdes Geraet, feste Adresse)
 // Der Luefter-Controller selbst fragt laut verifizierter Original-Spec
@@ -56,10 +57,25 @@ struct Rs485SensorData {
     uint8_t  status;
 };
 
+// MS2-Status-Byte: Bit0 Klima (Temp/Feuchte) ok, Bit1 AS7341 ok, Bit2 CO2 ungueltig,
+// Bit3 CO2 nur Schaetzwert (Multimodul mit AHT21+ENS160 statt SCD41; Bit2/3 setzt nur das
+// Multimodul, beim Multisensor sind sie immer 0).
+// Temp/Feuchte gueltig: online UND Bit0. Ein Multimodul ohne Klimasensor bedient 0x20 nur
+// fuer den Lichtsensor und liefert dort 0 °C / 0 % / 0 ppm.
+inline bool ms2_klima_ok(const Rs485SensorData& d) { return d.online && (d.status & 0x01); }
+// CO2 gueltig: Klima ok und nicht als ungueltig markiert (AHT21 ohne ENS160, ENS160 waermt auf)
+inline bool ms2_co2_ok(const Rs485SensorData& d)   { return ms2_klima_ok(d) && !(d.status & 0x04); }
+inline bool ms2_co2_geschaetzt(const Rs485SensorData& d) { return (d.status & 0x08) != 0; }
+
 struct Rs485LichtData {
     bool     online;
     uint8_t  mask;
     uint32_t last_update_ms;
+    // Neustart-Diagnose (Register 1-3, ab Lichtx4-FW 1.2.0; diag_ok=false bei aelterer FW)
+    bool     diag_ok;
+    uint16_t boots;          // Startzaehler des Moduls
+    uint16_t reset_reason;   // esp_reset_reason() des letzten Starts
+    uint16_t uptime_min;
 };
 
 struct Rs485FanData {
@@ -87,6 +103,8 @@ void setupRS485();
 void loopRS485();
 
 const Rs485SensorData& rs485_get_ms2();
+// MS2 alle 5 s statt alle 15 s abfragen (Lampen-Kennlinie, siehe loopLichtKalib() in main.cpp)
+void rs485_set_ms2_fast_poll(bool fast);
 
 // Setzt die Relaismaske am Lichtx4 (nicht-blockierend, wird beim naechsten
 // freien Bus-Slot per Modbus FC06 gesendet).

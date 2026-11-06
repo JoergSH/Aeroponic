@@ -4,6 +4,7 @@
 #include <EEPROM.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
+#include <WiFi.h>
 #include <base64.h>
 #include <string.h>
 
@@ -234,9 +235,84 @@ void sendEmailSmtp(const String& message) {
     else    dbgPrintln("[Notify] E-Mail: SMTP-Fehler");
 }
 
+// Warteschlange + eigener Task statt direktem Senden aus loop(): ein HTTPS-Aufruf (TLS-Aufbau)
+// oder eine SMTP-Sitzung (8 s Verbindung + bis zu 10 s je Antwort) kann bei schlechtem WLAN weit
+// ueber 30 s dauern -- in loop() loeste das den Task-Watchdog aus (Neustart mitten in der
+// Lampen-Kennlinie, 06.11.2026) und hielt bis dahin auch Ventile/Sprueh-Takte an. Ausserdem
+// gehen Nachrichten ohne WLAN nicht verloren (z. B. die Meldung eines WLAN-Ausfalls), und zwei
+// Alarme kurz hintereinander scheitern nicht mehr am Rate-Limit je Kanal.
+#define NOTIFY_QUEUE_LEN    8
+#define NOTIFY_QUEUE_GAP_MS (NOTIFY_RATE_LIMIT_MS + 1000UL)
+#define NOTIFY_LATE_MS      (2UL * 60000UL)   // ab so viel Verzoegerung den Hinweis anhaengen
+#define CH_WHATSAPP 0x01
+#define CH_TELEGRAM 0x02
+#define CH_EMAIL    0x04
+#define CH_ALLE     (CH_WHATSAPP | CH_TELEGRAM | CH_EMAIL)
+
+struct QueuedNotify { String text; unsigned long queuedMs; uint8_t kanaele; };
+static QueuedNotify      notifyQueue[NOTIFY_QUEUE_LEN];
+static uint8_t           notifyQueueHead = 0, notifyQueueCount = 0;
+static SemaphoreHandle_t notifyQueueMutex = nullptr;
+
+static void enqueue(const String& message, uint8_t kanaele) {
+    if (!notifyQueueMutex) return;
+    xSemaphoreTake(notifyQueueMutex, portMAX_DELAY);
+    if (notifyQueueCount == NOTIFY_QUEUE_LEN) {   // voll: aelteste Nachricht verwerfen
+        dbgPrintf("[Notify] Warteschlange voll, verwerfe: %s\n", notifyQueue[notifyQueueHead].text.c_str());
+        notifyQueue[notifyQueueHead].text = String();
+        notifyQueueHead = (notifyQueueHead + 1) % NOTIFY_QUEUE_LEN;
+        notifyQueueCount--;
+    }
+    QueuedNotify& q = notifyQueue[(notifyQueueHead + notifyQueueCount) % NOTIFY_QUEUE_LEN];
+    q.text     = message;
+    q.queuedMs = millis();
+    q.kanaele  = kanaele;
+    notifyQueueCount++;
+    xSemaphoreGive(notifyQueueMutex);
+}
+
 void sendNotification(const String& message) {
     if (!notifyConfig.global_enabled) return;
-    if (notifyExtra.whatsapp_enabled) sendWhatsApp(message);
-    if (notifyExtra.telegram_enabled) sendTelegram(message);
-    if (notifyExtra.email_enabled)    sendEmailSmtp(message);
+    enqueue(message, CH_ALLE);
+}
+
+void notifyTestWhatsApp(const String& message) { enqueue(message, CH_WHATSAPP); }
+void notifyTestTelegram(const String& message) { enqueue(message, CH_TELEGRAM); }
+void notifyTestEmail(const String& message)    { enqueue(message, CH_EMAIL); }
+
+static void notifyTask(void*) {
+    unsigned long lastSentMs = 0;
+    bool          sentOnce   = false;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (WiFi.status() != WL_CONNECTED) continue;   // bleibt in der Warteschlange
+        unsigned long now = millis();
+        if (sentOnce && now - lastSentMs < NOTIFY_QUEUE_GAP_MS) continue;
+
+        xSemaphoreTake(notifyQueueMutex, portMAX_DELAY);
+        if (notifyQueueCount == 0) { xSemaphoreGive(notifyQueueMutex); continue; }
+        QueuedNotify& q = notifyQueue[notifyQueueHead];
+        String  message = q.text;
+        uint8_t kanaele = q.kanaele;
+        if (now - q.queuedMs >= NOTIFY_LATE_MS)
+            message += "\n(verzögert um " + String((now - q.queuedMs) / 60000UL) + " min, kein WLAN)";
+        q.text = String();
+        notifyQueueHead = (notifyQueueHead + 1) % NOTIFY_QUEUE_LEN;
+        notifyQueueCount--;
+        xSemaphoreGive(notifyQueueMutex);
+
+        lastSentMs = now;
+        sentOnce   = true;
+        // Die Sendefunktionen pruefen selbst global_enabled/Kanal-Schalter/Zugangsdaten
+        if ((kanaele & CH_WHATSAPP) && (kanaele != CH_ALLE || notifyExtra.whatsapp_enabled)) sendWhatsApp(message);
+        if ((kanaele & CH_TELEGRAM) && (kanaele != CH_ALLE || notifyExtra.telegram_enabled)) sendTelegram(message);
+        if ((kanaele & CH_EMAIL)    && (kanaele != CH_ALLE || notifyExtra.email_enabled))    sendEmailSmtp(message);
+    }
+}
+
+void notify_begin() {
+    if (notifyQueueMutex) return;
+    notifyQueueMutex = xSemaphoreCreateMutex();
+    // HTTPS/TLS + SMTP brauchen reichlich Stack; niedrige Prioritaet, laeuft neben loop()
+    xTaskCreatePinnedToCore(notifyTask, "notify", 12288, nullptr, 1, nullptr, 0);
 }

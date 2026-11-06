@@ -22,7 +22,25 @@ typedef struct {
     uint8_t  retry_count;
 } espnow_node_t;
 
-extern espnow_node_t espnow_nodes[ESPNOW_MAX_NODES];
+extern espnow_node_t espnow_nodes[ESPNOW_MAX_NODES];   // registered = fest gekoppelt (NVS)
+
+// Nodes, die sich gemeldet haben, aber nicht gekoppelt sind (bekommen keine Antwort),
+// fuer "Neu gefunden" im Webinterface. Faellt nach 5 min ohne Meldung wieder heraus.
+#define ESPNOW_MAX_DISCOVERED 8
+typedef struct {
+    uint8_t  mac[6];
+    uint8_t  node_id;
+    uint8_t  node_type;
+    uint32_t last_seen_ms;
+    bool     valid;
+} espnow_discovered_t;
+extern espnow_discovered_t espnow_discovered[ESPNOW_MAX_DISCOVERED];
+
+// Koppelt einen Node aus espnow_discovered[] fest. Rueckgabe nullptr = ok, sonst Fehlertext.
+const char* espnow_pair(const uint8_t* mac);
+// Loest die Kopplung (Node bekommt MSG_UNPAIR und vergisst den Master). Rueckgabe: frei
+// gewordener Index in espnow_nodes[] (fuer zugehoerige Daten des Aufrufers), -1 = unbekannt.
+int espnow_unpair(uint8_t node_id);
 
 // Callback für eingehende Sensordaten (in loop()-Kontext, Serial erlaubt)
 typedef void (*espnow_sensor_cb_t)(uint8_t node_id, uint8_t node_type,

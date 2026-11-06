@@ -32,6 +32,8 @@ const char* htmlPage = R"rawliteral(
             margin: 20px 0;
             flex-wrap: wrap;
         }
+        /* Kompakte Aeroponik-Zeile auf der Startseite: Boxen teilen sich die Breite gleichmaessig */
+        .aero-row > .sensor-box { flex: 1 1 0; min-width: 0; margin: 0; }
         .sensor-box {
             text-align: center;
             background-color: #e8f8f0;

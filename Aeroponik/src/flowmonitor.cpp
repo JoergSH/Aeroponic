@@ -13,6 +13,7 @@ FlowMonitorState  flowMonitorState;
 
 static VentilZustand lastZustand[3]  = { V_PAUSE, V_PAUSE, V_PAUSE };
 static uint32_t      cycleStartMs[3] = { 0, 0, 0 };
+static float         aktivDauerS[3]  = { 0, 0, 0 };   // Ventil-offen-Zeit (ohne Nachlauf)
 
 void loadFlowMonitorConfig() {
     if (EEPROM.read(EEPROM_FLOWMON_MAGIC_ADDR) == EEPROM_FLOWMON_MAGIC_BYTE) {
@@ -38,9 +39,12 @@ static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
     float ppl = flowsensor_pulses_per_liter();
     float ml  = (ppl > 0.0f) ? (pulses / ppl) * 1000.0f : 0.0f;
 
-    flowMonitorState.last_cycle_ml[idx]  = ml;
-    flowMonitorState.total_ml[idx]      += ml;
-    flowMonitorState.total_ml_all       += ml;
+    flowMonitorState.last_cycle_ml[idx]      = ml;
+    flowMonitorState.total_ml[idx]          += ml;
+    flowMonitorState.total_ml_all           += ml;
+    flowMonitorState.last_cycle_pulses[idx]  = pulses;
+    flowMonitorState.last_cycle_s[idx]       = dauer_s;
+    flowMonitorState.log_pending[idx]        = true;
 
     dbgPrintf("[FLOWMON] Behaelter %u: %.0f ml in %.1fs (%u Impulse)\n",
                   idx + 1, ml, dauer_s, pulses);
@@ -80,19 +84,25 @@ static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
     }
 }
 
+// Messfenster: Ventil auf bis Ende Nachlauf. Ein Druckspeicher hinter dem Durchflussmesser liefert
+// beim Oeffnen einen Teil des Spruehwassers selbst und wird erst im Nachlauf (Ventil zu, Pumpe an)
+// wieder aufgefuellt -- erst dann ist die gesamte gespruehte Menge durch den Zaehler gelaufen.
+// Als Dauer (Sollwert ml/s) zaehlt nur die Ventil-offen-Zeit.
 void loopFlowMonitor() {
     for (uint8_t i = 0; i < 3; i++) {
         VentilZustand z = behaelterZustand[i].zustand;
+        VentilZustand l = lastZustand[i];
 
-        if (z == V_AKTIV && lastZustand[i] != V_AKTIV) {
-            // Zyklus beginnt -- Zaehler leeren (verwirft Reste aus der Vorlaufphase, die ueber
-            // das Ruecklaufventil lief, nicht ueber die Duese dieses Behaelters).
+        if (z == V_AKTIV && l != V_AKTIV) {
+            // Zyklus beginnt -- Zaehler leeren (verwirft Reste aus Vorlauf/Druckaufbau, die ueber
+            // das Ruecklaufventil bzw. in den Druckspeicher liefen, nicht ueber diese Duese).
             flowsensor_take_pulses();
             cycleStartMs[i] = millis();
-        } else if (z != V_AKTIV && lastZustand[i] == V_AKTIV) {
-            uint32_t pulses  = flowsensor_take_pulses();
-            float    dauer_s = (millis() - cycleStartMs[i]) / 1000.0f;
-            handleCycleEnd(i, pulses, dauer_s);
+        } else if (l == V_AKTIV && z != V_AKTIV) {
+            aktivDauerS[i] = (millis() - cycleStartMs[i]) / 1000.0f;
+            if (z != V_NACHLAUF) handleCycleEnd(i, flowsensor_take_pulses(), aktivDauerS[i]);
+        } else if (l == V_NACHLAUF && z != V_NACHLAUF) {
+            handleCycleEnd(i, flowsensor_take_pulses(), aktivDauerS[i]);
         }
 
         lastZustand[i] = z;

@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 // Duesen-Ueberwachung: beobachtet behaelterZustand[] (valves.h) selbststaendig von aussen --
-// sobald ein Behaelter von/zu V_AKTIV wechselt, wird die in diesem Fenster gezaehlte
+// sobald ein Behaelter von/zu V_AKTIV wechselt (inkl. folgendem V_NACHLAUF), wird die gezaehlte
 // Durchflussmenge (ueber den kalibrierten Durchflussmesser, siehe flowsensor.h) erfasst.
 // Da laut loopVentile() immer nur ein Behaelter gleichzeitig giesst, reicht der eine
 // gemeinsame Sensor in der Zulaufleitung vor dem Ventil-Verteiler.
@@ -20,9 +20,15 @@ struct FlowMonitorConfig {
 // SD-Karten-Log (storage.cpp), aus dem sich eine echte Lebenszeit-Summe bei Bedarf rekonstruieren
 // liesse.
 struct FlowMonitorState {
-    float last_cycle_ml[3];   // letzter abgeschlossener Giesszyklus je Behaelter
-    float total_ml[3];        // Summe je Behaelter seit letztem Neustart
-    float total_ml_all;       // Gesamtsumme aller Behaelter seit letztem Neustart
+    float    last_cycle_ml[3];      // letzter abgeschlossener Giesszyklus je Behaelter
+    float    total_ml[3];           // Summe je Behaelter seit letztem Neustart
+    float    total_ml_all;          // Gesamtsumme aller Behaelter seit letztem Neustart
+    // Fuers SD-Log: Rohimpulse + Dauer des letzten Sprühvorgangs. Aussagekraeftiger fuer die
+    // Duesen-Durchgaengigkeit als ml (unabhaengig von der Kalibrierung, die bei kleinem
+    // Durchfluss ohnehin ungenau ist). log_pending = seit der letzten Log-Zeile neu.
+    uint32_t last_cycle_pulses[3];
+    float    last_cycle_s[3];
+    bool     log_pending[3];
 };
 
 extern FlowMonitorConfig flowMonitorConfig;

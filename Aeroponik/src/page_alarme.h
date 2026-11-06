@@ -126,6 +126,16 @@ R"rawliteral(
                         </label>
                     </div>
                     <div style="padding:8px;background:#f8f9fa;border-radius:6px;">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                            <input type="checkbox" id="notifyVerbindungEnabled" style="width:16px;height:16px;">
+                            <span style="font-size:0.9em;">📡 <span class="de">Verbindungsausfall (WLAN, Funk-Geräte)</span><span class="en">Connection loss (WiFi, wireless devices)</span></span>
+                        </label>
+                        <div style="font-size:0.78em;color:#888;margin-top:4px;">
+                            <span class="de">Funk-Gerät (z. B. Steckdose) länger als 2 min offline. Ein WLAN-Ausfall ab 30 s wird nach dem Wiederverbinden bzw. nach einem dadurch nötigen Neustart gemeldet.</span>
+                            <span class="en">Wireless device (e.g. socket) offline for more than 2 min. A WiFi outage of 30 s or more is reported after reconnecting or after a restart it required.</span>
+                        </div>
+                    </div>
+                    <div style="padding:8px;background:#f8f9fa;border-radius:6px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;">
                             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
                                 <input type="checkbox" id="notifyFeuchteEnabled" style="width:16px;height:16px;">

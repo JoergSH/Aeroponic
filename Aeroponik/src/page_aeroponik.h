@@ -106,6 +106,10 @@ R"rawliteral(
                 <label><input type="checkbox" id="vorlaufAktiv" onchange="saveVentilConfig()"> <span class="de">Vorlauf Rückleitung aktiv</span><span class="en">Return pre-flush active</span></label>
                 &nbsp;&nbsp;
                 <label><span class="de">Vorlaufzeit</span><span class="en">Pre-flush time</span>: <input type="number" id="vorlaufzeit" min="1" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
+                <div style="margin-top:8px;">
+                    <label><span class="de">Druckaufbau / Nachlauf</span><span class="en">Pressure build-up / refill</span>: <input type="number" id="druckaufbau" min="0" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
+                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Pumpe läuft so lange bei geschlossenem Düsenventil, bevor es öffnet — gleichbleibender Druck beim Sprühen — und nach dem Schließen weiter, damit ein Druckspeicher wieder voll ist (wird noch mitgezählt). Im Batch ersetzt der Nachlauf den Druckaufbau des nächsten Behälters. 0 = aus.</span><span class="en">Pump runs this long with the nozzle valve closed before it opens — constant pressure while spraying — and again after it closes so a pressure accumulator is refilled (still counted). In batch mode the refill replaces the next reservoir's build-up. 0 = off.</span></div>
+                </div>
             </div>
 
             <!-- Sprühschema (LPA-Betriebsprotokoll Punkt 2/3): fertige Licht-/Dunkelphase-Profile

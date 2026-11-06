@@ -5,6 +5,7 @@
 #include <esp_wifi.h>
 #include <WiFi.h>
 #include <freertos/queue.h>
+#include <Preferences.h>
 #include <string.h>
 
 // ========== Interner Zustand ==========
@@ -83,30 +84,130 @@ static void on_sent(const esp_now_send_info_t* info, esp_now_send_status_t statu
     }
 }
 
+// ========== Feste Kopplung (siehe MSG_UNPAIR in espnow_protocol.h) ==========
+// Gekoppelte Nodes stehen dauerhaft im NVS und werden beim Start sofort in espnow_nodes[]
+// eingetragen (offline, bis sie sich melden). Unbekannte Nodes bekommen keine Antwort,
+// sondern landen nur in espnow_discovered[] und werden erst nach "Koppeln" im Webinterface
+// angenommen -- es gibt bewusst kein automatisches Koppeln, auch nicht beim ersten Start.
+
+#define PAIR_NVS_NS        "espnow_pair"
+#define PAIR_NVS_KEY       "nodes"
+#define DISCOVERED_MAX_AGE_MS (5UL * 60000UL)   // so lange ohne neue Meldung -> aus der Liste
+
+typedef struct {
+    uint8_t mac[6];
+    uint8_t node_id;
+    uint8_t node_type;
+} __attribute__((packed)) paired_entry_t;
+
+espnow_discovered_t espnow_discovered[ESPNOW_MAX_DISCOVERED];
+
+static void add_peer(const uint8_t* mac) {
+    if (esp_now_is_peer_exist(mac)) return;
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, mac, 6);
+    peer.channel = 0;   // folgt dem aktuellen WiFi-Kanal
+    peer.encrypt = false;
+    esp_now_add_peer(&peer);
+}
+
+static void save_paired() {
+    paired_entry_t list[ESPNOW_MAX_NODES];
+    size_t n = 0;
+    for (int i = 0; i < ESPNOW_MAX_NODES; i++) {
+        if (!espnow_nodes[i].registered) continue;
+        memcpy(list[n].mac, espnow_nodes[i].mac, 6);
+        list[n].node_id   = espnow_nodes[i].node_id;
+        list[n].node_type = espnow_nodes[i].node_type;
+        n++;
+    }
+    Preferences p;
+    p.begin(PAIR_NVS_NS, false);
+    if (n) p.putBytes(PAIR_NVS_KEY, list, n * sizeof(paired_entry_t));
+    else   p.remove(PAIR_NVS_KEY);
+    p.end();
+}
+
+static void load_paired() {
+    Preferences p;
+    p.begin(PAIR_NVS_NS, true);
+    paired_entry_t list[ESPNOW_MAX_NODES];
+    size_t len = p.isKey(PAIR_NVS_KEY) ? p.getBytes(PAIR_NVS_KEY, list, sizeof(list)) : 0;
+    p.end();
+
+    size_t n = len / sizeof(paired_entry_t);
+    for (size_t i = 0; i < n && i < ESPNOW_MAX_NODES; i++) {
+        espnow_node_t& node = espnow_nodes[i];
+        memcpy(node.mac, list[i].mac, 6);
+        node.node_id    = list[i].node_id;
+        node.node_type  = list[i].node_type;
+        node.registered = true;
+        node.online     = false;
+        add_peer(node.mac);
+        dbgPrintf("[ESP-NOW] Gekoppelt: Node %d Typ=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+                  node.node_id, node.node_type, node.mac[0], node.mac[1], node.mac[2],
+                  node.mac[3], node.mac[4], node.mac[5]);
+    }
+}
+
+static espnow_node_t* pair_node(const uint8_t* mac, uint8_t node_id, uint8_t node_type) {
+    espnow_node_t* node = free_slot();
+    if (!node) return nullptr;
+    memset(node, 0, sizeof(*node));
+    memcpy(node->mac, mac, 6);
+    node->node_id    = node_id;
+    node->node_type  = node_type;
+    node->registered = true;
+    add_peer(mac);
+    for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
+        if (espnow_discovered[i].valid && memcmp(espnow_discovered[i].mac, mac, 6) == 0)
+            espnow_discovered[i].valid = false;
+    save_paired();
+    dbgPrintf("[ESP-NOW] Node %d gekoppelt Typ=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+              node_id, node_type, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return node;
+}
+
+// Unbekannter Node hat sich gemeldet: nur merken (fuer "Neu gefunden" im Webinterface),
+// nicht antworten.
+static void note_discovered(const uint8_t* mac, uint8_t node_id, uint8_t node_type) {
+    espnow_discovered_t* slot = nullptr;
+    for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
+        if (espnow_discovered[i].valid && memcmp(espnow_discovered[i].mac, mac, 6) == 0) { slot = &espnow_discovered[i]; break; }
+    if (!slot) {
+        for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
+            if (!espnow_discovered[i].valid) { slot = &espnow_discovered[i]; break; }
+        if (!slot) return;
+        dbgPrintf("[ESP-NOW] Unbekannter Node %d (Typ=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X) -- nicht gekoppelt, ignoriert\n",
+                  node_id, node_type, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    memcpy(slot->mac, mac, 6);
+    slot->node_id      = node_id;
+    slot->node_type    = node_type;
+    slot->last_seen_ms = millis();
+    slot->valid        = true;
+}
+
+// Liefert den gekoppelten Node zu dieser MAC, sonst nullptr (Node nur als "neu gefunden" vermerkt).
+static espnow_node_t* paired_or_discover(const uint8_t* mac, uint8_t node_id, uint8_t node_type) {
+    espnow_node_t* node = find_by_mac(mac);
+    if (node) return node;
+    note_discovered(mac, node_id, node_type);
+    return nullptr;
+}
+
 // ========== Paketverarbeitung (loop-Kontext) ==========
 
 static void handle_register(const uint8_t* mac, const espnow_packet_t& pkt) {
-    espnow_node_t* node = find_by_mac(mac);
-    if (!node) {
-        node = free_slot();
-        if (!node) { dbgPrintln("[ESP-NOW] Knotenliste voll"); return; }
-        memcpy(node->mac, mac, 6);
-        node->node_id    = pkt.node_id;
-        node->node_type  = pkt.payload_len > 0 ? pkt.payload[0] : 0;
-        node->registered = true;
-        node->retry_count = 0;
-        // Peer hinzufügen für Unicast (channel=0 → folgt aktuellem WiFi-Kanal)
-        esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, mac, 6);
-        peer.channel = 0;
-        peer.encrypt = false;
-        esp_now_add_peer(&peer);
-        dbgPrintf("[ESP-NOW] Node %d registriert Typ=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
-                      pkt.node_id, node->node_type,
-                      mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+    espnow_node_t* node = paired_or_discover(mac, pkt.node_id, pkt.payload_len > 0 ? pkt.payload[0] : 0);
+    if (!node) return;
+    if (pkt.payload_len > 0 && pkt.payload[0] != node->node_type) {
+        node->node_type = pkt.payload[0];   // z. B. Steckdose per NODECLEAR auf Licht-SSR umgestellt
+        save_paired();
     }
     node->online = true;
     node->last_heartbeat_ms = millis();
+    node->retry_count = 0;
 
     espnow_packet_t ack = {};
     ack.node_id     = 0;
@@ -118,24 +219,8 @@ static void handle_register(const uint8_t* mac, const espnow_packet_t& pkt) {
 }
 
 static void handle_heartbeat(const uint8_t* mac, const espnow_packet_t& pkt) {
-    espnow_node_t* node = find_by_mac(mac);
-    if (!node) {
-        // Master neu gestartet — Node aus Heartbeat auto-registrieren
-        node = free_slot();
-        if (!node) { dbgPrintln("[ESP-NOW] Knotenliste voll"); return; }
-        memcpy(node->mac, mac, 6);
-        node->node_id    = pkt.node_id;
-        node->node_type  = pkt.payload_len > 0 ? pkt.payload[0] : NODE_TYPE_SENSOR;
-        node->registered = true;
-        node->retry_count = 0;
-        esp_now_peer_info_t peer = {};
-        memcpy(peer.peer_addr, mac, 6);
-        peer.channel = 0;
-        peer.encrypt = false;
-        esp_now_add_peer(&peer);
-        dbgPrintf("[ESP-NOW] Node %d aus Heartbeat registriert Typ=0x%02X\n",
-                      pkt.node_id, node->node_type);
-    }
+    espnow_node_t* node = paired_or_discover(mac, pkt.node_id, pkt.payload_len > 0 ? pkt.payload[0] : NODE_TYPE_SENSOR);
+    if (!node) return;
     node->online = true;
     node->last_heartbeat_ms = millis();
     node->retry_count = 0;
@@ -149,40 +234,21 @@ static void handle_heartbeat(const uint8_t* mac, const espnow_packet_t& pkt) {
 }
 
 static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
-    espnow_node_t* node = find_by_mac(mac);
-
-    // Slave hat MSG_REGISTER uebersprungen -> auto-registrieren
-    if (!node) {
-        node = free_slot();
-        if (node) {
-            memcpy(node->mac, mac, 6);
-            node->node_id     = pkt.node_id;
-            // Typ aus Daten-Subtyp ableiten
-            uint8_t inferred = NODE_TYPE_SENSOR;
-            if (pkt.payload_len > 0) {
-                if (pkt.payload[0] == SUBTYPE_RELAY_STATUS)  inferred = NODE_TYPE_SOCKET;
-                else if (pkt.payload[0] == SUBTYPE_PWM_STATUS)    inferred = NODE_TYPE_LIGHT;
-            }
-            node->node_type = inferred;
-            node->registered  = true;
-            node->retry_count = 0;
-            node->last_heartbeat_ms = millis();
-            node->online      = true;
-            esp_now_peer_info_t peer = {};
-            memcpy(peer.peer_addr, mac, 6);
-            peer.channel = 0;
-            peer.encrypt = false;
-            esp_now_add_peer(&peer);
-            dbgPrintf("[ESP-NOW] Node %d auto-registriert (MSG_REGISTER fehlt)\n", pkt.node_id);
-        }
+    // Typ aus Daten-Subtyp ableiten (nur fuer die Umstellung/"Neu gefunden" relevant)
+    uint8_t inferred = NODE_TYPE_SENSOR;
+    if (pkt.payload_len > 0) {
+        if (pkt.payload[0] == SUBTYPE_RELAY_STATUS)    inferred = NODE_TYPE_SOCKET;
+        else if (pkt.payload[0] == SUBTYPE_PWM_STATUS) inferred = NODE_TYPE_LIGHT;
     }
+    espnow_node_t* node = paired_or_discover(mac, pkt.node_id, inferred);
+    if (!node) return;
 
     espnow_packet_t ack = {};
     ack.node_id     = 0;
     ack.msg_type    = MSG_DATA_ACK;
     ack.seq         = pkt.seq;
     ack.payload_len = 0;
-    if (node) send_pkt(mac, &ack);
+    send_pkt(mac, &ack);
 
 #ifdef ESPNOW_DEBUG
     dbgPrintf("[ESP-NOW] Node %d Sensor (Typ=0x%02X len=%d)\n",
@@ -214,7 +280,7 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
     }
 #endif
 
-    if (sensor_cb && node)
+    if (sensor_cb)
         sensor_cb(pkt.node_id, node->node_type, pkt.payload, pkt.payload_len);
 }
 
@@ -228,6 +294,11 @@ static void process(const recv_evt_t& evt) {
         case MSG_REGISTER:    handle_register(evt.mac, pkt);    break;
         case MSG_HEARTBEAT:   handle_heartbeat(evt.mac, pkt);   break;
         case MSG_SENSOR_DATA: handle_sensor_data(evt.mac, pkt); break;
+        case MSG_REGISTER_ACK:
+        case MSG_HEARTBEAT_ACK:
+        case MSG_DATA_ACK:
+        case MSG_UNPAIR:
+            break;   // Antworten/Befehle einer anderen Steuerung in Funkreichweite
         case MSG_COMMAND_ACK:
         case MSG_CONFIG_ACK: {
             espnow_node_t* node = find_by_mac(evt.mac);
@@ -273,6 +344,9 @@ void setupEspNow() {
     r = esp_now_add_peer(&peer);
     dbgPrintf("[ESP-NOW] add_peer(broadcast): %s\n", esp_err_to_name(r));
 
+    memset(espnow_discovered, 0, sizeof(espnow_discovered));
+    load_paired();
+
     uint8_t primary;
     wifi_second_chan_t second;
     esp_wifi_get_channel(&primary, &second);
@@ -299,7 +373,40 @@ void loopEspNow() {
                 dbgPrintf("[ESP-NOW] Node %d Timeout (offline)\n", n.node_id);
             }
         }
+        for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
+            if (espnow_discovered[i].valid && now - espnow_discovered[i].last_seen_ms > DISCOVERED_MAX_AGE_MS)
+                espnow_discovered[i].valid = false;
     }
+}
+
+const char* espnow_pair(const uint8_t* mac) {
+    espnow_discovered_t* d = nullptr;
+    for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
+        if (espnow_discovered[i].valid && memcmp(espnow_discovered[i].mac, mac, 6) == 0) { d = &espnow_discovered[i]; break; }
+    if (!d)                    return "Node nicht (mehr) in der Liste";
+    if (find_by_mac(mac))      return "Node ist bereits gekoppelt";
+    if (find_by_id(d->node_id)) return "Node-ID ist schon an einen anderen Node vergeben (am Node per NODECLEAR aendern)";
+    if (!pair_node(mac, d->node_id, d->node_type)) return "Knotenliste voll";
+    return nullptr;   // Node meldet sich mit dem naechsten REGISTER (alle 3-30 s) und bekommt dann ein ACK
+}
+
+int espnow_unpair(uint8_t node_id) {
+    for (int i = 0; i < ESPNOW_MAX_NODES; i++) {
+        espnow_node_t& n = espnow_nodes[i];
+        if (!n.registered || n.node_id != node_id) continue;
+        espnow_packet_t pkt = {};
+        pkt.node_id     = node_id;
+        pkt.msg_type    = MSG_UNPAIR;
+        pkt.seq         = master_seq++;
+        pkt.payload_len = 0;
+        send_pkt(n.mac, &pkt);   // erreicht ihn das nicht, ignoriert er uns trotzdem nicht -- dann am Node BOOT 3 s halten
+        dbgPrintf("[ESP-NOW] Node %d entkoppelt\n", node_id);
+        // Peer nicht sofort loeschen: das UNPAIR-Paket ist eventuell noch in der Sendewarteschlange
+        memset(&n, 0, sizeof(n));
+        save_paired();
+        return i;
+    }
+    return -1;
 }
 
 void espnow_set_sensor_callback(espnow_sensor_cb_t cb) {

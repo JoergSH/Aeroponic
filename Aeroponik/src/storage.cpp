@@ -22,8 +22,11 @@ bool storage_is_ok() { return sdOk; }
 
 void storage_log(time_t ts, const LogEntry &e) {
     if (!sdOk) return;
+    // ts kommt aus rtc.now().unixtime() und ist bereits Lokalzeit (die RTC laeuft auf Ortszeit,
+    // siehe NTP-Abgleich in main.cpp) -- localtime_r() wuerde die Zeitzone ein zweites Mal
+    // aufschlagen und den Tageswechsel um 1-2 h vorverlegen.
     struct tm t;
-    localtime_r(&ts, &t);
+    gmtime_r(&ts, &t);
     char filename[24];
     snprintf(filename, sizeof(filename), "/%04d-%02d-%02d.csv",
              t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
@@ -33,13 +36,13 @@ void storage_log(time_t ts, const LogEntry &e) {
         // Bereits vorhandene Tagesdatei kann noch das alte, kuerzere Spaltenformat haben
         // (vor Erweiterung um Raum/Zelt/Luefter/CO2/Luftbefeuchtung/Duesen-Durchfluss). In dem
         // Fall beiseitelegen statt Zeilen mit unterschiedlicher Spaltenzahl zu mischen. Pruefung
-        // auf die jeweils neueste Spalte (aktuell FlowGesamt_ml) faengt automatisch auch alle
+        // auf die jeweils neueste Spalte (aktuell HeapMin_kB) faengt automatisch auch alle
         // aelteren Formate.
         File check = SD.open(filename, FILE_READ);
         if (check) {
             String firstLine = check.readStringUntil('\n');
             check.close();
-            if (firstLine.indexOf("FlowGesamt_ml") < 0) {
+            if (firstLine.indexOf("HeapMin_kB") < 0) {
                 char oldName[28];
                 snprintf(oldName, sizeof(oldName), "/%04d-%02d-%02d_alt.csv",
                          t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
@@ -57,9 +60,11 @@ void storage_log(time_t ts, const LogEntry &e) {
     }
     if (isNew) {
         f.println("Zeit,TempVorrat_C,TempPflanze_C,Druck_bar,Fuellstand_%,Volumen_L,"
-                   "RaumTemp_C,RaumFeuchte_%,ZeltTemp_C,ZeltFeuchte_%,ZeltCO2_ppm,ZeltVPD_kPa,"
+                   "RaumTemp_C,RaumFeuchte_%,ZeltTemp_C,ZeltFeuchte_%,ZeltCO2_ppm,ZeltVPD_kPa,ZeltPPFD_umol,"
                    "LichtMaske,LuefterLeistung_%,LuefterRPM,CO2Ausgang,HumidAusgang,"
-                   "FlowBehaelter1_ml,FlowBehaelter2_ml,FlowBehaelter3_ml,FlowGesamt_ml");
+                   "ImpulseBehaelter1,DauerBehaelter1_s,ImpulseBehaelter2,DauerBehaelter2_s,"
+                   "ImpulseBehaelter3,DauerBehaelter3_s,Laufzeit_min,NeustartGrund,Lichtx4Starts,Lichtx4Grund,Netzaussetzer,NetzaussetzerMax_ms,"
+                   "CO2Steckdose,HumidSteckdose,WLAN_dBm,WLAN_Abbrueche,EspNow_online,HeapMin_kB");
     }
 
     char zeit[9];
@@ -75,17 +80,26 @@ void storage_log(time_t ts, const LogEntry &e) {
                   (e.raumOk ? String(e.raumFeuchte, 1) : String("")) + "," +
                   (e.zeltOk ? String(e.zeltTemp, 1) : String("")) + "," +
                   (e.zeltOk ? String(e.zeltFeuchte, 1) : String("")) + "," +
-                  (e.zeltOk ? String(e.zeltCo2) : String("")) + "," +
+                  (e.zeltOk && e.zeltCo2Ok ? String(e.zeltCo2) : String("")) + "," +
                   (e.zeltOk ? String(e.zeltVpd, 2) : String("")) + "," +
+                  (e.ppfdOk ? String(e.zeltPpfd, 1) : String("")) + "," +
                   String(e.lichtMaske) + "," +
                   (e.fanOk ? String(e.fanPercent) : String("")) + "," +
                   (e.fanOk ? String(e.fanRpm) : String("")) + "," +
                   String(e.co2Ausgang ? 1 : 0) + "," +
-                  String(e.humidAusgang ? 1 : 0) + "," +
-                  String(e.flowBehaelter1Ml, 0) + "," +
-                  String(e.flowBehaelter2Ml, 0) + "," +
-                  String(e.flowBehaelter3Ml, 0) + "," +
-                  String(e.flowGesamtMl, 0);
+                  String(e.humidAusgang ? 1 : 0);
+    for (uint8_t i = 0; i < 3; i++) {
+        line += "," + (e.flowValid[i] ? String(e.flowImpulse[i]) : String("")) +
+                "," + (e.flowValid[i] ? String(e.flowDauerS[i], 1) : String(""));
+    }
+    line += "," + String(e.laufzeitMin) + "," + String(e.neustartGrund ? e.neustartGrund : "");
+    line += "," + (e.lichtDiagOk ? String(e.lichtStarts) : String("")) +
+            "," + (e.lichtDiagOk && e.lichtGrund ? String(e.lichtGrund) : String(""));
+    line += "," + String(e.netzAussetzer) + "," + String(e.netzAussetzerMaxMs);
+    line += "," + (e.co2Steckdose   >= 0 ? String(e.co2Steckdose)   : String("")) +
+            "," + (e.humidSteckdose >= 0 ? String(e.humidSteckdose) : String(""));
+    line += "," + (e.wlanOk ? String(e.wlanDbm) : String("")) + "," + String(e.wlanAbbrueche);
+    line += "," + String(e.espnowOnline) + "/" + String(e.espnowGekoppelt) + "," + String(e.heapMinKb);
 
     f.println(line);
     f.close();

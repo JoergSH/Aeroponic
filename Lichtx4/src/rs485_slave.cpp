@@ -71,7 +71,7 @@ static void handle_read(uint16_t start, uint16_t count) {
 
 // FC06: Write Single Register — Antwort ist der Echo der Anfrage (Modbus-Standard)
 static void handle_write(uint16_t reg, uint16_t value, const uint8_t* req_frame) {
-    if (reg >= RS485_NUM_REGS) {
+    if (reg != RS485_REG_MASK) {   // Diagnose-Register sind nur lesbar
         send_exception(0x06, 0x02);  // illegal data address
         return;
     }
@@ -187,4 +187,8 @@ void rs485_slave_loop() {
 
 void rs485_slave_update(uint8_t mask) {
     regs[RS485_REG_MASK] = mask;
+}
+
+void rs485_slave_set_reg(uint16_t reg, uint16_t value) {
+    if (reg < RS485_NUM_REGS) regs[reg] = value;
 }

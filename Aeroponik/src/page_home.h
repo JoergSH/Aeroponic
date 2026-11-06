@@ -5,16 +5,20 @@ R"rawliteral(
         <div id="startseiteTab" class="tab-content active">
             <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:15px;">
 
-                <!-- Messwerte (alles außer PPFD) -->
+                <!-- Messwerte (alles außer PPFD). Zeltwerte zuerst und gross (wichtiger), die
+                     Aeroponik-/Behaelterwerte darunter kompakt. -->
                 <div class="status-box-info">
-                    <strong>📊 <span class="de">Werte Aeroponik</span><span class="en">Aeroponic Readings</span></strong>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="tempVorrat">--</div><div class="sensor-unit">°C <span class="de">Vorrat</span><span class="en">Reservoir</span></div></div>
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="tempPflanze">--</div><div class="sensor-unit">°C <span class="de">Pflanze</span><span class="en">Plant</span></div></div>
-                        <div class="sensor-box" id="druckSensorBox" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="druckBar">--</div><div class="sensor-unit">bar <span class="de">Druck</span><span class="en">Pressure</span></div></div>
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="volumenLiter">--</div><div class="sensor-unit">L <span class="de">Füllstand</span><span class="en">Fill Level</span></div></div>
-                    </div>
+                    <strong>📊 <span class="de">Messwerte</span><span class="en">Readings</span></strong>
                     <div id="messwerteExtra"></div>
+                    <div style="margin-top:10px;font-size:0.8em;color:#6c757d;"><span class="de">Aeroponik</span><span class="en">Aeroponics</span></div>
+                    <!-- Flex statt festem 4er-Raster: ist der Drucksensor abgeschaltet (Box versteckt),
+                         teilen sich Vorrat/Pflanze/Fuellstand die Zeile ohne Luecke -->
+                    <div style="display:flex;gap:6px;font-size:0.95em;margin-top:4px;" class="aero-row">
+                        <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1.0em;" id="tempVorrat">--</div><div class="sensor-unit">°C <span class="de">Vorrat</span><span class="en">Reservoir</span></div></div>
+                        <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1.0em;" id="tempPflanze">--</div><div class="sensor-unit">°C <span class="de">Pflanze</span><span class="en">Plant</span></div></div>
+                        <div class="sensor-box" id="druckSensorBox" style="padding:6px;"><div class="sensor-value" style="font-size:1.0em;" id="druckBar">--</div><div class="sensor-unit">bar <span class="de">Druck</span><span class="en">Pressure</span></div></div>
+                        <div class="sensor-box" style="padding:6px;"><div class="sensor-value" style="font-size:1.0em;" id="volumenLiter">--</div><div class="sensor-unit">L <span class="de">Füllstand</span><span class="en">Fill Level</span></div></div>
+                    </div>
                 </div>
 
                 <!-- Ventile-Status: Box nur sichtbar wenn mind. ein Behälter aktiv ist -->

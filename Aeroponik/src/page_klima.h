@@ -94,6 +94,33 @@ R"rawliteral(
                 </div>
             </div>
 
+            <!-- Lampen-Kennlinie (0-10V-Ausgang gegen PPFD, siehe loopLichtKalib() im Master) -->
+            <h3 class="section-heading">📈 <span class="de">Lampen-Kennlinie (PPFD)</span><span class="en">Lamp Response Curve (PPFD)</span></h3>
+            <div class="status-box-info">
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Fährt den 0–10V-Lichtausgang in 5-%-Schritten von 0 bis 100 % und misst je Schritt die PPFD des Multisensors — zeigt, wie linear die Lampe auf die Steuerspannung reagiert. Dauer ca. 8–10 min, währenddessen ist der Zeitplan überstimmt. Sensor dabei nicht bewegen, Zelt möglichst geschlossen (der 0-%-Wert wird als Restlicht abgezogen).</span>
+                    <span class="en">Steps the 0–10V light output from 0 to 100 % in 5 % steps and measures the multisensor's PPFD at each step — shows how linearly the lamp responds to the control voltage. Takes about 8–10 min, the schedule is overridden meanwhile. Do not move the sensor, keep the tent closed if possible (the 0 % value is subtracted as residual light).</span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+                    <button id="lkStartBtn" onclick="lichtKalibStart()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        ▶ <span class="de">Messung starten</span><span class="en">Start measurement</span></button>
+                    <button id="lkAbortBtn" onclick="lichtKalibAbort()" style="display:none;background:#dc3545;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        ■ <span class="de">Abbrechen</span><span class="en">Abort</span></button>
+                    <span id="lkStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+                <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin-bottom:4px;">
+                    <input type="checkbox" id="lkApply" onchange="lichtKalibApply(this.checked)" style="width:18px;height:18px;margin-top:1px;">
+                    <span style="font-size:0.9em;"><span class="de">Kennlinie anwenden (Zeitplan und manueller Regler)</span><span class="en">Apply response curve (schedule and manual slider)</span></span>
+                </label>
+                <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
+                    <span class="de">Rechnet die Helligkeit über die gespeicherte Messung in die passende Steuerspannung um, damit z. B. 50 % auch 50 % der vollen PPFD ergeben. 0 % bleibt aus; unterhalb der kleinsten Stufe, ab der die Lampe leuchtet, gibt es diese Stufe. Nach einem Lampenwechsel neu messen.</span>
+                    <span class="en">Converts the brightness into the matching control voltage using the stored measurement, so that e.g. 50 % really gives 50 % of full PPFD. 0 % stays off; below the lowest step at which the lamp lights up, that step is used. Measure again after changing the lamp.</span>
+                </div>
+                <canvas id="lkChart" width="420" height="220" style="width:100%;max-width:420px;display:none;"></canvas>
+                <div id="lkTable" style="margin-top:10px;font-size:0.85em;overflow-x:auto;"></div>
+            </div>
+
             <!-- DWC-Beleuchtungstimer -->
             <h3 class="section-heading">💡 DWC-<span class="de">Beleuchtungstimer</span><span class="en">Lighting Timer</span></h3>
             <div class="status-box-info">
@@ -322,7 +349,7 @@ R"rawliteral(
                     <div>
                         <div class="status-label"><span class="de">Feuchte Max (%rH)</span><span class="en">Humidity Max (%rH)</span></div>
                         <input type="number" id="fanHumMax" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: 100%</span><span class="en">Above: 100%</span></div>
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Höchstdrehzahl</span><span class="en">Above: maximum speed</span></div>
                     </div>
                 </div>
 
@@ -346,7 +373,7 @@ R"rawliteral(
                     <div>
                         <div class="status-label" id="fanTempMaxLabel"><span class="de">Temperatur Max (°C)</span><span class="en">Temperature Max (°C)</span></div>
                         <input type="number" id="fanTempMax" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: 100%</span><span class="en">Above: 100%</span></div>
+                        <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Höchstdrehzahl</span><span class="en">Above: maximum speed</span></div>
                     </div>
                     <div id="fanTempCapSection" style="grid-column:1/-1;">
                         <div class="status-label"><span class="de">Differenz-Bremse (°C, 0 = aus)</span><span class="en">Differential Cap (°C, 0 = off)</span></div>
@@ -358,9 +385,16 @@ R"rawliteral(
                     </div>
                 </div>
 
-                <div style="margin-bottom:16px;">
-                    <div class="status-label"><span class="de">Mindestdrehzahl (%) — für beide Automatik-Modi</span><span class="en">Minimum Speed (%) — for both auto modes</span></div>
-                    <input type="number" id="fanMinSpeed" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                    <div>
+                        <div class="status-label"><span class="de">Mindestdrehzahl (%)</span><span class="en">Minimum Speed (%)</span></div>
+                        <input type="number" id="fanMinSpeed" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Höchstdrehzahl (%)</span><span class="en">Maximum Speed (%)</span></div>
+                        <input type="number" id="fanMaxSpeed" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div style="grid-column:1/-1;font-size:0.78em;color:#888;margin-top:-6px;"><span class="de">Gilt für beide Automatik-Modi.</span><span class="en">Applies to both auto modes.</span></div>
                 </div>
 
                 <div style="display:flex;gap:8px;align-items:center;">

@@ -19,6 +19,12 @@ void          espnow_slave_loop();
 slave_state_t espnow_slave_get_state();
 bool          espnow_slave_is_online();
 
+// Feste Kopplung (siehe MSG_UNPAIR in espnow_protocol.h): true, wenn ein Master gespeichert ist.
+bool espnow_slave_is_paired();
+// Vergisst den gespeicherten Master (NVS) und meldet sich neu an -- angenommen wird danach
+// wieder der erste Master, der antwortet (also eine Steuerung, bei der der Node gekoppelt ist).
+void espnow_slave_unpair();
+
 bool espnow_slave_send_data(const uint8_t* payload, uint8_t len);
 bool espnow_slave_send_error(uint8_t error_code);
 

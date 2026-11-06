@@ -63,7 +63,9 @@ Aeroponik Master (ESP32-S3 N16R8)
       └─ Steckdosen              NODE_TYPE_SOCKET · 0x03   4× Relais, manuell/API (u. a. CO2-Ausgang)
 ```
 
-Die RS485-Geräte sind fest verdrahtet und werden zyklisch abgefragt — siehe [RS485-Bus](#rs485-bus). ESP-NOW-Nodes registrieren sich dagegen beim Start beim Master und senden periodische Heartbeats; der Master erkennt ihren Online-/Offline-Status automatisch.
+Die RS485-Geräte sind fest verdrahtet und werden zyklisch abgefragt — siehe [RS485-Bus](#rs485-bus). ESP-NOW-Nodes sind fest an den Master gekoppelt (siehe [Feste Kopplung](#feste-kopplung-node--steuerung)), registrieren sich beim Start und senden periodische Heartbeats; der Master erkennt ihren Online-/Offline-Status automatisch.
+
+**WLAN-Überwachung:** Bricht die WLAN-Verbindung ab und baut der ESP32 sie nicht innerhalb von 30 s selbst wieder auf, verbindet der Master einmal neu; klappt das 60 s lang nicht, startet er neu. Ohne WLAN fällt auch ESP-NOW aus (gleiches Funkmodul, Steckdosen schalten nicht mehr). Gemeldet wird das (Alarm *Verbindungsausfall*) nach dem Wiederverbinden bzw. nach dem Neustart, mit Dauer und Grundcode.
 
 LAN (W5500 via SPI2) und WiFi laufen gleichzeitig. Das Webinterface auf Port 80 ist auf beiden Interfaces ohne Codeänderungen erreichbar.
 
@@ -105,6 +107,16 @@ typedef struct {
 | `MSG_COMMAND` | `0x20` | Master → Node | Steuerbefehl |
 | `MSG_OTA_START` | `0x40` | Master → Node | OTA-Update (AP-Passwort in payload[0..7]) |
 | `MSG_OTA_ACK` | `0x41` | Node → Master | OTA wird gestartet |
+| `MSG_UNPAIR` | `0x50` | Master → Node | Kopplung lösen, Node vergisst seinen Master |
+
+#### Feste Kopplung Node ↔ Steuerung
+
+Damit zwei Steuerungen in Funkreichweite sich nicht gegenseitig die Nodes wegnehmen, sind Nodes fest an einen Master gekoppelt:
+
+- **Node:** speichert die MAC des Masters, der ihm das erste `MSG_REGISTER_ACK` schickt, im NVS (`espnow_pair`/`master`) und nimmt danach nur noch Pakete von dieser MAC an. Ungekoppelt nimmt er ausschließlich ein `REGISTER_ACK` an — Schaltbefehle eines fremden Masters werden nie ausgeführt.
+- **Master:** führt eine Kopplungsliste im NVS (`espnow_pair`/`nodes`) und antwortet nur Nodes daraus. Unbekannte Nodes erscheinen im Webinterface (System → Node-Steuerung) unter *Neu gefunden* und werden erst per **Koppeln** angenommen. Ist die Node-ID schon an einen anderen Node vergeben, ist Koppeln gesperrt (ID am Node per `NODECLEAR` ändern).
+- **Entkoppeln:** im Webinterface an der Node-Karte (Master schickt `MSG_UNPAIR`) oder am Node selbst **BOOT-Taster 3 s im Betrieb halten** bzw. serieller Befehl `UNPAIR`. Danach koppelt sich der Node mit der ersten Steuerung, die ihn in ihrer Liste hat oder bei der man *Koppeln* drückt — vor dem Umzug an eine andere Steuerung also auch an der alten entkoppeln.
+- Es gibt kein automatisches Koppeln — auch nach dem Update auf eine Master-Firmware mit Kopplung muss jeder vorhandene Node einmal per *Koppeln* angenommen werden.
 
 #### Befehls-Subtypen (MSG_COMMAND · payload[0])
 
@@ -186,6 +198,10 @@ Die vier Magnetventile, die Hauptpumpe und die Umwälzpumpe sind direkte GPIO-Au
 
 Die Hauptpumpe (`PUMPE_GPIO`) schaltet automatisch mit, sobald irgendein Behälter gerade aktiv wässert (Ventil offen) — unabhängig davon, ob im normalen oder im Batch-Zeitmodus (siehe [Ventilsteuerung](#funktionen)).
 
+**Druckaufbau:** Vor jedem Sprühvorgang läuft die Pumpe eine einstellbare Zeit (Standard 5 s, 0 = aus) bei noch geschlossenem Düsenventil, erst dann öffnet das Ventil. Ablauf je Behälter: Pause → [Vorlauf über MV4] → Druckaufbau → Aktiv. Ohne Druckaufbau sprühte jeder Zyklus mit erst steigendem Druck — Menge und Durchfluss-Impulse schwankten dann deutlich. Gilt auch im Batch-Modus vor jedem einzelnen Behälter (die Pumpe läuft dazwischen weiter) und beim manuellen Einzelzyklus. Voraussetzung: Die Pumpe muss kurz gegen geschlossene Ventile fördern dürfen (Anlage steht unter Druck / Druckschalter).
+
+**Nachlauf:** Nach dem Schließen des Düsenventils läuft die Pumpe noch einmal dieselbe Zeit weiter (Zustand „Nachlauf“). Gedacht für einen Druckspeicher zwischen Durchflussmesser und Ventilen: Er überbrückt den Druckeinbruch beim Öffnen (die Drosseldüse im Durchflussmesser liefert nicht schnell genug nach) und wird im Nachlauf wieder aufgefüllt. Die Durchflussmessung zählt vom Öffnen bis zum Ende des Nachlaufs, damit auch das aus dem Speicher gesprühte Wasser beim richtigen Behälter landet; als Dauer gilt nur die Ventil-offen-Zeit. Im Batch-Modus öffnet der nächste Behälter direkt nach dem Nachlauf des vorigen (kein eigener Druckaufbau mehr, nur noch vor dem ersten Behälter). Ohne Druckspeicher fließt im Nachlauf praktisch nichts, die Messwerte bleiben gleich. Der manuelle Einzelzyklus hat keinen Nachlauf.
+
 Die Umwälzpumpe (`UMWAELZPUMPE_GPIO`, Vorratsbehälter-Zirkulation) läuft in einem konfigurierbaren Lauf-/Pausenzyklus (`laufzeit_s` / `pausenzeit_min`), sobald irgendein Behälter überhaupt aktiviert ist — unabhängig davon, ob dieser Behälter gerade tatsächlich wässert oder nur zwischen zwei Zyklen pausiert. Ist kein Behälter aktiviert, bleibt sie aus.
 
 ### Funktionen
@@ -243,7 +259,7 @@ Drei unabhängig voneinander aktivierbare Kanäle — CallMeBot ist erfahrungsge
 | Luftfeuchte | Zelt-Luftfeuchte (RS485-Multisensor) außerhalb `feuchte_min`/`feuchte_max` |
 | Temperatur | Zelt-Temperatur (RS485-Multisensor) außerhalb `temperatur_min`/`temperatur_max` |
 | Behälter fast leer | Vorratsbehälter-Füllstand unter `tank_min_prozent` |
-| Zeltlüfter-Drehzahl | Ist-Drehzahl weicht vom Erwartungswert ab, siehe [Lueftermodul](#lueftermodul) |
+| Zeltlüfter-Drehzahl | Ist-Drehzahl weicht mindestens 3 Minuten am Stück vom Erwartungswert ab (Anlauf/Modul-Neustart lösen keinen Alarm aus), siehe [Lueftermodul](#lueftermodul) |
 | Düsen-Durchfluss | Soll/Ist-Abweichung je Behälter, siehe [Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung) |
 
 Jeder Kanal hat ein eigenes Rate-Limit (30 s) gegen versehentliches Zuspammen; ein eigener Test-Button pro Kanal in der Konfiguration verifiziert die Zugangsdaten unabhängig von den anderen.
@@ -385,15 +401,15 @@ MARS Hydro (RS485). Werksseitig fertige Lüfterplatine, RS485-Adresse `6`, urspr
 | Modus | Quelle | Verhalten |
 |---|---|---|
 | Manuell | — | Feste Leistung (%) |
-| Auto — Luftfeuchte | Zelt-Feuchte (RS485-Multisensor) | Linearer Ramp zwischen `hum_min` (Mindestdrehzahl) und `hum_max` (100 %) |
+| Auto — Luftfeuchte | Zelt-Feuchte (RS485-Multisensor) | Linearer Ramp zwischen `hum_min` (Mindestdrehzahl) und `hum_max` (Höchstdrehzahl) |
 | Auto — Temperatur, absolut | Zelt-Temperatur | Ramp zwischen `temp_min`/`temp_max`; optionale **Differenz-Bremse**: liegt Zelt−Raum-Differenz unter `temp_cap_diff`, wird trotz Rampe nur die Mindestdrehzahl gefahren (verhindert Volllast, wenn der Raum fast so warm wie das Zelt ist) |
 | Auto — Temperatur, Differenz | Zelt-Temperatur − Raumtemperatur | Ramp direkt über die Temperaturdifferenz zwischen `temp_min`/`temp_max` |
 
-Eine gemeinsame Mindestdrehzahl (`min_speed`) gilt für beide Automodi. Die Differenz-Modi benötigen den [Raumklimasensor](#raumklima--vpd); ist dieser nicht verfügbar, bleibt die letzte Zielleistung unverändert.
+Eine gemeinsame Mindest- und Höchstdrehzahl (`min_speed`, `max_speed`, Standard 100 %) gilt für beide Automodi. Bei 0 % wird zusätzlich das Enable-Register (reg15) des MARS-Lüfters auf 0 gesetzt, da er sonst mit Grunddrehzahl weiterläuft. Die Differenz-Modi benötigen den [Raumklimasensor](#raumklima--vpd); ist dieser nicht verfügbar, bleibt die letzte Zielleistung unverändert.
 
 #### Konfiguration (EEPROM, Magic 0x92)
 
-`mode` · `manual_percent` · `min_speed` · `hum_min/max` · `temp_min/max` · `temp_mode` (absolut/Differenz) · `temp_cap_diff` · `enabled`
+`mode` · `manual_percent` · `min_speed` · `max_speed` (eigener EEPROM-Block, Magic 0x6B) · `hum_min/max` · `temp_min/max` · `temp_mode` (absolut/Differenz) · `temp_cap_diff` · `enabled`
 
 ### Lueftermodul
 
@@ -428,7 +444,10 @@ Der Master vergleicht die gemeldete Ist-Drehzahl gegen eine aus dem PWM-Sollwert
 
 Eigenständige Firmware (`Multimodul`) auf derselben RP2040-Zero-Basis wie das [Lueftermodul](#lueftermodul) — identisches Pinout, plus ein zweiter I2C-Bus (I2C1, SDA=GPIO10/SCL=GPIO11) für optionale Zusatz-Hardware:
 
-- **SCD41 + AS7341** (I2C `0x62` / `0x39`) — dieselben Sensoren wie im [Multisensor](#multisensor)-Node. Wenn angeschlossen, beantwortet das Board zusätzlich RS485-Adresse `0x20` mit demselben 14-Register-Layout wie das [RS485-Multisensor](#rs485-multisensor-zelt).
+- **SCD41 + AS7341** (I2C `0x62` / `0x39`) — dieselben Sensoren wie im [Multisensor](#multisensor)-Node. Wenn mindestens einer davon angeschlossen ist, beantwortet das Board zusätzlich RS485-Adresse `0x20` mit demselben 14-Register-Layout wie das [RS485-Multisensor](#rs485-multisensor-zelt). Ohne SCD41 läuft der AS7341 allein im 10-s-Takt.
+- **AHT21 + ENS160** (I2C `0x38` / `0x53` oder `0x52`, z. B. DFRobot-Kombimodul SEN0515) — Ersatz für den SCD41, wird nur genutzt, wenn kein SCD41 gefunden wird. Temperatur/Feuchte vom AHT21, CO₂ als **eCO₂-Schätzwert** des ENS160 (aus flüchtigen organischen Verbindungen abgeleitet, kein echtes NDIR-CO₂ — für eine CO₂-Regelung nur bedingt geeignet). Während der Aufwärmphase des ENS160 (bis ca. 1 h nach dem ersten Start) gilt der CO₂-Wert als ungültig.
+
+**Status-Register `0x20`/13** (vom Master ausgewertet): Bit0 = Temperatur/Feuchte gültig (SCD41 oder AHT21), Bit1 = AS7341 ok, Bit2 = CO₂ ungültig (kein ENS160 oder Aufwärmphase), Bit3 = CO₂ nur Schätzwert (ENS160). Bei ungültigen Werten lässt der Master CO₂-/Feuchte-Regelung, Abluft-Automatik und CSV-Spalten aus; ein eCO₂-Wert erscheint auf der Startseite mit vorangestelltem `~`.
 - **GP8403** (I2C `0x58`, 2-Kanal-0–10V-DAC) — wenn angeschlossen, beantwortet das Board zusätzlich RS485-Adresse `0x50` mit demselben 2-Register-Layout wie das [Analog-Ausgangsmodul](#analog-ausgangsmodul).
 
 Beim Boot scannt die Firmware den I2C-Bus; nur tatsächlich gefundene Geräte werden initialisiert und ihre RS485-Adresse aktiviert. Fehlt ein Gerät, bleibt die zugehörige Adresse auf dem Bus unbeantwortet — für den Master nicht von einem schlicht nicht verbauten separaten Multisensor/Analogmodul zu unterscheiden. Dadurch ist am Master **keine Codeänderung** nötig: er pollt `0x20`, `0x50` und `0x51` bereits unabhängig voneinander und behandelt Ausbleiben der Antwort ohnehin als „Gerät offline“.
@@ -471,6 +490,34 @@ Zum Testen ohne die echte Hardware simuliert das separate Projekt `ProtoRS485` (
 Unter Konfiguration → Geräte legt man fest, welches Gerät Licht bzw. Lüfter tatsächlich ansteuert (Lichtx4/MARS Hydro oder Analogmodul) — bewusst als Setup-Entscheidung, nicht als Umschalter im laufenden Betrieb. Das hat zwei Effekte: Nur das gewählte Gerät bekommt Steuerbefehle, und nur tatsächlich vorhandene Geräte werden überhaupt auf dem RS485-Bus gepollt (das Multisensor bleibt davon unberührt, es wird immer abgefragt).
 
 Für den Lichtausgang ändert die Auswahl auch die Regelcharakteristik: Lichtx4 nutzt weiterhin die gestufte Relais-Rampe ([Beleuchtungs-Scheduler](#beleuchtungs-scheduler)), das Analogmodul eine stufenlose Helligkeitsrampe über dieselben Zeitfenster.
+
+#### Steckerbelegung der 0–10V-Ausgänge — Achtung, Platinen-Layout falsch
+
+Die 0–10V-Ausgänge nutzen denselben Steckertyp wie die RS485-Anschlüsse: Western-Modularbuchse RJ12 (6P6C, also 6 Positionen, alle 6 Kontakte belegt) bzw. Modular-Stecker 6P6C. Ihre aktuelle Belegung auf der Platine passt aber **nicht** zu den Lampen (z. B. Mars Hydro FC-E1500):
+
+| Pin | Aktuelle Platinen-Belegung | Ader |
+|---|---|---|
+| 3 | GND (GND vom DAC) | rot |
+| 4 | 0–10 V Signal (Schleifer, Ausgang vom GP8403) | grün |
+
+Benötigt wird stattdessen:
+
+| Pin | Signal |
+|---|---|
+| 3 + 4 | GND |
+| 2 + 5 | 0–10 V |
+
+Bis zu einer korrigierten Platine muss ein **Adapterkabel** gemacht werden. An der Software ändert sich dadurch nichts.
+
+> **Belegung nicht garantiert:** Diese Belegung ist nur ein Quasi-Standard und nicht bei jedem Gerät gleich. Vor dem Anschließen eines neuen Lampen- oder Lüftermodells die Belegung am Gerät prüfen (Datenblatt bzw. nachmessen).
+
+#### Lampen-Kennlinie (PPFD)
+
+Klima → **Lampen-Kennlinie (PPFD)** misst, wie linear eine Lampe am 0–10V-Lichtausgang (Analogmodul oder GP8403) auf die Steuerspannung reagiert. Der Master setzt den Ausgang nacheinander auf 0, 5, 10, … 100 % (21 Stufen), wartet je Stufe 10 s (ein Messtakt des AS7341, damit kein Wert von vor dem Umschalten mitzählt), fragt den Multisensor (`0x20`) dann alle 5 s statt alle 15 s ab und geht weiter, sobald 3 Werte in Folge innerhalb von 1 % (mindestens 0,5 µmol/m²/s) liegen — deren Mittel ist der Wert der Stufe. Wird eine Stufe in 90 s nicht stabil, gilt das Mittel der letzten Werte. Insgesamt ca. 8–10 min. Währenddessen ist der Zeitplan überstimmt, danach übernimmt er wieder.
+
+Ergebnis: Tabelle und Diagramm mit PPFD je Stufe, relativ zu 100 % (der 0-%-Wert wird als Restlicht abgezogen) und der Abweichung von einer idealen Geraden. Die letzte vollständige Messung wird im NVS gespeichert (`lichtkal`) und beim Öffnen der Seite angezeigt.
+
+**Kennlinie anwenden** (Schalter, Standard aus): Zeitplan-Rampe und manueller Regler geben dann nicht mehr die Steuerspannung direkt vor, sondern den gewünschten Anteil der vollen PPFD. Der Master rechnet ihn über die gespeicherte Messung in die passende Steuerspannung um (lineare Interpolation zwischen den 5-%-Stufen, Messrauschen monoton geglättet). 0 % bleibt aus; Werte unterhalb der kleinsten Stufe, ab der die Lampe leuchtet, ergeben diese Stufe (weiter dimmt die Lampe nicht); 100 % wird die erste Stufe, ab der die Lampe nicht mehr heller wird. Beispiel Testlampe (06.11.2026): leuchtet ab 5 % Steuerspannung mit 11 % Licht, voll ab ca. 92 %, dazwischen linear mit +5 Prozentpunkten Versatz → 50 % Licht = 45 % Steuerspannung, 100 % = 95 %. Nach einem Lampenwechsel neu messen. Abbruch, wenn der Lichtausgang kein 0–10V-Ausgang ist oder in einer Stufe 90 s lang gar kein gültiger PPFD-Wert kommt.
 
 ### CO2-Steuerung
 
@@ -580,12 +627,22 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `RaumTemp_C`, `RaumFeuchte_%` | AHT21B (Raumklima) |
 | `ZeltTemp_C`, `ZeltFeuchte_%`, `ZeltCO2_ppm` | RS485-Multisensor |
 | `ZeltVPD_kPa` | berechnet |
+| `ZeltPPFD_umol` | RS485-Multisensor (AS7341), µmol/m²/s — leer, wenn der Lichtsensor nicht ok ist |
 | `LichtMaske` | Lichtx4 Relais-Bitmaske |
 | `LuefterLeistung_%`, `LuefterRPM` | Abluftlüfter |
 | `CO2Ausgang` | CO2-Steuerung Relaiszustand (0/1) |
 | `HumidAusgang` | Luftbefeuchtung-Steuerung Relaiszustand (0/1) |
-| `FlowBehaelter1_ml` … `FlowBehaelter3_ml` | Düsen-Überwachung — Summe je Behälter seit Neustart |
-| `FlowGesamt_ml` | Düsen-Überwachung — Gesamtsumme aller Behälter seit Neustart |
+| `ImpulseBehaelter1` … `3` | Durchflussmesser-Impulse des letzten Sprühvorgangs je Behälter (roh, unabhängig von der Kalibrierung) — bei gleicher Dauer ein direktes Maß für die Durchgängigkeit der Düse |
+| `DauerBehaelter1_s` … `3` | Dauer dieses Sprühvorgangs (Licht-/Dunkelphase können unterschiedlich lang sein) |
+| `Laufzeit_min` | Minuten seit dem letzten Neustart des Masters — springt der Wert zurück, gab es einen Neustart |
+| `NeustartGrund` | Grund des letzten Neustarts (Power-On, Software, Watchdog, Brownout, …) |
+| `Lichtx4Starts` | Startzähler des Lichtx4 (ab Lichtx4-FW 1.2.0, sonst leer) — steigt er, hat das Modul neu gestartet und alle Lampen waren kurz aus |
+| `Lichtx4Grund` | Grund des letzten Lichtx4-Neustarts |
+| `Netzaussetzer` / `NetzaussetzerMax_ms` | Anzahl und längste Dauer kurzer Netzaussetzer seit der vorigen Zeile (USV übernimmt, die LED-Treiber gehen dabei kurz aus) |
+| `CO2Steckdose` / `HumidSteckdose` | Von der Steckdose selbst zurückgemeldeter Zustand des CO2-/Befeuchter-Relais (0/1); leer = Steckdose offline. Weicht er von `CO2Ausgang`/`HumidAusgang` (Wunsch der Regelung) ab, kommt der Schaltbefehl nicht an |
+| `WLAN_dBm` / `WLAN_Abbrueche` | WLAN-Signalstärke (leer ohne Verbindung) und Zahl der WLAN-Abbrüche seit der vorigen Zeile |
+| `EspNow_online` | ESP-NOW-Nodes online / gekoppelt, z. B. `2/3` |
+| `HeapMin_kB` | Kleinster freier Arbeitsspeicher seit dem Start |
 
 > **Automatische Migration:** Trifft die Firmware beim Schreiben auf eine bereits vorhandene Tagesdatei mit dem alten, kürzeren Spaltenformat (vor dieser Erweiterung), wird diese zu `_alt.csv` umbenannt (Daten bleiben erhalten) und eine neue Datei mit vollständigem Header begonnen — kein Vermischen unterschiedlicher Spaltenzahlen in einer Datei.
 
@@ -641,7 +698,7 @@ Im RS485-Modus entfällt der ESP-NOW-Versand — dieselben Werte liegen stattdes
 
 Allgemeine, manuell bzw. per API gesteuerte Relaisknoten — Verwendung u. a. als Ziel-Node der [CO2-Steuerung](#co2-steuerung), für Pumpen, Lüfter und sonstige Verbraucher. Befehle kommen vom Master auf Anfrage (nicht zyklisch).
 
-> **Licht-SSR-Modus ungenutzt:** Die Firmware bietet beim Erststart weiterhin einen zweiten Node-Typ `NODE_TYPE_LIGHT_SSR (0x05)` für automatische Beleuchtungssteuerung an. Diese Funktion wurde durch den dedizierten RS485-Knoten [Lichtx4](#lichtx4) abgelöst — im aktuellen Deployment laufen alle Steckdosen-Nodes als reguläre Steckdose.
+> **Kein Licht-SSR-Modus mehr:** Der frühere zweite Node-Typ `NODE_TYPE_LIGHT_SSR (0x05)` ist aus der Firmware entfernt — Lichtsteuerung macht der RS485-Knoten [Lichtx4](#lichtx4). Ein Steckdosen-Node meldet sich immer als `NODE_TYPE_SOCKET (0x03)`, auch wenn im NVS noch ein alter Typ gespeichert ist.
 
 #### Relay-Befehl
 
@@ -655,22 +712,18 @@ payload[1] = 0b00000101  // = 0x05
 
 ### Erststart & Konfiguration
 
-#### Steckdosen — Node-Typ und ID
+#### Steckdosen — Node-ID
 
 Beim allerersten Start (NVS-Namespace `"nodecfg"` leer) erscheint im Serial-Monitor:
 
 ```
 === ERSTSTART: Node-Konfiguration ===
-Typ waehlen (60s Timeout):
-  1 = Steckdose  (allgemeine Steuerung)
-  2 = Licht-SSR  (Sonnenauf/-untergang via Scheduler)
-> 1
-Node-ID eingeben (1-254) + Enter:
+Node-ID eingeben (1-254) + Enter (60s Timeout, sonst 3):
 > 10
-[NODE] Gespeichert: Typ=Steckdose  ID=0x0A
+[NODE] Gespeichert: Steckdose  ID=0x0A
 ```
 
-Gespeichert in NVS `"nodecfg"`: Keys `type` (uint8) und `id` (uint8). Mit `NODECLEAR` löschen → Dialog erscheint beim nächsten Boot. Option 2 (Licht-SSR) ist ein Legacy-Modus — siehe Hinweis unter [Node: Steckdosen](#steckdosen).
+Gespeichert in NVS `"nodecfg"`: Key `id` (uint8). Mit `NODECLEAR` löschen → Dialog erscheint beim nächsten Boot.
 
 #### WiFi-Kanal / Kein-WLAN-Modus (alle Nodes)
 
@@ -692,7 +745,7 @@ Nummer (0-3) + Enter (60s Timeout):
 
 #### 60-Sekunden-Timeout
 
-Wenn bei allen Setup-Dialogen (Typ-Auswahl, Node-ID, Kanal) innerhalb von 60 Sekunden keine Eingabe erfolgt, wird ein Standardwert verwendet: Steckdose / ID=3 / Kanal 6.
+Wenn bei allen Setup-Dialogen (Node-ID, Kanal) innerhalb von 60 Sekunden keine Eingabe erfolgt, wird ein Standardwert verwendet: ID=3 / Kanal 6.
 
 ---
 
@@ -707,8 +760,9 @@ Baudrate **115200** · Zeilenende **LF** oder **CR+LF**
 | `STATUS` | Aktuelle Relais-Bitmaske und Einzelstatus R1–R4 |
 | `MASK <0–15>` | Alle Relais per Dezimalwert setzen (z. B. `MASK 5` → R1+R3 ein) |
 | `R<1–4> <0\|1>` | Einzelrelais schalten (z. B. `R2 1`) |
-| `NODEINFO` | Gespeicherten Node-Typ und Node-ID anzeigen |
-| `NODECLEAR` | Node-Typ und ID löschen → Erststart-Dialog beim nächsten Neustart |
+| `NODEINFO` | Node-ID und Kopplungsstatus anzeigen |
+| `NODECLEAR` | Node-ID löschen → Erststart-Dialog beim nächsten Neustart |
+| `UNPAIR` | Kopplung mit dem Master lösen (wie BOOT-Taster 3 s) |
 | `WIFIINFO` | Gespeicherte SSID und Kanal anzeigen |
 | `WIFICLEAR` | WiFi-Konfiguration löschen → Kanal-Scan beim nächsten Neustart |
 
@@ -780,7 +834,9 @@ Aeroponik Master (ESP32-S3 N16R8)
       └─ Sockets                 NODE_TYPE_SOCKET · 0x03   4× relay, manual/API (incl. CO2 output)
 ```
 
-The RS485 devices are hard-wired and polled cyclically — see [RS485 Bus](#rs485-bus-1). ESP-NOW nodes, by contrast, register with the master on startup and send periodic heartbeats; the master detects their online/offline status automatically.
+The RS485 devices are hard-wired and polled cyclically — see [RS485 Bus](#rs485-bus-1). ESP-NOW nodes are paired to the master (see [Fixed Pairing](#fixed-pairing-node--controller)), register on startup and send periodic heartbeats; the master detects their online/offline status automatically.
+
+**WiFi watchdog:** if the WiFi connection drops and the ESP32 does not restore it by itself within 30 s, the master reconnects once; if that does not work within 60 s, it restarts. Without WiFi, ESP-NOW is down as well (same radio, sockets no longer switch). This is reported (alert *Connection loss*) after reconnecting or after the restart, with duration and reason code.
 
 LAN (W5500 via SPI2) and WiFi run simultaneously. The web interface on port 80 is reachable on both interfaces with no code changes.
 
@@ -822,6 +878,16 @@ typedef struct {
 | `MSG_COMMAND` | `0x20` | Master → node | Control command |
 | `MSG_OTA_START` | `0x40` | Master → node | OTA update (AP password in payload[0..7]) |
 | `MSG_OTA_ACK` | `0x41` | Node → master | OTA is starting |
+| `MSG_UNPAIR` | `0x50` | Master → node | Release pairing, node forgets its master |
+
+#### Fixed Pairing Node ↔ Controller
+
+So that two controllers within radio range do not take each other's nodes, nodes are paired to one master:
+
+- **Node:** stores the MAC of the master that sends it the first `MSG_REGISTER_ACK` in NVS (`espnow_pair`/`master`) and from then on only accepts packets from that MAC. While unpaired it accepts nothing but a `REGISTER_ACK` — switching commands from a foreign master are never executed.
+- **Master:** keeps a pairing list in NVS (`espnow_pair`/`nodes`) and only answers nodes on it. Unknown nodes appear in the web interface (System → Node Control) under *Newly found* and are only accepted via **Pair**. If the node ID is already used by another node, pairing is blocked (change the ID on the node with `NODECLEAR`).
+- **Unpairing:** in the web interface on the node card (master sends `MSG_UNPAIR`) or on the node itself by **holding the BOOT button for 3 s while running** or the serial command `UNPAIR`. The node then pairs with the first controller that has it on its list or where *Pair* is pressed — so before moving it to another controller, also unpair it on the old one.
+- There is no automatic pairing — even after updating to a master firmware with pairing, each existing node has to be accepted once via *Pair*.
 
 #### Command Subtypes (MSG_COMMAND · payload[0])
 
@@ -903,6 +969,10 @@ The four solenoid valves, the main pump, and the circulation pump are direct GPI
 
 The main pump (`PUMPE_GPIO`) switches on automatically whenever any reservoir is actively watering (valve open) — regardless of whether the normal or batch timing mode is active (see [Valve Control](#features)).
 
+**Pressure build-up:** Before every spray cycle the pump runs for a configurable time (default 5 s, 0 = off) with the nozzle valve still closed; only then does the valve open. Sequence per reservoir: pause → [pre-flush via MV4] → pressure build-up → active. Without it, every cycle sprayed at a still-rising pressure — volume and flow pulses varied noticeably. Also applies in batch mode before each individual reservoir (the pump keeps running in between) and to the manual single cycle. Requirement: the pump must be allowed to run briefly against closed valves (system under pressure / pressure switch).
+
+**Refill (Nachlauf):** After the nozzle valve closes, the pump keeps running for the same time again (state "Nachlauf"). Intended for a pressure accumulator between flow meter and valves: it bridges the pressure drop when a valve opens (the restrictor nozzle in the flow meter cannot supply fast enough) and is refilled during this phase. Flow measurement counts from valve opening until the end of the refill, so water sprayed from the accumulator is attributed to the right reservoir; only the valve-open time counts as duration. In batch mode the next reservoir opens directly after the previous one's refill (no separate build-up any more, only before the first reservoir). Without an accumulator practically nothing flows during the refill, so readings stay the same. The manual single cycle has no refill phase.
+
 The circulation pump (`UMWAELZPUMPE_GPIO`, reservoir recirculation) runs a configurable run/pause cycle (`laufzeit_s` / `pausenzeit_min`) whenever any reservoir is enabled at all — regardless of whether that reservoir is currently watering or just pausing between cycles. If no reservoir is enabled, it stays off.
 
 ### Features
@@ -960,7 +1030,7 @@ Three independently enabled channels — CallMeBot tends to be unreliable at tim
 | Humidity | Tent humidity (RS485 multisensor) outside `feuchte_min`/`feuchte_max` |
 | Temperature | Tent temperature (RS485 multisensor) outside `temperatur_min`/`temperatur_max` |
 | Reservoir nearly empty | Reservoir fill level below `tank_min_prozent` |
-| Tent fan RPM | Actual RPM deviates from the expected value, see [Lueftermodul](#lueftermodul-1) |
+| Tent fan RPM | Actual RPM deviates from the expected value for at least 3 minutes in a row (spin-up/module restart do not trigger an alarm), see [Lueftermodul](#lueftermodul-1) |
 | Nozzle flow | Target/actual deviation per reservoir, see [Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring) |
 
 Each channel has its own rate limit (30 s) against accidental spamming; a dedicated test button per channel in the configuration verifies its credentials independently of the others.
@@ -1102,15 +1172,15 @@ MARS Hydro (RS485). Factory-built fan controller board, RS485 address `6`, origi
 | Mode | Source | Behavior |
 |---|---|---|
 | Manual | — | Fixed power (%) |
-| Auto — humidity | Tent humidity (RS485 multisensor) | Linear ramp between `hum_min` (minimum speed) and `hum_max` (100 %) |
+| Auto — humidity | Tent humidity (RS485 multisensor) | Linear ramp between `hum_min` (minimum speed) and `hum_max` (maximum speed) |
 | Auto — temperature, absolute | Tent temperature | Ramp between `temp_min`/`temp_max`; optional **differential cap**: if the tent−room difference is below `temp_cap_diff`, only the minimum speed is driven regardless of the ramp (prevents full blast when the room is nearly as warm as the tent) |
 | Auto — temperature, differential | Tent temperature − room temperature | Ramp directly over the temperature differential between `temp_min`/`temp_max` |
 
-A shared minimum speed (`min_speed`) applies to both auto modes. The differential modes require the [room climate sensor](#room-climate--vpd); if it is unavailable, the last target power remains unchanged.
+A shared minimum and maximum speed (`min_speed`, `max_speed`, default 100 %) applies to both auto modes. At 0 % the MARS fan's enable register (reg15) is also set to 0, otherwise it keeps running at base speed. The differential modes require the [room climate sensor](#room-climate--vpd); if it is unavailable, the last target power remains unchanged.
 
 #### Configuration (EEPROM, Magic 0x92)
 
-`mode` · `manual_percent` · `min_speed` · `hum_min/max` · `temp_min/max` · `temp_mode` (absolute/differential) · `temp_cap_diff` · `enabled`
+`mode` · `manual_percent` · `min_speed` · `max_speed` (separate EEPROM block, magic 0x6B) · `hum_min/max` · `temp_min/max` · `temp_mode` (absolute/differential) · `temp_cap_diff` · `enabled`
 
 ### Lueftermodul
 
@@ -1145,7 +1215,10 @@ The master compares the reported actual RPM against an expected RPM derived from
 
 Standalone firmware (`Multimodul`) on the same RP2040-Zero base as the [Lueftermodul](#lueftermodul-1) — identical pinout, plus a second I2C bus (I2C1, SDA=GPIO10/SCL=GPIO11) for optional add-on hardware:
 
-- **SCD41 + AS7341** (I2C `0x62` / `0x39`) — the same sensors as in the [Multisensor](#multisensor-2) node. When present, the board additionally answers RS485 address `0x20` with the same 14-register layout as the [RS485 multisensor](#rs485-multisensor-tent).
+- **SCD41 + AS7341** (I2C `0x62` / `0x39`) — the same sensors as in the [Multisensor](#multisensor-2) node. When at least one of them is present, the board additionally answers RS485 address `0x20` with the same 14-register layout as the [RS485 multisensor](#rs485-multisensor-tent). Without SCD41, the AS7341 runs on its own on a 10 s cycle.
+- **AHT21 + ENS160** (I2C `0x38` / `0x53` or `0x52`, e.g. DFRobot combo module SEN0515) — replacement for the SCD41, only used if no SCD41 is found. Temperature/humidity from the AHT21, CO₂ as the ENS160's **eCO₂ estimate** (derived from volatile organic compounds, not a real NDIR CO₂ reading — only of limited use for CO₂ control). During the ENS160 warm-up (up to about 1 h after its first start) the CO₂ value is treated as invalid.
+
+**Status register `0x20`/13** (evaluated by the master): bit0 = temperature/humidity valid (SCD41 or AHT21), bit1 = AS7341 ok, bit2 = CO₂ invalid (no ENS160 or warm-up), bit3 = CO₂ is only an estimate (ENS160). With invalid values the master skips CO₂/humidity control, fan automation and the CSV columns; an eCO₂ value is shown on the home page with a leading `~`.
 - **GP8403** (I2C `0x58`, 2-channel 0–10V DAC) — when present, the board additionally answers RS485 address `0x50` with the same 2-register layout as the [analog output module](#analog-output-module).
 
 On boot, the firmware scans the I2C bus; only devices actually found are initialized and have their RS485 address activated. If a device is missing, its address simply stays unanswered on the bus — indistinguishable, from the master's point of view, from a separate Multisensor/analog module that was never installed. This means **no code change is needed on the master**: it already polls `0x20`, `0x50`, and `0x51` independently and already treats a missing response as "device offline".
@@ -1188,6 +1261,34 @@ For testing without the real hardware, the separate `ProtoRS485` project (ESP32-
 Under Configuration → Devices you choose which device actually drives the light and fan (Lichtx4/MARS Hydro or the analog module) — deliberately a setup-time decision, not a runtime switch. This has two effects: only the selected device receives control commands, and only devices actually present are polled on the RS485 bus at all (the multisensor is unaffected by this and is always polled).
 
 For the light output, the selection also changes the control characteristic: Lichtx4 keeps using the stepped relay ramp ([lighting scheduler](#lighting-scheduler)), while the analog module uses a stepless brightness ramp over the same time windows.
+
+#### 0–10V Output Connector Pinout — Note: PCB Layout Is Wrong
+
+The 0–10V outputs use the same connector type as the RS485 ports: RJ12 modular jack (6P6C, i.e. 6 positions, all 6 contacts fitted) and 6P6C modular plug. Their current pinout on the PCB, however, does **not** match the lamps (e.g. Mars Hydro FC-E1500):
+
+| Pin | Current PCB assignment | Wire |
+|---|---|---|
+| 3 | GND (DAC ground) | red |
+| 4 | 0–10 V signal (wiper, GP8403 output) | green |
+
+Required instead:
+
+| Pin | Signal |
+|---|---|
+| 3 + 4 | GND |
+| 2 + 5 | 0–10 V |
+
+Until the PCB is corrected, an **adapter cable** has to be made. Nothing changes in the software.
+
+> **Pinout not guaranteed:** this assignment is only a de facto standard and is not the same on every device. Before connecting a new lamp or fan model, check its pinout (datasheet or measure it).
+
+#### Lamp Response Curve (PPFD)
+
+Climate → **Lamp Response Curve (PPFD)** measures how linearly a lamp on the 0–10V light output (analog module or GP8403) responds to the control voltage. The master sets the output to 0, 5, 10, … 100 % in turn (21 steps), waits 10 s per step (one AS7341 measurement cycle, so no reading from before the switch counts), then polls the multisensor (`0x20`) every 5 s instead of every 15 s and moves on as soon as 3 consecutive readings lie within 1 % (at least 0.5 µmol/m²/s) — their mean is the step's value. If a step does not become stable within 90 s, the mean of the last readings is used. About 8–10 min in total. The schedule is overridden meanwhile and takes over again afterwards.
+
+Result: table and chart with PPFD per step, relative to 100 % (the 0 % value is subtracted as residual light) and the deviation from an ideal straight line. The last complete measurement is stored in NVS (`lichtkal`) and shown when the page is opened.
+
+**Apply response curve** (switch, off by default): the schedule ramp and the manual slider then no longer set the control voltage directly but the desired share of full PPFD. The master converts it into the matching control voltage using the stored measurement (linear interpolation between the 5 % steps, measurement noise smoothed to be monotonic). 0 % stays off; values below the lowest step at which the lamp lights up give that step (the lamp does not dim any further); 100 % becomes the first step from which the lamp no longer gets brighter. Example test lamp (2026-11-06): lights up from 5 % control voltage at 11 % light, full from about 92 %, linear in between with a +5 percentage point offset → 50 % light = 45 % control voltage, 100 % = 95 %. Measure again after changing the lamp. Aborts if the light output is not a 0–10V output or if no valid PPFD reading at all arrives within 90 s of a step.
 
 ### CO2 Control
 
@@ -1297,12 +1398,22 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5
 | `RaumTemp_C`, `RaumFeuchte_%` | AHT21B (room climate) |
 | `ZeltTemp_C`, `ZeltFeuchte_%`, `ZeltCO2_ppm` | RS485 multisensor |
 | `ZeltVPD_kPa` | Calculated |
+| `ZeltPPFD_umol` | RS485 multisensor (AS7341), µmol/m²/s — empty if the light sensor is not ok |
 | `LichtMaske` | Lichtx4 relay bitmask |
 | `LuefterLeistung_%`, `LuefterRPM` | Exhaust fan |
 | `CO2Ausgang` | CO2 control relay state (0/1) |
 | `HumidAusgang` | Humidity control relay state (0/1) |
-| `FlowBehaelter1_ml` … `FlowBehaelter3_ml` | Nozzle monitoring — total per reservoir since restart |
-| `FlowGesamt_ml` | Nozzle monitoring — total of all reservoirs since restart |
+| `ImpulseBehaelter1` … `3` | Flow meter pulses of the last spray cycle per reservoir (raw, independent of calibration) — at equal duration a direct measure of nozzle throughput |
+| `DauerBehaelter1_s` … `3` | Duration of that spray cycle (light/dark phase may differ) |
+| `Laufzeit_min` | Minutes since the master's last restart — if the value drops, a restart occurred |
+| `NeustartGrund` | Reason of the last restart (power-on, software, watchdog, brownout, …) |
+| `Lichtx4Starts` | Lichtx4 boot counter (Lichtx4 FW 1.2.0 or later, otherwise empty) — if it increases, the module restarted and all lamps were briefly off |
+| `Lichtx4Grund` | Reason of the last Lichtx4 restart |
+| `Netzaussetzer` / `NetzaussetzerMax_ms` | Number and longest duration of short mains dropouts since the previous row (UPS takes over, the LED drivers briefly switch off) |
+| `CO2Steckdose` / `HumidSteckdose` | State of the CO2/humidifier relay as reported back by the socket itself (0/1); empty = socket offline. If it differs from `CO2Ausgang`/`HumidAusgang` (what the control wants), the switching command is not getting through |
+| `WLAN_dBm` / `WLAN_Abbrueche` | WiFi signal strength (empty without connection) and number of WiFi disconnects since the previous row |
+| `EspNow_online` | ESP-NOW nodes online / paired, e.g. `2/3` |
+| `HeapMin_kB` | Lowest free memory since startup |
 
 > **Automatic migration:** If the firmware encounters an existing daily file with the old, shorter column format (prior to this extension) when writing, it renames it to `_alt.csv` (data is preserved) and starts a new file with the full header — no mixing of different column counts within one file.
 
@@ -1358,7 +1469,7 @@ In RS485 mode, ESP-NOW transmission is skipped — the same values instead sit i
 
 General-purpose relay nodes, controlled manually or via API — used e.g. as the target node for [CO2 control](#co2-control), for pumps, fans, and other loads. Commands come from the master on demand (not cyclic).
 
-> **Light-SSR mode unused:** The firmware still offers a second node type `NODE_TYPE_LIGHT_SSR (0x05)` for automatic lighting control at first boot. This function has been replaced by the dedicated RS485 node [Lichtx4](#lichtx4-1) — in the current deployment, all socket nodes run as regular sockets.
+> **No light-SSR mode any more:** the former second node type `NODE_TYPE_LIGHT_SSR (0x05)` has been removed from the firmware — lighting is handled by the RS485 node [Lichtx4](#lichtx4-1). A socket node always announces itself as `NODE_TYPE_SOCKET (0x03)`, even if an old type is still stored in NVS.
 
 #### Relay Command
 
@@ -1372,22 +1483,18 @@ payload[1] = 0b00000101  // = 0x05
 
 ### First Boot & Configuration
 
-#### Sockets — Node Type and ID
+#### Sockets — Node ID
 
 On the very first boot (NVS namespace `"nodecfg"` empty), the serial monitor shows:
 
 ```
-=== FIRST BOOT: Node configuration ===
-Select type (60s timeout):
-  1 = Socket  (general control)
-  2 = Light-SSR  (sunrise/sunset via scheduler)
-> 1
-Enter node ID (1-254) + Enter:
+=== ERSTSTART: Node-Konfiguration ===
+Node-ID eingeben (1-254) + Enter (60s Timeout, sonst 3):
 > 10
-[NODE] Saved: Type=Socket  ID=0x0A
+[NODE] Gespeichert: Steckdose  ID=0x0A
 ```
 
-Stored in NVS `"nodecfg"`: keys `type` (uint8) and `id` (uint8). Clear with `NODECLEAR` → dialog reappears on next boot. Option 2 (light-SSR) is a legacy mode — see the note under [Node: Sockets](#sockets).
+Stored in NVS `"nodecfg"`: key `id` (uint8). Clear with `NODECLEAR` → dialog reappears on next boot.
 
 #### WiFi Channel / No-WiFi Mode (all nodes)
 
@@ -1409,7 +1516,7 @@ Number (0-3) + Enter (60s timeout):
 
 #### 60-Second Timeout
 
-If no input is given within 60 seconds at any setup dialog (type selection, node ID, channel), a default value is used: socket / ID=3 / channel 6.
+If no input is given within 60 seconds at any setup dialog (node ID, channel), a default value is used: ID=3 / channel 6.
 
 ---
 
@@ -1424,8 +1531,9 @@ Baud rate **115200** · line ending **LF** or **CR+LF**
 | `STATUS` | Current relay bitmask and individual status R1–R4 |
 | `MASK <0–15>` | Set all relays via decimal value (e.g. `MASK 5` → R1+R3 on) |
 | `R<1–4> <0\|1>` | Switch a single relay (e.g. `R2 1`) |
-| `NODEINFO` | Show stored node type and node ID |
-| `NODECLEAR` | Clear node type and ID → first-boot dialog on next restart |
+| `NODEINFO` | Show node ID and pairing status |
+| `NODECLEAR` | Clear node ID → first-boot dialog on next restart |
+| `UNPAIR` | Release pairing with the master (same as BOOT button 3 s) |
 | `WIFIINFO` | Show stored SSID and channel |
 | `WIFICLEAR` | Clear WiFi configuration → channel scan on next restart |
 

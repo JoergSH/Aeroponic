@@ -7,6 +7,8 @@
 #include "gp8403.h"
 #include "sensors/sensor_manager.h"
 #include "sensors/scd41_handler.h"
+#include <Adafruit_AHTX0.h>
+#include <DFRobot_ENS160.h>
 
 // Multimodul (RP2040-Zero): Basis ist das Lueftermodul (4x PWM-Luefter + Tacho, Modbus-RTU
 // Adresse 0x51) -- zusaetzlich haengt an I2C1 (SDA=10/SCL=11) optionale Peripherie: SCD41
@@ -28,6 +30,14 @@ static uint32_t lastWriteMs = 0;
 static bool scd41Present  = false;
 static bool as7341Present = false;
 static bool gp8403Present = false;
+
+// Alternative Klima-Quelle ohne SCD41: AHT21 (Temp/Feuchte) + optional ENS160 (eCO2, z. B.
+// DFRobot-Kombimodul SEN0515). Nur genutzt, wenn KEIN SCD41 gefunden wird.
+#define AHT_READ_INTERVAL_MS 5000UL
+static Adafruit_AHTX0      aht;
+static DFRobot_ENS160_I2C* ens160 = nullptr;   // Adresse erst nach dem Scan bekannt
+static bool ahtPresent    = false;
+static bool ens160Present = false;
 
 static void tacho0_isr() { tachoPulses[0]++; }
 static void tacho1_isr() { tachoPulses[1]++; }
@@ -77,11 +87,14 @@ static bool i2cProbe(uint8_t addr) {
 // laengst fertige, gueltige SCD41-Messung (CO2/Temp/Feuchte) nicht mehr zurueckhalten -- sonst
 // sieht der Master dauerhaft Feuchte=0% und laesst z.B. die Feuchteregelung durchlaufen,
 // obwohl SCD41 die ganze Zeit korrekte Werte geliefert hat.
-static bool knownScd41Ok   = false;
+static bool knownScd41Ok   = false;   // Klima (Temp/Feuchte) gueltig -- SCD41 oder AHT21
 static bool knownAs7341Ok  = false;
+static bool knownCo2Invalid  = false; // kein CO2-Wert (AHT21 ohne ENS160, ENS160 waermt auf)
+static bool knownCo2Estimate = false; // CO2 ist ENS160-eCO2 (Schaetzwert), nicht SCD41
 
 static void writeMs2Status() {
-    rs485_slave_update_ms2(RS485_MS2_REG_STATUS, (knownScd41Ok ? 0x01 : 0) | (knownAs7341Ok ? 0x02 : 0));
+    rs485_slave_update_ms2(RS485_MS2_REG_STATUS, (knownScd41Ok ? 0x01 : 0) | (knownAs7341Ok ? 0x02 : 0) |
+                                                 (knownCo2Invalid ? 0x04 : 0) | (knownCo2Estimate ? 0x08 : 0));
 }
 
 static void updateMs2RegsScd41(int16_t temp_cdeg, uint16_t hum_cpct, uint16_t co2_ppm, bool scd41Ok) {
@@ -90,6 +103,35 @@ static void updateMs2RegsScd41(int16_t temp_cdeg, uint16_t hum_cpct, uint16_t co
     rs485_slave_update_ms2(RS485_MS2_REG_HUMI, (hum_cpct + 5) / 10);
     knownScd41Ok = scd41Ok;
     writeMs2Status();
+}
+
+// AHT21 (+ENS160) statt SCD41: gleiche Register, CO2 als eCO2 bzw. ungueltig markiert.
+static void readAhtEns160() {
+    sensors_event_t humEvt, tempEvt;
+    bool ok = aht.getEvent(&humEvt, &tempEvt) && !isnan(tempEvt.temperature) && !isnan(humEvt.relative_humidity);
+    if (!ok) {
+        Serial.println("[AHT21] Lesefehler");
+        knownScd41Ok = false;
+        writeMs2Status();
+        return;
+    }
+    float t = tempEvt.temperature, h = humEvt.relative_humidity;
+    uint16_t co2 = 0;
+    bool co2Ok = false;
+    if (ens160Present) {
+        ens160->setTempAndHum(t, h);   // Kompensation braucht aktuelle Werte
+        uint8_t st = ens160->getENS160Status();   // 0 = normal, 1 = Aufwaermen, 2 = Erststart
+        co2   = ens160->getECO2();
+        co2Ok = (st == 0);
+        // printf ohne Float-Unterstuetzung (wie in as7341_handler.cpp) -> Zahlen als String
+        Serial.printf("[AHT21] %s C %s %%  [ENS160] %u ppm eCO2%s\n", String(t, 1).c_str(), String(h, 1).c_str(), co2,
+                      st == 0 ? "" : (st == 1 ? " (waermt auf)" : " (Erststart, bis 1 h)"));
+    } else {
+        Serial.printf("[AHT21] %s C %s %%\n", String(t, 1).c_str(), String(h, 1).c_str());
+    }
+    knownCo2Invalid  = !co2Ok;
+    knownCo2Estimate = ens160Present;
+    updateMs2RegsScd41((int16_t)roundf(t * 100), (uint16_t)roundf(h * 100), co2Ok ? co2 : 0, true);
 }
 
 static void updateMs2RegsAs7341(const sensor_data_t& d, bool as7341Ok) {
@@ -175,23 +217,52 @@ void setup() {
     scd41Present  = i2cProbe(I2C_ADDR_SCD41);
     as7341Present = i2cProbe(I2C_ADDR_AS7341);
     gp8403Present = i2cProbe(I2C_ADDR_GP8403);
-    Serial.printf("[I2C] SCD41=%s AS7341=%s GP8403=%s\n",
+    uint8_t ensAddr = i2cProbe(I2C_ADDR_ENS160) ? I2C_ADDR_ENS160
+                    : i2cProbe(I2C_ADDR_ENS160_ALT) ? I2C_ADDR_ENS160_ALT : 0;
+    // AHT21/ENS160 nur als Ersatz, wenn kein SCD41 da ist
+    ahtPresent    = !scd41Present && i2cProbe(I2C_ADDR_AHT21);
+    Serial.printf("[I2C] SCD41=%s AHT21=%s ENS160=%s AS7341=%s GP8403=%s\n",
                   scd41Present  ? "gefunden" : "fehlt",
+                  i2cProbe(I2C_ADDR_AHT21) ? (scd41Present ? "gefunden (ungenutzt, SCD41 hat Vorrang)" : "gefunden") : "fehlt",
+                  ensAddr ? (ensAddr == I2C_ADDR_ENS160 ? "gefunden (0x53)" : "gefunden (0x52)") : "fehlt",
                   as7341Present ? "gefunden" : "fehlt",
                   gp8403Present ? "gefunden" : "fehlt");
 
-    if (scd41Present) {
-        sensor_manager_init(I2C_SDA, I2C_SCL);
+    if (ahtPresent) {
+        ahtPresent = aht.begin(&Wire1);
+        if (ahtPresent) {
+            // Adafruit_AHTX0 kalibriert mit 0xE1 (AHT10-Befehl), AHT20/21 erwarten 0xBE --
+            // sonst kann der Feuchtekanal falsche Werte liefern (wie beim Master, siehe dort)
+            Wire1.beginTransmission(I2C_ADDR_AHT21);
+            Wire1.write(0xBE); Wire1.write(0x08); Wire1.write(0x00);
+            Wire1.endTransmission();
+            uint32_t t0 = millis();
+            while ((aht.getStatus() & AHTX0_STATUS_BUSY) && millis() - t0 < 500) delay(10);
+        }
+        if (ahtPresent && ensAddr) {
+            ens160 = new DFRobot_ENS160_I2C(&Wire1, ensAddr);
+            ens160Present = (ens160->begin() == 0);   // setzt selbst den Standard-Messmodus
+        }
+        Serial.printf("[KLIMA] AHT21%s statt SCD41%s\n", ahtPresent ? "" : " (Init fehlgeschlagen)",
+                      ens160Present ? " + ENS160 (eCO2 = Schaetzwert, kein echtes CO2)" : ", ohne CO2");
+    }
+
+    // MS2-Adresse auch nur mit Lichtsensor bedienen -- welche Werte gueltig sind, sieht der
+    // Master an den Status-Bits (Bit0 Klima, Bit1 AS7341, Bit2/3 CO2).
+    bool ms2Present = scd41Present || ahtPresent || as7341Present;
+    if (scd41Present || as7341Present) {
+        sensor_manager_init(I2C_SDA, I2C_SCL, scd41Present);
     }
     if (gp8403Present) {
         gp8403_init();
         rs485_slave_set_analog_write_cb(onAnalogWrite);
     }
-    rs485_slave_set_ms2_active(scd41Present);
+    rs485_slave_set_ms2_active(ms2Present);
     rs485_slave_set_analog_active(gp8403Present);
 
     Serial.printf("[RS485] Adressen: 0x51 (Luefter, immer) 0x20 (MS2, %s) 0x50 (Analog, %s)\n",
-                  scd41Present ? "aktiv" : "inaktiv", gp8403Present ? "aktiv" : "inaktiv");
+                  ms2Present ? "aktiv" : "inaktiv",
+                  gp8403Present ? "aktiv" : "inaktiv");
 }
 
 void loop() {
@@ -219,7 +290,15 @@ void loop() {
                       fanPercent[2], rpm[2], fanPercent[3], rpm[3]);
     }
 
-    if (scd41Present) {
+    if (ahtPresent) {
+        static uint32_t lastAht = 0;
+        if (lastAht == 0 || now - lastAht >= AHT_READ_INTERVAL_MS) {
+            lastAht = now;
+            readAhtEns160();
+        }
+    }
+
+    if (scd41Present || as7341Present) {
         sensor_manager_loop();
         if (sensor_manager_scd41_ready()) {
             int16_t  t; uint16_t h, co2;

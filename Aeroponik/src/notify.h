@@ -74,7 +74,13 @@ void sendEmailSmtp(const String& message);
 // Zentraler Einstiegspunkt fuer alle Alarme (siehe loopNotify() in main.cpp): schickt die
 // Nachricht ueber alle aktuell aktivierten Kanaele (WhatsApp/Telegram/E-Mail). Jeder Kanal
 // wird unabhaengig versucht -- faellt einer aus (z.B. CallMeBot down), gehen die anderen
-// trotzdem raus.
+// trotzdem raus. Die Nachricht wird nur eingereiht und von einem eigenen Task verschickt, sobald
+// WLAN verbunden ist (blockiert loop() nie, geht bei einem WLAN-Ausfall nicht verloren).
 void sendNotification(const String& message);
+// Testnachricht nur ueber einen Kanal (Test-Buttons im Webinterface), ebenfalls ueber den Task
+void notifyTestWhatsApp(const String& message);
+void notifyTestTelegram(const String& message);
+void notifyTestEmail(const String& message);
+void notify_begin();   // einmal in setup(): Warteschlange + Sende-Task anlegen
 
 #endif

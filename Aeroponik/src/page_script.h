@@ -37,6 +37,8 @@ R"rawliteral(
                 connectionError: 'Verbindungsfehler',
                 zustandPause: 'Pause',
                 zustandVorlauf: 'Vorlauf',
+                zustandDruckaufbau: 'Druckaufbau',
+                zustandNachlauf: 'Nachlauf',
                 zustandAktiv: 'Aktiv',
                 behaelter: 'Behälter',
                 timerLabel: 'Timer',
@@ -59,6 +61,23 @@ R"rawliteral(
                 phaseDunkel: 'Dunkelphase',
                 noCo2Value: 'Kein CO2-Wert',
                 noHumidValue: 'Kein Feuchte-Wert',
+                socketOffline: 'Steckdose offline!',
+                lkRunning: (pct, phase, rest) => 'Läuft: Stufe ' + pct + ' % (' + (phase === 'settle' ? 'einschwingen' : 'messen') + '), noch ca. ' + Math.ceil(rest / 60) + ' min',
+                lkDone: 'Fertig.',
+                lkSavedFrom: ts => 'Gespeicherte Messung vom ' + ts,
+                lkNoData: 'Noch keine Messung vorhanden.',
+                lkStep: 'Stufe',
+                lkRel: 'relativ',
+                lkIdeal: 'ideal',
+                lkDev: 'Abweichung',
+                lkMaxDev: d => 'Größte Abweichung von einer linearen Kennlinie: ' + d + ' Prozentpunkte',
+                lkConfirm: 'Lampen-Kennlinie messen? Der Lichtausgang wird ca. 8–10 min lang in 5-%-Schritten von 0 bis 100 % durchgefahren.',
+                espnowDiscoveredTitle: 'Neu gefunden (nicht gekoppelt)',
+                espnowDiscoveredHint: 'Diese Geräte haben sich gemeldet, werden aber ignoriert, bis sie gekoppelt sind. Ein Node, der zu einer anderen Steuerung gehört, erscheint hier nicht.',
+                pairBtn: 'Koppeln',
+                unpairBtn: 'Entkoppeln',
+                unpairConfirm: id => 'Node ' + id + ' entkoppeln? Er wird danach von dieser Steuerung ignoriert und kann an einer anderen gekoppelt werden.',
+                idConflict: 'ID schon vergeben',
                 fanModeManual: 'Manuell',
                 fanModeAutoHum: 'Automatik Feuchte',
                 fanModeAutoTemp: 'Automatik Temperatur',
@@ -76,6 +95,7 @@ R"rawliteral(
                 confirmRestart: 'Steuerung wirklich neu starten? Laufende Zyklen werden unterbrochen.',
                 debugCaptureRunning: (s) => 'Zeichnet auf … noch ' + s + ' s',
                 debugCaptureDone: 'Aufzeichnung fertig, siehe Dateiliste',
+                rs485LogActive: (f) => 'Schreibt in ' + f,
                 savedRestarting: 'Gespeichert, Master startet neu…',
                 notifyMs2Offline: 'RS485-Multisensor offline — Alarm greift nicht',
                 co2SensorMissing: 'CO2-Sensor nicht gefunden/defekt',
@@ -121,6 +141,8 @@ R"rawliteral(
                 connectionError: 'Connection error',
                 zustandPause: 'Pause',
                 zustandVorlauf: 'Pre-flush',
+                zustandDruckaufbau: 'Pressurizing',
+                zustandNachlauf: 'Refilling',
                 zustandAktiv: 'Active',
                 behaelter: 'Reservoir',
                 timerLabel: 'Timer',
@@ -143,6 +165,23 @@ R"rawliteral(
                 phaseDunkel: 'Dark phase',
                 noCo2Value: 'No CO2 value',
                 noHumidValue: 'No humidity value',
+                socketOffline: 'socket offline!',
+                lkRunning: (pct, phase, rest) => 'Running: step ' + pct + ' % (' + (phase === 'settle' ? 'settling' : 'measuring') + '), about ' + Math.ceil(rest / 60) + ' min left',
+                lkDone: 'Done.',
+                lkSavedFrom: ts => 'Saved measurement from ' + ts,
+                lkNoData: 'No measurement yet.',
+                lkStep: 'Step',
+                lkRel: 'relative',
+                lkIdeal: 'ideal',
+                lkDev: 'deviation',
+                lkMaxDev: d => 'Largest deviation from a linear curve: ' + d + ' percentage points',
+                lkConfirm: 'Measure the lamp response curve? The light output will be stepped from 0 to 100 % in 5 % steps for about 8–10 min.',
+                espnowDiscoveredTitle: 'Newly found (not paired)',
+                espnowDiscoveredHint: 'These devices have announced themselves but are ignored until paired. A node belonging to another controller does not appear here.',
+                pairBtn: 'Pair',
+                unpairBtn: 'Unpair',
+                unpairConfirm: id => 'Unpair node ' + id + '? This controller will ignore it afterwards and it can be paired with another one.',
+                idConflict: 'ID already in use',
                 fanModeManual: 'Manual',
                 fanModeAutoHum: 'Auto Humidity',
                 fanModeAutoTemp: 'Auto Temperature',
@@ -160,6 +199,7 @@ R"rawliteral(
                 confirmRestart: 'Really restart the controller? Running cycles will be interrupted.',
                 debugCaptureRunning: (s) => 'Recording… ' + s + ' s left',
                 debugCaptureDone: 'Capture done, see file list',
+                rs485LogActive: (f) => 'Writing to ' + f,
                 savedRestarting: 'Saved, master is restarting…',
                 notifyMs2Offline: 'RS485 multisensor offline — alert will not trigger',
                 co2SensorMissing: 'CO2 sensor missing/faulty',
@@ -211,7 +251,7 @@ R"rawliteral(
             updateData(); updateVentile(); updateNodes(); updateRs485();
             updateCo2Status(); updateHumidStatus(); updateFanStatus(); updateDwcStatus(); updateRaumlichtStatus(); updateGehaeuseFanStatus(); updateLueftmodulStatus();
             loadTankKonfig(); loadZeitplan(); loadCo2Config(); loadHumidConfig(); loadDwcConfig(); loadRaumlichtConfig(); loadGehaeuseFanConfig(); loadUmwaelzConfig(); loadDruckSensorConfigForm(); loadFanConfig(); loadLueftmodulConfig(); rs485OtaStartPolling();
-            loadWifiConfigForm(); loadLogFileList(); loadOutputConfig(); loadNotifyConfigForm();
+            loadWifiConfigForm(); loadLogFileList(); loadRs485LogState(); loadOutputConfig(); loadNotifyConfigForm();
             updateSchedPhase();
             updatePcfUi();
             updateFanModeVisibility();
@@ -225,6 +265,7 @@ R"rawliteral(
             if (tabName === 'system') {
                 loadWifiConfigForm();
                 loadLogFileList();
+                loadRs485LogState();
                 loadGehaeuseFanConfig();
             } else if (tabName === 'alarme') {
                 loadNotifyConfigForm();
@@ -394,11 +435,11 @@ R"rawliteral(
                     <span>${label}</span>
                     <span id="msw_badge_${key}" style="background:${online?'#28a745':'#dc3545'};color:white;padding:1px 8px;border-radius:8px;font-size:0.85em;">${online?'Online':'Offline'}</span>
                 </div>
-                <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;">
-                    <div><div class="sensor-value" style="font-size:1.1em;" id="msw_temp_${key}">${temp}</div><div class="sensor-unit">°C</div></div>
-                    <div><div class="sensor-value" style="font-size:1.1em;" id="msw_hum_${key}">${hum}</div><div class="sensor-unit">%</div></div>
-                    <div><div class="sensor-value" style="font-size:1.1em;" id="msw_vpd_${key}">${vpd}</div><div class="sensor-unit">kPa VPD</div></div>
-                    <div><div class="sensor-value" style="font-size:1.1em;" id="msw_co2_${key}">${co2}</div><div class="sensor-unit">ppm</div></div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+                    <div><div class="sensor-value" style="font-size:1.6em;" id="msw_temp_${key}">${temp}</div><div class="sensor-unit">°C</div></div>
+                    <div><div class="sensor-value" style="font-size:1.6em;" id="msw_hum_${key}">${hum}</div><div class="sensor-unit">% <span class="de">Feuchte</span><span class="en">Humidity</span></div></div>
+                    <div><div class="sensor-value" style="font-size:1.6em;" id="msw_vpd_${key}">${vpd}</div><div class="sensor-unit">kPa VPD</div></div>
+                    <div><div class="sensor-value" style="font-size:1.6em;" id="msw_co2_${key}">${co2}</div><div class="sensor-unit">ppm CO₂</div></div>
                 </div>
                 <div id="msw_warn_${key}" style="display:${warn?'block':'none'};margin-top:6px;font-size:0.75em;color:#dc3545;">⚠ ${warn||''}</div>
             </div>`;
@@ -473,7 +514,9 @@ R"rawliteral(
                 <input type="file" id="fw_${n.id}" accept=".bin" style="display:none" onchange="handleFwFile(${n.id},this)">
                 <button onclick="document.getElementById('fw_${n.id}').click()"
                     style="background:#6c3483;color:white;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:0.82em;">Flash</button>
-                <span id="ota_status_${n.id}" style="font-size:0.79em;color:#888;"></span>
+                <span id="ota_status_${n.id}" style="font-size:0.79em;color:#888;flex:1;"></span>
+                <button onclick="espnowUnpair(${n.id})"
+                    style="background:#6c757d;color:white;border:none;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:0.82em;">${t('unpairBtn')}</button>
             </div>`;
             h += `</div>`;
             return h;
@@ -578,7 +621,46 @@ R"rawliteral(
                 updateDwcNodeOptions((d.nodes || []).filter(n => n.type === 3));
                 updateRaumlichtNodeOptions((d.nodes || []).filter(n => n.type === 3));
                 updateEspnowBadges(d.nodes || []);
+                renderEspnowDiscovered(d.discovered || []);
             }).catch(() => {});
+        }
+
+        // Nicht gekoppelte Nodes, die sich gemeldet haben (siehe espnow_pair() im Master)
+        function renderEspnowDiscovered(list) {
+            const box = document.getElementById('espnowDiscoveredBox');
+            if (!box) return;
+            if (!list.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+            let h = `<div style="font-weight:bold;margin-bottom:4px;">🆕 ${t('espnowDiscoveredTitle')}</div>
+                <div style="font-size:0.78em;color:#888;margin-bottom:8px;">${t('espnowDiscoveredHint')}</div>`;
+            for (const n of list) {
+                const typName = nodeTypeName(n.type) || (t('unknown') + ' (0x' + n.type.toString(16) + ')');
+                h += `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #eee;font-size:0.88em;">
+                    <span><strong>Node ${n.id}</strong> · ${typName} · <code>${n.mac}</code>${n.id_conflict ? ' · <span style="color:#dc3545;">' + t('idConflict') + '</span>' : ''}</span>
+                    <button onclick="espnowPair('${n.mac}')" ${n.id_conflict ? 'disabled' : ''}
+                        style="background:#27ae60;color:white;border:none;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:0.9em;">${t('pairBtn')}</button>
+                </div>`;
+            }
+            box.innerHTML = h;
+            box.style.display = 'block';
+        }
+
+        function espnowPair(mac) {
+            fetch('/api/espnow/pair', { method: 'POST', headers: {'Content-Type':'application/json'},
+                                        body: JSON.stringify({ mac: mac }) })
+                .then(r => r.json()).then(d => {
+                    if (!d.success) alert(d.error || t('error'));
+                    setTimeout(updateNodes, 600);
+                }).catch(() => alert(t('connectionError')));
+        }
+
+        function espnowUnpair(nodeId) {
+            if (!confirm(t('unpairConfirm', nodeId))) return;
+            fetch('/api/espnow/unpair', { method: 'POST', headers: {'Content-Type':'application/json'},
+                                          body: JSON.stringify({ node_id: nodeId }) })
+                .then(r => r.json()).then(d => {
+                    if (!d.success) alert(d.error || t('error'));
+                    setTimeout(updateNodes, 600);
+                }).catch(() => alert(t('connectionError')));
         }
 
         // Geraetestatus-Leiste (Fussbereich): ein Badge pro ESP-NOW-Node
@@ -1169,6 +1251,7 @@ R"rawliteral(
                 const badge = document.getElementById('co2OutputBadge');
                 if (badge) {
                     if (!d.co2_online) { badge.textContent = t('noCo2Value'); badge.style.background = '#dc3545'; }
+                    else if (d.target_node_id && d.node_state === -1) { badge.textContent = (d.output_on ? t('on') : t('off')) + ' — ' + t('socketOffline'); badge.style.background = '#dc3545'; }
                     else { badge.textContent = d.output_on ? t('on') : t('off'); badge.style.background = d.output_on ? '#28a745' : '#6c757d'; }
                 }
                 const nowEl = document.getElementById('co2StatusNow');
@@ -1245,6 +1328,7 @@ R"rawliteral(
                 const badge = document.getElementById('humidOutputBadge');
                 if (badge) {
                     if (!d.humid_online) { badge.textContent = t('noHumidValue'); badge.style.background = '#dc3545'; }
+                    else if (d.target_node_id && d.node_state === -1) { badge.textContent = (d.output_on ? t('on') : t('off')) + ' — ' + t('socketOffline'); badge.style.background = '#dc3545'; }
                     else { badge.textContent = d.output_on ? t('on') : t('off'); badge.style.background = d.output_on ? '#28a745' : '#6c757d'; }
                 }
                 const nowEl = document.getElementById('humidStatusNow');
@@ -1690,6 +1774,7 @@ R"rawliteral(
                 document.getElementById('fanTempMode').value       = d.temp_mode;
                 document.getElementById('fanTempCapDiff').value    = d.temp_cap_diff;
                 document.getElementById('fanMinSpeed').value       = d.min_speed;
+                document.getElementById('fanMaxSpeed').value       = d.max_speed ?? 100;
                 updateFanModeVisibility();
                 fanConfigLoaded = true;
             }).catch(() => {});
@@ -1739,6 +1824,7 @@ R"rawliteral(
                 temp_mode:      parseInt(document.getElementById('fanTempMode').value),
                 temp_cap_diff:  parseInt(document.getElementById('fanTempCapDiff').value),
                 min_speed:      parseInt(document.getElementById('fanMinSpeed').value),
+                max_speed:      parseInt(document.getElementById('fanMaxSpeed').value),
             };
             const st = document.getElementById('fanSaveStatus');
             fetch('/api/fan/save', {
@@ -1897,6 +1983,7 @@ R"rawliteral(
                 document.getElementById('notifyTankEnabled').checked      = d.tank_enabled;
                 document.getElementById('notifyTankMin').value            = d.tank_min_prozent;
                 document.getElementById('notifyLueftmodulEnabled').checked = d.lueftmodul_enabled;
+                document.getElementById('notifyVerbindungEnabled').checked = d.verbindung_enabled !== false;
                 const hint = document.getElementById('notifyMs2Hint');
                 if (hint) hint.textContent = d.ms2_online ? '' : t('notifyMs2Offline');
 
@@ -1935,6 +2022,7 @@ R"rawliteral(
                 tank_enabled:        document.getElementById('notifyTankEnabled').checked,
                 tank_min_prozent:    parseInt(document.getElementById('notifyTankMin').value),
                 lueftmodul_enabled:  document.getElementById('notifyLueftmodulEnabled').checked,
+                verbindung_enabled:  document.getElementById('notifyVerbindungEnabled').checked,
 
                 whatsapp_enabled:    document.getElementById('notifyWhatsappEnabled').checked,
                 phone:               document.getElementById('notifyPhone').value.trim(),
@@ -2047,6 +2135,126 @@ R"rawliteral(
             }).catch(() => { st.style.color = '#dc3545'; st.textContent = t('connectionError'); });
         }
 
+        // ===== Lampen-Kennlinie (0-10V-Lichtausgang gegen PPFD, siehe loopLichtKalib()) =====
+        let lkTimer = null;
+
+        function lichtKalibLoad() {
+            fetch('/api/lichtkal').then(r => r.json()).then(renderLichtKalib).catch(() => {});
+        }
+
+        function renderLichtKalib(d) {
+            const running = d.state === 'running';
+            const st = document.getElementById('lkStatus');
+            document.getElementById('lkStartBtn').style.display = running ? 'none' : '';
+            document.getElementById('lkAbortBtn').style.display = running ? '' : 'none';
+            const ap = document.getElementById('lkApply');
+            if (ap) { ap.checked = !!d.apply; ap.disabled = !d.saved; }
+            // Waehrend der Messung die laufenden Werte zeigen, sonst die gespeicherte Messung
+            let werte = null, info = '';
+            if (running) {
+                werte = (d.current || []).map(Number);
+                info = t('lkRunning', d.step_pct, d.phase, d.remaining_s);
+            } else if (d.saved) {
+                werte = d.saved.ppfd.map(Number);
+                // ts ist Lokalzeit als Unixzeit (RTClib) -> als UTC formatieren = Lokalzeit
+                const ts = d.saved.ts ? new Date(d.saved.ts * 1000).toISOString().replace('T', ' ').slice(0, 16) : '?';
+                info = (d.state === 'done' ? t('lkDone') + ' ' : '') + t('lkSavedFrom', ts);
+            } else {
+                info = t('lkNoData');
+            }
+            if (d.error) info = '⚠️ ' + d.error + (info ? ' — ' + info : '');
+            if (st) { st.textContent = info; st.style.color = d.error ? '#dc3545' : '#888'; }
+            drawLichtKalib(werte, running, d.schritt || 5);
+            if (running && !lkTimer) lkTimer = setInterval(lichtKalibLoad, 3000);
+            if (!running && lkTimer) { clearInterval(lkTimer); lkTimer = null; }
+        }
+
+        // Relativ = (PPFD - PPFD bei 0 %) / (PPFD bei 100 % - PPFD bei 0 %); waehrend der
+        // Messung bezogen auf den bisher hoechsten Wert (100 % ist dann noch nicht gemessen).
+        function drawLichtKalib(werte, running, schritt) {
+            const n = 100 / schritt + 1;
+            const cv = document.getElementById('lkChart');
+            const tb = document.getElementById('lkTable');
+            if (!cv || !tb) return;
+            if (!werte || werte.length === 0) { cv.style.display = 'none'; tb.innerHTML = ''; return; }
+            const basis = werte[0];
+            const top = (werte.length === n && !running) ? werte[n - 1] : Math.max(...werte);
+            const span = top - basis;
+            const rel = werte.map(v => span > 0 ? (v - basis) / span * 100 : 0);
+
+            cv.style.display = '';
+            const ctx = cv.getContext('2d'), W = cv.width, H = cv.height, L = 34, B = 22, T = 8, R = 8;
+            const x = p => L + p / 100 * (W - L - R), y = p => H - B - p / 100 * (H - B - T);
+            ctx.clearRect(0, 0, W, H);
+            ctx.font = '10px sans-serif'; ctx.fillStyle = '#888'; ctx.strokeStyle = '#eee';
+            for (let g = 0; g <= 100; g += 20) {
+                ctx.beginPath(); ctx.moveTo(L, y(g)); ctx.lineTo(W - R, y(g)); ctx.stroke();
+                ctx.fillText(g, 4, y(g) + 3); ctx.fillText(g + '%', x(g) - 8, H - 6);
+            }
+            ctx.setLineDash([4, 4]); ctx.strokeStyle = '#aaa';
+            ctx.beginPath(); ctx.moveTo(x(0), y(0)); ctx.lineTo(x(100), y(100)); ctx.stroke();
+            ctx.setLineDash([]); ctx.strokeStyle = '#27ae60'; ctx.fillStyle = '#27ae60'; ctx.lineWidth = 2;
+            ctx.beginPath();
+            rel.forEach((r, i) => { const px = x(i * schritt), py = y(r); if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py); });
+            ctx.stroke(); ctx.lineWidth = 1;
+            rel.forEach((r, i) => { ctx.beginPath(); ctx.arc(x(i * schritt), y(r), 3, 0, 2 * Math.PI); ctx.fill(); });
+
+            let maxDev = 0;
+            let h = '<table style="border-collapse:collapse;width:100%;"><tr style="color:#888;"><td>' + t('lkStep') +
+                    '</td><td>PPFD</td><td>' + t('lkRel') + '</td><td>' + t('lkIdeal') + '</td><td>' + t('lkDev') + '</td></tr>';
+            werte.forEach((v, i) => {
+                const dev = rel[i] - i * schritt;
+                if (Math.abs(dev) > Math.abs(maxDev)) maxDev = dev;
+                h += '<tr style="border-top:1px solid #eee;"><td>' + (i * schritt) + ' %</td><td>' + v.toFixed(1) + '</td><td>' +
+                     rel[i].toFixed(0) + ' %</td><td>' + (i * schritt) + ' %</td><td>' + (dev >= 0 ? '+' : '') + dev.toFixed(0) + '</td></tr>';
+            });
+            h += '</table>';
+            if (!running && werte.length === n)
+                h += '<div style="margin-top:6px;">' + t('lkMaxDev', (maxDev >= 0 ? '+' : '') + maxDev.toFixed(0)) + '</div>';
+            tb.innerHTML = h;
+        }
+
+        function lichtKalibStart() {
+            if (!confirm(t('lkConfirm'))) return;
+            fetch('/api/lichtkal/start', { method: 'POST' }).then(r => r.json()).then(d => {
+                if (!d.success) alert(d.error || t('error'));
+                lichtKalibLoad();
+            }).catch(() => alert(t('connectionError')));
+        }
+
+        function lichtKalibApply(on) {
+            fetch('/api/lichtkal/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                           body: JSON.stringify({ apply: on }) })
+                .then(r => r.json()).then(d => {
+                    if (!d.success) alert(d.error || t('error'));
+                    lichtKalibLoad();
+                }).catch(() => { alert(t('connectionError')); lichtKalibLoad(); });
+        }
+
+        function lichtKalibAbort() {
+            fetch('/api/lichtkal/abort', { method: 'POST' }).then(lichtKalibLoad).catch(() => {});
+        }
+
+        // RS485-Dauermitschnitt (siehe rs485log.h im Master)
+        function showRs485LogState(d) {
+            const cb = document.getElementById('rs485LogEnabled');
+            const st = document.getElementById('rs485LogStatus');
+            if (cb) cb.checked = !!d.enabled;
+            if (st) st.textContent = d.enabled && d.file ? t('rs485LogActive', d.file) : '';
+        }
+        function loadRs485LogState() {
+            fetch('/api/rs485log').then(r => r.json()).then(showRs485LogState).catch(() => {});
+        }
+        function setRs485Log(on) {
+            fetch('/api/rs485log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                     body: JSON.stringify({ enabled: on }) })
+                .then(r => r.json()).then(d => {
+                    if (!d.success) { alert(d.error || t('error')); loadRs485LogState(); return; }
+                    showRs485LogState(d);
+                    loadLogFileList();
+                }).catch(() => { alert(t('connectionError')); loadRs485LogState(); });
+        }
+
         // Manuelle Leistungs-Schieberegler auf der Startseite (nur sichtbar bei Modus=Manuell).
         // fanSliderDragging haelt den Server-Poll waehrend des Ziehens davon ab, den Wert
         // unter der Maus des Nutzers zurueckzusetzen (gleiches Muster wie schedDirtyFlag).
@@ -2118,8 +2326,8 @@ R"rawliteral(
                 ventilData = d;
                 // Keys entsprechen den Roh-Zustandsnamen aus der API (nicht uebersetzen!),
                 // nur die Anzeige-Labels sind sprachabhaengig.
-                const farben = { 'Pause': '#6c757d', 'Vorlauf': '#ffc107', 'Aktiv': '#28a745' };
-                const zustandLabel = { 'Pause': t('zustandPause'), 'Vorlauf': t('zustandVorlauf'), 'Aktiv': t('zustandAktiv') };
+                const farben = { 'Pause': '#6c757d', 'Vorlauf': '#ffc107', 'Druckaufbau': '#17a2b8', 'Aktiv': '#28a745', 'Nachlauf': '#17a2b8' };
+                const zustandLabel = { 'Pause': t('zustandPause'), 'Vorlauf': t('zustandVorlauf'), 'Druckaufbau': t('zustandDruckaufbau'), 'Aktiv': t('zustandAktiv'), 'Nachlauf': t('zustandNachlauf') };
                 const namen = [t('behaelter') + ' 1', t('behaelter') + ' 2', t('behaelter') + ' 3'];
 
                 // Status (Startseite) — eine Karte, jeden Poll neu befuellt, nur aktive Behälter.
@@ -2163,6 +2371,7 @@ R"rawliteral(
                     // Einmalig: Konfig-Karten mit Eingabefeldern aufbauen (Konfiguration-Seite)
                     document.getElementById('vorlaufAktiv').checked  = d.vorlauf_aktiv;
                     document.getElementById('vorlaufzeit').value     = d.vorlaufzeit_s;
+                    document.getElementById('druckaufbau').value     = d.druckaufbau_s;
                     document.getElementById('gleicheZeiten').checked = d.gleiche_zeiten;
                     let html = '';
                     for (let i = 0; i < 3; i++) {
@@ -2315,6 +2524,7 @@ R"rawliteral(
             const body = {
                 vorlauf_aktiv:  document.getElementById('vorlaufAktiv').checked,
                 vorlaufzeit_s:  parseInt(document.getElementById('vorlaufzeit').value),
+                druckaufbau_s:  parseInt(document.getElementById('druckaufbau').value) || 0,
                 gleiche_zeiten: document.getElementById('gleicheZeiten').checked,
                 behaelter: [0,1,2].map(i => ({
                     aktiv:                  document.getElementById('aktiv' + i)?.checked ?? false,
@@ -2604,9 +2814,12 @@ R"rawliteral(
                 // kein PPFD hier (das laeuft separat unten weiter).
                 zeltRs485.online = !!ms2.online;
                 zeltRs485.seen   = true;
-                zeltRs485.temp   = ms2.online ? ms2.temp : '--';
-                zeltRs485.hum    = ms2.online ? ms2.hum  : '--';
-                zeltRs485.co2    = ms2.online ? ms2.co2  : '--';
+                // Ohne SCD41 (z. B. Multimodul nur mit Lichtsensor) sind Temp/Feuchte/CO2 ungueltig
+                const klimaOk    = ms2.online && ms2.co2_sensor_ok !== false;
+                zeltRs485.temp   = klimaOk ? ms2.temp : '--';
+                zeltRs485.hum    = klimaOk ? ms2.hum  : '--';
+                // CO2 ungueltig (kein Sensor/ENS160 waermt auf) -> '--'; ENS160-Schaetzwert mit '~'
+                zeltRs485.co2    = (klimaOk && ms2.co2_valid !== false) ? (ms2.co2_estimate ? '~' : '') + ms2.co2 : '--';
                 zeltRs485.co2Ok  = ms2.online ? (ms2.co2_sensor_ok !== false) : true;
                 renderZeltCard();
 
@@ -2672,6 +2885,7 @@ R"rawliteral(
         updateManualDoseStatus();
         updatePcfStatus();
         loadZeitplan();
+        lichtKalibLoad();
         loadOutputConfig();
         updateSchedManualStatus();
         updateDwcStatus();

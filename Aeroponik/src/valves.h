@@ -25,10 +25,18 @@ struct VentilConfig {
                               // (Vorlauf nur einmal vor dem ersten aktiven Behälter, dann
                               // alle aktiven Behälter direkt nacheinander, eine gemeinsame
                               // Pause) statt 3 unabhängiger Timer — siehe loopVentile().
+  uint8_t  druckaufbau_s;    // Pumpe läuft so lange VOR dem Öffnen des Düsenventils (0 = aus) —
+                              // sonst sprüht jeder Zyklus mit erst steigendem Druck, Menge und
+                              // Durchfluss-Impulse schwanken dann stark von Zyklus zu Zyklus.
+                              // Dieselbe Zeit läuft die Pumpe NACH dem Schließen weiter (Nachlauf),
+                              // damit ein Druckspeicher hinter dem Durchflussmesser wieder voll
+                              // ist und dessen Nachfüllmenge noch zum Behälter gezählt wird.
 };
 
 // ========== Zustand pro Behälter ==========
-enum VentilZustand { V_PAUSE, V_VORLAUF, V_AKTIV };
+// Ablauf: Pause → [Vorlauf] → [Druckaufbau] → Aktiv → [Nachlauf] → Pause
+// (Batch: Nachlauf des einen Behälters ersetzt den Druckaufbau des nächsten)
+enum VentilZustand { V_PAUSE, V_VORLAUF, V_AKTIV, V_DRUCKAUFBAU, V_NACHLAUF };
 
 struct BehaelterZustand {
   VentilZustand zustand;
@@ -56,7 +64,8 @@ void resetVentilRuntimeState();
 const char* ventilZustandText(VentilZustand z);
 bool        ventilRueckOffen();
 
-// Pumpe: automatisch an, sobald irgendein Behälter gerade aktiv wässert (Ventil offen).
+// Pumpe: automatisch an, sobald irgendein Behälter im Druckaufbau/Nachlauf ist oder gerade
+// aktiv wässert (Ventil offen).
 bool pumpeAktiv();
 
 // ========== Umwälzpumpe (Vorratsbehälter-Zirkulation) ==========

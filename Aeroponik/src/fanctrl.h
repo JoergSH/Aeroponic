@@ -28,6 +28,7 @@ struct FanConfig {
 };
 
 extern FanConfig fanConfig;
+extern uint8_t   fanMaxSpeed;   // 0-100, Hoechstdrehzahl fuer beide Automodi (eigener EEPROM-Block)
 
 void loadFanConfig();
 void saveFanConfig();

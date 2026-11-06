@@ -20,9 +20,10 @@ typedef struct {
     uint8_t  as7341_gain;
 } sensor_data_t;
 
-// Rueckgabe false = SCD41 nicht gefunden/gestartet (treibt den gesamten Messzyklus,
-// AS7341 wird nur mitgelesen wenn SCD41 laeuft — siehe sensor_manager.cpp).
-bool sensor_manager_init(uint8_t sda_pin, uint8_t scl_pin);
+// scd41_present: SCD41 beim I2C-Scan gefunden. Mit SCD41 taktet dessen Messwert den Zyklus
+// (AS7341 wird danach gelesen), ohne laeuft der AS7341 allein im 10-s-Takt.
+// Rueckgabe false = SCD41 nicht gefunden/gestartet.
+bool sensor_manager_init(uint8_t sda_pin, uint8_t scl_pin, bool scd41_present);
 void sensor_manager_loop();
 bool sensor_manager_data_ready();
 void sensor_manager_get_data(sensor_data_t* out);

@@ -4,11 +4,15 @@
 #include <esp_wifi.h>
 #include <WiFi.h>
 #include <HTTPUpdate.h>
+#include <esp_task_wdt.h>
+#include <Preferences.h>
 #include <string.h>
 
 #define REGISTER_RETRY_MS    3000
 #define HEARTBEAT_INTERVAL_MS 5000
-#define REGISTER_MAX_RETRIES 20
+#define REGISTER_MAX_RETRIES 20      // danach nicht aufgeben, nur langsamer weiter versuchen
+#define REGISTER_SLOW_RETRY_MS 30000
+#define MASTER_LOST_MS       30000   // so lange keine Antwort vom Master -> neu registrieren
 
 static const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -22,6 +26,7 @@ static uint8_t       slave_seq       = 0;
 static uint8_t       reg_retries     = 0;
 static uint32_t      last_register_ms  = 0;
 static uint32_t      last_heartbeat_ms = 0;
+static uint32_t      last_master_rx_ms = 0;   // letzte gueltige Antwort des Masters
 
 // ========== recv_queue — einfaches Flag statt FreeRTOS-Queue ==========
 // Wir speichern nur das letzte empfangene Paket; reicht für Register-ACK
@@ -38,6 +43,14 @@ static char               ota_ap_pass[9] = {};
 // ========== OTA ==========
 
 static void do_ota_update() {
+    // WLAN-Verbindung + Download blockieren loop() deutlich laenger als das normale WDT-Timeout --
+    // Watchdog aber nicht abschalten, sondern grosszuegig verlaengern: haengt der Node beim
+    // Update oder beim anschliessenden Neustart, setzt er sich so spaetestens nach 2 min selbst
+    // zurueck statt auf einen Reset von Hand zu warten.
+    esp_task_wdt_config_t wdt_cfg = {};
+    wdt_cfg.timeout_ms    = 120000;
+    wdt_cfg.trigger_panic = true;
+    esp_task_wdt_reconfigure(&wdt_cfg);
     Serial.printf("[OTA] Verbinde mit '%s'...\n", OTA_AP_SSID);
     esp_now_deinit();
     WiFi.begin(OTA_AP_SSID, ota_ap_pass);
@@ -115,6 +128,31 @@ static void on_sent(const esp_now_send_info_t* info, esp_now_send_status_t statu
 #endif
 }
 
+// ========== Feste Kopplung (NVS) ==========
+
+#define PAIR_NVS_NS  "espnow_pair"
+#define PAIR_NVS_KEY "master"
+
+static void print_mac(const char* prefix, const uint8_t* mac) {
+    Serial.printf("%s %02X:%02X:%02X:%02X:%02X:%02X\n", prefix,
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static bool load_paired_master() {
+    Preferences p;
+    if (!p.begin(PAIR_NVS_NS, true)) return false;
+    bool ok = p.getBytes(PAIR_NVS_KEY, master_mac, 6) == 6;
+    p.end();
+    return ok;
+}
+
+static void save_paired_master() {
+    Preferences p;
+    p.begin(PAIR_NVS_NS, false);
+    p.putBytes(PAIR_NVS_KEY, master_mac, 6);
+    p.end();
+}
+
 // ========== Paketverarbeitung (loop-Kontext) ==========
 
 static void handle_register_ack(const espnow_packet_t& pkt) {
@@ -131,6 +169,7 @@ static void handle_register_ack(const espnow_packet_t& pkt) {
     if (!master_known) {
         memcpy(master_mac, recv_mac, 6);
         master_known = true;
+        save_paired_master();
 
         esp_now_peer_info_t peer = {};
         memcpy(peer.peer_addr, recv_mac, 6);
@@ -138,13 +177,16 @@ static void handle_register_ack(const espnow_packet_t& pkt) {
         peer.encrypt = false;
         esp_now_add_peer(&peer);
 
-        Serial.printf("[SLAVE] *** Registriert bei Master %02X:%02X:%02X:%02X:%02X:%02X ***\n",
-                      recv_mac[0], recv_mac[1], recv_mac[2],
-                      recv_mac[3], recv_mac[4], recv_mac[5]);
+        print_mac("[SLAVE] *** Fest gekoppelt mit Master", recv_mac);
     }
     state       = SLAVE_STATE_ONLINE;
     reg_retries = 0;
 }
+
+// Jede gueltige Antwort des Masters zeigt: Verbindung steht. Bleibt sie laenger aus (Master
+// neu gestartet und Node vergessen, Funkkanal gewechselt, ...), meldet sich der Node neu an,
+// statt ewig Heartbeats ins Leere zu schicken.
+static void master_seen() { last_master_rx_ms = millis(); }
 
 static void process_recv() {
     const espnow_packet_t& pkt = recv_pkt;
@@ -161,6 +203,26 @@ static void process_recv() {
                   pkt.msg_type, pkt.seq, pkt.payload_len);
 #endif
 
+    if (pkt.msg_type == MSG_REGISTER) return;   // Broadcasts anderer Slaves
+
+    // Feste Kopplung: Pakete fremder Master (zweite Steuerung in Funkreichweite) verwerfen.
+    // Solange noch kein Master gespeichert ist, wird nur ein REGISTER_ACK angenommen --
+    // Befehle eines beliebigen Masters duerfen nie Relais schalten.
+    if (master_known) {
+        if (memcmp(recv_mac, master_mac, 6) != 0) {
+            static uint32_t last_foreign_log = 0;
+            if (millis() - last_foreign_log > 60000) {
+                last_foreign_log = millis();
+                print_mac("[SLAVE] Paket eines fremden Masters ignoriert:", recv_mac);
+            }
+            return;
+        }
+    } else if (pkt.msg_type != MSG_REGISTER_ACK) {
+        return;
+    }
+
+    master_seen();
+
     switch (pkt.msg_type) {
         case MSG_REGISTER_ACK:
             handle_register_ack(pkt);
@@ -169,8 +231,10 @@ static void process_recv() {
             break;
         case MSG_DATA_ACK:
             break;  // Master-ACK auf send_data
-        case MSG_REGISTER:
-            break;  // Broadcasts anderer Slaves
+        case MSG_UNPAIR:
+            Serial.println("[SLAVE] Master hat die Kopplung geloest");
+            espnow_slave_unpair();
+            break;
         case MSG_COMMAND:
             if (command_cb) command_cb(pkt.payload, pkt.payload_len);
             break;
@@ -241,6 +305,18 @@ void espnow_slave_init(uint8_t node_id, uint8_t node_type, uint8_t channel) {
     esp_wifi_get_channel(&actual_ch, &second);
     Serial.printf("[SLAVE] Kanal nach esp_now_init: %d\n", actual_ch);
 
+    if (load_paired_master()) {
+        master_known = true;
+        esp_now_peer_info_t mp = {};
+        memcpy(mp.peer_addr, master_mac, 6);
+        mp.channel = channel;
+        mp.encrypt = false;
+        esp_now_add_peer(&mp);
+        print_mac("[SLAVE] Gekoppelt mit Master", master_mac);
+    } else {
+        Serial.println("[SLAVE] Noch nicht gekoppelt -- wartet auf eine Steuerung (dort im Webinterface 'Koppeln')");
+    }
+
     Serial.println("[SLAVE] Init abgeschlossen, sende ersten REGISTER...");
 }
 
@@ -259,17 +335,18 @@ void espnow_slave_loop() {
     uint32_t now = millis();
 
     if (state == SLAVE_STATE_REGISTERING) {
-        if (now - last_register_ms >= REGISTER_RETRY_MS) {
+        // Nach REGISTER_MAX_RETRIES schnellen Versuchen nicht aufgeben (sonst bleibt der Node
+        // offline, bis jemand den Strom aus- und einschaltet -- z. B. wenn er nach einem
+        // Stromausfall schneller bootet als der Master), sondern im 30-s-Takt weiter versuchen.
+        uint32_t interval = reg_retries >= REGISTER_MAX_RETRIES ? REGISTER_SLOW_RETRY_MS : REGISTER_RETRY_MS;
+        if (now - last_register_ms >= interval) {
             last_register_ms = now;
 
-            if (reg_retries >= REGISTER_MAX_RETRIES) {
-                Serial.println("[SLAVE] Max Versuche erreicht — gebe auf");
-                state = SLAVE_STATE_ERROR;
-                return;
-            }
+            if (reg_retries == REGISTER_MAX_RETRIES)
+                Serial.println("[SLAVE] Master antwortet nicht -- versuche weiter alle 30 s");
+            if (reg_retries < 255) reg_retries++;
 
-            Serial.printf("[SLAVE] REGISTER Versuch %d/%d\n",
-                          reg_retries + 1, REGISTER_MAX_RETRIES);
+            Serial.printf("[SLAVE] REGISTER Versuch %d\n", reg_retries);
 
 #ifdef ESPNOW_DEBUG
             uint8_t my_mac[6];
@@ -290,10 +367,15 @@ void espnow_slave_loop() {
             pkt.payload_len = 1;
             pkt.payload[0]  = my_node_type;
             send_pkt_to(BROADCAST_MAC, &pkt);
-
-            reg_retries++;
         }
     } else if (state == SLAVE_STATE_ONLINE) {
+        if (now - last_master_rx_ms > MASTER_LOST_MS) {
+            Serial.println("[SLAVE] Keine Antwort vom Master seit 30 s -- melde neu an");
+            state            = SLAVE_STATE_REGISTERING;
+            reg_retries      = 0;
+            last_register_ms = now - REGISTER_RETRY_MS;   // sofort ersten REGISTER senden
+            return;
+        }
         if (now - last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
             last_heartbeat_ms = now;
 
@@ -310,6 +392,22 @@ void espnow_slave_loop() {
 
 slave_state_t espnow_slave_get_state() { return state; }
 bool          espnow_slave_is_online()  { return state == SLAVE_STATE_ONLINE; }
+bool          espnow_slave_is_paired()  { return master_known; }
+
+void espnow_slave_unpair() {
+    Preferences p;
+    p.begin(PAIR_NVS_NS, false);
+    p.remove(PAIR_NVS_KEY);
+    p.end();
+    if (master_known) {
+        esp_now_del_peer(master_mac);
+        print_mac("[SLAVE] Kopplung geloest, vergessen:", master_mac);
+    }
+    master_known     = false;
+    state            = SLAVE_STATE_REGISTERING;
+    reg_retries      = 0;
+    last_register_ms = millis() - REGISTER_RETRY_MS;   // sofort neu anmelden
+}
 
 bool espnow_slave_send_data(const uint8_t* payload, uint8_t len) {
     if (!master_known || state != SLAVE_STATE_ONLINE) return false;
