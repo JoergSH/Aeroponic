@@ -26,6 +26,9 @@ Doku/
 # Füllstand-Steuerung — vorerst nur lokal
 Fuellstand/
 
+# Licht-Logger (Lichtausfall-Suche im Zelt) — nur lokal
+LichtLogger/
+
 # OS
 .DS_Store
 Thumbs.db
