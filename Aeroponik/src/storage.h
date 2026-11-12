@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <SD.h>
+#include "valves.h"   // BEHAELTER_ANZAHL
 
 struct LogEntry {
     float    tempVorrat, tempPflanze;
@@ -27,9 +28,9 @@ struct LogEntry {
     bool     humidAusgang;
     // Letzter Sprühvorgang je Behaelter seit der vorigen Log-Zeile (flowValid=false -> leere Zellen,
     // es gab in diesem Intervall keinen Sprühvorgang dieses Behaelters)
-    bool     flowValid[3];
-    uint32_t flowImpulse[3];
-    float    flowDauerS[3];
+    bool     flowValid[BEHAELTER_ANZAHL];
+    uint32_t flowImpulse[BEHAELTER_ANZAHL];
+    float    flowDauerS[BEHAELTER_ANZAHL];
     // Neustart-Diagnose: Laufzeit seit Boot (faellt sie zurueck, gab es einen Neustart) und
     // Grund des letzten Neustarts (Text ohne Komma, siehe resetReasonToText() in main.cpp)
     uint32_t laufzeitMin;
@@ -55,6 +56,10 @@ struct LogEntry {
     uint8_t  espnowOnline;
     uint8_t  espnowGekoppelt;
     uint32_t heapMinKb;
+    uint16_t ms2Abfragen;   // RS485-Abfragen an den Zelt-Sensor (Adresse 0x20) seit der vorigen Zeile
+    uint16_t ms2Timeouts;   // davon unbeantwortet
+    bool     vpdOk;         // VPD-Regelung aktiv mit gueltigen Werten (sonst leere Spalten)
+    float    vpdBlatt, vpdSollMin, vpdSollMax;   // kPa
 };
 
 bool storage_init(SPIClass &spi);

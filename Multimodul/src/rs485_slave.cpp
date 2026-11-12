@@ -25,6 +25,22 @@ static uint8_t  rx_buf[RX_BUF_SIZE];
 static uint16_t rx_len = 0;
 static uint32_t last_byte_us = 0;
 
+// ---------- Diagnose (serielle Ausgabe fuer den USB-Logger am Zelt) ----------
+// Hintergrund: der Master meldet gelegentlich Timeouts beim Abfragen von 0x20 (MS2). Die
+// Zeilen hier trennen die moeglichen Ursachen: Anfrage nie angekommen (Bus), gestoert
+// angekommen (CRC -- z.B. zwei Frames zusammengeklebt, weil die Schleife zu lange blockiert
+// war und beide Frames gleichzeitig im UART-Puffer lagen) oder angekommen, aber spaet (Loop-Pause).
+#define DG_REPORT_MS        60000UL    // Zusammenfassung einmal pro Minute
+#define DG_GAP_WARN_US      200000UL   // Loop-Pause ab der sofort gewarnt wird
+#define DG_MS2_SILENCE_MS   25000UL    // Master fragt MS2 alle 15 s -- laenger still = auffaellig
+#define DG_PRINT_HOLDOFF_MS 5000UL     // Einzelwarnungen gleicher Art hoechstens alle 5 s
+static uint32_t dg_frames = 0, dg_crc = 0, dg_short = 0, dg_foreign = 0, dg_lueft = 0;
+static uint32_t dg_ms2_req = 0, dg_ms2_ans = 0;
+static uint32_t dg_max_gap_us = 0, dg_last_loop_us = 0, dg_report_ms = 0;
+static uint32_t dg_last_ms2_ms = 0, dg_crc_print_ms = 0, dg_gap_print_ms = 0;
+static bool     dg_ms2_silent = false;
+static uint32_t dg_salvaged = 0, dg_salvage_print_ms = 0;
+
 static uint16_t crc16(const uint8_t* d, size_t n) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < n; i++) {
@@ -104,16 +120,66 @@ static void handle_fwupdate(uint8_t addr) {
 }
 
 static void handle_frame() {
-    if (rx_len < 8) return;
+    dg_frames++;
+    // < 8 Bytes: keine Master-Anfrage (z.B. kurze Antwort eines anderen Slaves) -- nur zaehlen
+    if (rx_len < 8) { dg_short++; return; }
 
     uint16_t calc = crc16(rx_buf, rx_len - 2);
     uint16_t recv = (uint16_t)rx_buf[rx_len - 1] << 8 | rx_buf[rx_len - 2];
-    if (calc != recv) return;  // CRC-Fehler
+    if (calc != recv && rx_len > 8) {
+        // Verklebter Frame (Log 12.11.): der Master schickt seine MS2-Anfrage oft unmittelbar
+        // nach der Antwort des MARS-Luefters (39 Bytes) -- ohne 4-ms-Pause landen beide in einem
+        // Puffer (47 Bytes), die CRC passt nicht und die Anfrage ging bisher verloren (= Timeout
+        // im Master). Liegt am Ende eine gueltige 8-Byte-Anfrage an eine unserer Adressen, diese
+        // herausloesen und normal beantworten.
+        const uint8_t* t = rx_buf + rx_len - 8;
+        uint16_t tc = crc16(t, 6), tr = (uint16_t)t[7] << 8 | t[6];
+        bool ours = t[0] == RS485_ADDR_LUEFT || (t[0] == RS485_ADDR_MS2 && ms2Active) ||
+                    (t[0] == RS485_ADDR_ANALOG && analogActive);
+        if (tc == tr && ours && (t[1] == 0x03 || t[1] == 0x06)) {
+            uint16_t glued = rx_len;
+            memmove(rx_buf, t, 8);
+            rx_len = 8;
+            calc = recv = 0;   // jetzt gueltig, unten normal weiter
+            dg_salvaged++;
+            uint32_t nowMs = millis();
+            if (dg_salvage_print_ms == 0 || nowMs - dg_salvage_print_ms >= DG_PRINT_HOLDOFF_MS) {
+                dg_salvage_print_ms = nowMs;
+                Serial.printf("[RS485] Verklebter Frame (%u Bytes): Anfrage an 0x%02X am Ende gerettet\n", glued, rx_buf[0]);
+            }
+        }
+    }
+    if (calc != recv) {  // CRC-Fehler
+        dg_crc++;
+        uint32_t nowMs = millis();
+        if (dg_crc_print_ms == 0 || nowMs - dg_crc_print_ms >= DG_PRINT_HOLDOFF_MS) {
+            dg_crc_print_ms = nowMs;
+            char hex[3 * 16 + 1] = "";
+            for (uint16_t i = 0; i < rx_len && i < 16; i++) snprintf(hex + i * 3, 4, "%02X ", rx_buf[i]);
+            Serial.printf("[RS485] FEHLER CRC: %u Bytes empfangen: %s%s\n", rx_len, hex, rx_len > 16 ? "..." : "");
+        }
+        return;
+    }
 
     uint8_t  addr = rx_buf[0];
     uint8_t  func = rx_buf[1];
     uint16_t p1   = (uint16_t)rx_buf[2] << 8 | rx_buf[3];
     uint16_t p2   = (uint16_t)rx_buf[4] << 8 | rx_buf[5];
+
+    if (addr == RS485_ADDR_MS2) {
+        dg_ms2_req++;
+        uint32_t nowMs = millis();
+        if (dg_ms2_silent) {
+            Serial.printf("[RS485] OK MS2-Anfragen wieder da (nach %lu s Pause)\n", (nowMs - dg_last_ms2_ms) / 1000);
+            dg_ms2_silent = false;
+        }
+        dg_last_ms2_ms = nowMs;
+        if (ms2Active && func == 0x03) dg_ms2_ans++;
+    } else if (addr == RS485_ADDR_LUEFT) {
+        dg_lueft++;
+    } else if (addr != RS485_ADDR_ANALOG) {
+        dg_foreign++;
+    }
 
     if (addr == RS485_ADDR_LUEFT) {
         if (func == 0x03)      handle_read(addr, lueftRegs, RS485_LUEFT_NUM_REGS, p1, p2);
@@ -140,7 +206,37 @@ void rs485_slave_init(uint8_t tx_pin, uint8_t rx_pin) {
     Serial.printf("[RS485] Slave bereit (%d Baud, TX=%d RX=%d)\n", RS485_BAUD, tx_pin, rx_pin);
 }
 
+static void diag_loop() {
+    uint32_t nowUs = micros(), nowMs = millis();
+    if (dg_last_loop_us) {
+        uint32_t gap = nowUs - dg_last_loop_us;
+        if (gap > dg_max_gap_us) dg_max_gap_us = gap;
+        if (gap > DG_GAP_WARN_US && (dg_gap_print_ms == 0 || nowMs - dg_gap_print_ms >= DG_PRINT_HOLDOFF_MS)) {
+            dg_gap_print_ms = nowMs;
+            Serial.printf("[RS485] WARNUNG Loop-Pause %lu ms (RS485-Puffer wurde so lange nicht gelesen)\n", gap / 1000);
+        }
+    }
+    dg_last_loop_us = nowUs;
+
+    if (ms2Active && dg_last_ms2_ms && !dg_ms2_silent && nowMs - dg_last_ms2_ms > DG_MS2_SILENCE_MS) {
+        dg_ms2_silent = true;
+        Serial.printf("[RS485] WARNUNG seit %lu s keine MS2-Anfrage vom Master\n", (nowMs - dg_last_ms2_ms) / 1000);
+    }
+
+    if (dg_report_ms == 0) dg_report_ms = nowMs;
+    if (nowMs - dg_report_ms >= DG_REPORT_MS) {
+        dg_report_ms = nowMs;
+        // Bewusst ohne die Woerter "Fehler"/"Warnung": der Logger am Zelt stuft Zeilen daran ein,
+        // die Zusammenfassung soll kein Ereignis sein (Einzelprobleme haben eigene Zeilen).
+        Serial.printf("[RS485] Minute: Frames %lu · MS2 %lu/%lu beantwortet · Lüfter %lu · fremd %lu · CRC %lu · kurz %lu · max. Loop-Pause %lu ms\n",
+                      dg_frames, dg_ms2_ans, dg_ms2_req, dg_lueft, dg_foreign, dg_crc, dg_short, dg_max_gap_us / 1000);
+        dg_frames = dg_crc = dg_short = dg_foreign = dg_lueft = dg_ms2_req = dg_ms2_ans = 0;
+        dg_max_gap_us = 0;
+    }
+}
+
 void rs485_slave_loop() {
+    diag_loop();
     while (Serial1.available()) {
         uint8_t b = (uint8_t)Serial1.read();
         if (rx_len < RX_BUF_SIZE) rx_buf[rx_len++] = b;

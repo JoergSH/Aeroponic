@@ -9,7 +9,7 @@
 // Update tatsaechlich angekommen ist.
 #define FW_VERSION_MAJOR  1
 #define FW_VERSION_MINOR  3
-#define FW_VERSION_PATCH  0
+#define FW_VERSION_PATCH  4
 
 // Firmware-Update ueber RS485 -- eigener Funktionscode im benutzerdefinierten Modbus-Bereich
 // (65-72), nur auf der Luefter-Adresse 0x51 (immer aktiv, unabhaengig von der I2C-Bestueckung).

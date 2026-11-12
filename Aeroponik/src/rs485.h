@@ -105,6 +105,9 @@ void loopRS485();
 const Rs485SensorData& rs485_get_ms2();
 // MS2 alle 5 s statt alle 15 s abfragen (Lampen-Kennlinie, siehe loopLichtKalib() in main.cpp)
 void rs485_set_ms2_fast_poll(bool fast);
+// Liefert MS2-Abfragen und davon unbeantwortete (Timeouts) seit dem letzten Aufruf und setzt
+// beide Zaehler zurueck (eine Log-Zeile = ein Aufruf, siehe main.cpp).
+void rs485_take_ms2_stats(uint16_t& polls, uint16_t& timeouts);
 
 // Setzt die Relaismaske am Lichtx4 (nicht-blockierend, wird beim naechsten
 // freien Bus-Slot per Modbus FC06 gesendet).

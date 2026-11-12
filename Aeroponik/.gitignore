@@ -15,3 +15,6 @@ docs/Kalkulation_Alles.ods
 
 # Lokale, rechnerspezifische Einstellungen (z.B. LICHTX4_LEGACY_9600), siehe src/rs485.cpp
 src/local_config.h
+
+# Versionierte Firmware-Kopien zum Zurueckflashen (fw_version_name.py) -- nur lokal
+firmware/

@@ -7,7 +7,7 @@
 // ========== Firmware-Version ==========
 // Bei jeder Änderung hochzählen — wird im Webinterface unter System angezeigt,
 // damit erkennbar ist ob ein Upload tatsächlich angekommen ist.
-#define FW_VERSION "1.18.0"
+#define FW_VERSION "1.21.5"
 
 // ========== WiFi Konfiguration ==========
 // SSID/Passwort des Heim-WLANs liegen NICHT mehr im Quellcode — siehe wifictrl.h.
@@ -37,8 +37,6 @@ extern bool USE_ACCESS_POINT;
 // ========== Ventilsteuerung Defaults ==========
 #define VENTIL_OEFFNUNG_DEFAULT_S   5    // Öffnungszeit Düsen in Sekunden
 #define VENTIL_PAUSE_DEFAULT_MIN    5    // Pausenzeit in Minuten
-#define VENTIL_VORLAUF_DEFAULT_S    3    // Vorlaufzeit Rückleitung in Sekunden
-#define VENTIL_VORLAUF_AKTIV        true // Vorlauf standardmäßig aktiv
 
 // ========== Umwälzpumpe Defaults (Vorratsbehälter-Zirkulation) ==========
 #define UMWAELZ_AKTIV_DEFAULT       false
@@ -59,8 +57,7 @@ extern bool USE_ACCESS_POINT;
 // Adressen:
 //  0–3:   Magic Number (Ventilkonfig)
 //  4–18:  Behälter 1–3 (je 5 Bytes: oeffnung_s + pause_min + aktiv + reserved×2)
-//  19:    Vorlaufzeit_s
-//  20:    Vorlauf aktiv
+//  19–20: frei (ehemals Ruecklauf-Vorlauf, entfallen 11/2026 -- Rueckleitung ist ein Kugelhahn)
 //  21–23: frei
 //  24–37: TankConfig (7 × 2 Bytes = 14 Bytes)
 //  38:    Tank Magic Byte
@@ -90,12 +87,10 @@ extern bool USE_ACCESS_POINT;
 //           Aktivierungen [inkl. Lueftermodul] + je min/max fuer Feuchte/Temperatur/Tank)
 //  276:    Lueftermodul (Zeltluefter) Magic Byte
 //  277–284: LueftmodulConfig (8 Bytes)
-#define EEPROM_SIZE             570
+#define EEPROM_SIZE             600   // 570 -> 600 (11/2026): Behaelter 4; vorhandene Daten bleiben erhalten
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
-#define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter
-#define EEPROM_VORLAUF_ADDR     19
-#define EEPROM_VORLAUF_AK_ADDR  20
+#define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter (1-3; Behälter 4 siehe unten)
 #define EEPROM_TANK_BASE        24
 #define EEPROM_TANK_MAGIC_ADDR  38
 #define EEPROM_TANK_MAGIC_BYTE  0xB7
@@ -178,15 +173,15 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_NOTIFY2_MAGIC_BYTE       0x71
 #define EEPROM_NOTIFY2_BASE             306   // ~220 Bytes, siehe NotifyExtraConfig in notify.h
 
-// Durchflussmesser-Kalibrierung (Pulse pro Liter, per Kalibrierroutine ermittelt)
-#define EEPROM_FLOWCAL_MAGIC_ADDR       526
-#define EEPROM_FLOWCAL_MAGIC_BYTE       0x2E
-#define EEPROM_FLOWCAL_BASE             527   // 4 Bytes (float pulses_per_liter)
+// 526-530: frei (ehemals Durchflussmesser-Kalibrierung Pulse/Liter, entfallen mit FW 1.19.0)
 
-// Duesen-Ueberwachung (erwarteter Durchfluss je Behaelter + Toleranz), siehe flowmonitor.h
+// Duesen-Ueberwachung (erwartete Impulse/s je Behaelter + Toleranz), siehe flowmonitor.h.
+// Magic 0x8C -> 0x8D (FW 1.19.0): Sollwerte waren vorher ml/s, jetzt Impulse/s -- alte Werte
+// verwerfen, sie werden aus dem naechsten Zyklus neu gelernt.
 #define EEPROM_FLOWMON_MAGIC_ADDR       531
-#define EEPROM_FLOWMON_MAGIC_BYTE       0x8C
-#define EEPROM_FLOWMON_BASE             532   // ~17 Bytes, siehe FlowMonitorConfig in flowmonitor.h
+#define EEPROM_FLOWMON_MAGIC_BYTE       0x8D
+#define EEPROM_FLOWMON_BASE             532   // 17 Bytes: enabled (532), Sollwert Beh. 1-3 als float
+                                              // (536/540/544), Toleranz (548); Beh. 4 siehe unten
 
 // Raumlicht: manueller Schalter fuer einen Ausgang eines ESP-NOW-Steckdosen-Nodes (keine
 // Automatik/Zeitplan), siehe raumlichtctrl.h
@@ -211,6 +206,19 @@ extern bool USE_ACCESS_POINT;
 #define EEPROM_FAN_MAX_MAGIC_ADDR       558
 #define EEPROM_FAN_MAX_MAGIC_BYTE       0x6B
 #define EEPROM_FAN_MAX_BASE             559   // 1 Byte (%)
+
+// Behaelter 4 (Ventil 4, frueher Ruecklaufventil) -- gleicher 5-Byte-Block wie Behaelter 1-3
+// (oeffnung_s, pause_min, aktiv, oeffnung_s_dunkel, pause_min_dunkel), eigenes Magic-Byte
+#define EEPROM_BEHAELTER4_MAGIC_ADDR    560
+#define EEPROM_BEHAELTER4_MAGIC_BYTE    0x4B
+#define EEPROM_BEHAELTER4_BASE          561   // 5 Bytes (561-565)
+// Duesen-Ueberwachung: Sollwert Behaelter 4 (float, Impulse/s) -- ungueltig/NaN = 0 (wird gelernt)
+#define EEPROM_FLOWMON_SOLL4_ADDR       566   // 4 Bytes (566-569)
+
+// VPD-Regelung (seit FW 1.21.0), feldweise gespeichert, siehe vpdctrl.cpp
+#define EEPROM_VPD_MAGIC_ADDR           570
+#define EEPROM_VPD_MAGIC_BYTE           0x56
+#define EEPROM_VPD_BASE                 571   // 13 Bytes (571-583, temp_min seit 1.21.2); 584-599 frei
 
 // Gehaeuseluefter-Config: eigener Magic-Bereich. Magic-Byte geaendert (0x4D -> 0x51), da
 // min_speed mit dem Wechsel von PWM auf reines An/Aus entfallen ist (dieser Lueftertyp

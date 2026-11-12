@@ -26,7 +26,7 @@
 #define VENTIL1_PIN        8   // Behälter 1
 #define VENTIL2_PIN        7   // Behälter 2
 #define VENTIL3_PIN        10   // Behälter 3
-#define VENTIL4_PIN       9   // Rücklaufventil
+#define VENTIL4_PIN       9   // Behälter 4 (bis 11/2026 Rücklaufventil, jetzt Kugelhahn)
 
 // Treiber-Polaritaet aller direkten Ausgaenge (Ventile 1-4, Pumpe, Umwälzpumpe):
 // 0 = High-aktiv (GPIO HIGH -> Ausgang AN, Annahme/Default), 1 = Low-aktiv

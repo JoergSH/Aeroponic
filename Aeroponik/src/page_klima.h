@@ -258,6 +258,211 @@ R"rawliteral(
                 </div>
             </div>
 
+            <!-- VPD-Regelung (vpdctrl.cpp): fuehrt Befeuchter + Abluftluefter gemeinsam -->
+            <h3 class="section-heading">🌿 <span class="de">VPD-Regelung</span><span class="en">VPD Control</span></h3>
+            <div class="status-box-info">
+                <style>
+                    .vpd-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:14px}
+                    .vpd-in{width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box}
+                    .vpd-hint{font-size:0.78em;color:#888;margin-top:3px}
+                    .vpd-live{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+                    .vpd-box{background:#fff;border-radius:8px;padding:10px 12px;border:1px solid #e3e6ea}
+                    .vpd-big{font-size:1.6em;font-weight:bold;color:#2c3e50}
+                    .vpd-big small{font-size:0.5em;color:#888;font-weight:normal}
+                    .vpd-gauge{position:relative;height:16px;background:#e9ecef;border-radius:8px;margin:6px 0 14px;overflow:hidden}
+                    .vpd-gauge .band{position:absolute;top:0;bottom:0;background:rgba(39,174,96,0.35)}
+                    .vpd-gauge .mark{position:absolute;top:-2px;bottom:-2px;width:3px;background:#2c3e50;border-radius:2px}
+                    .vpd-reasons{font-size:0.85em;color:#555;margin-bottom:14px;line-height:1.6}
+                    .vpd-tbl{font-size:0.82em;color:#555;border-collapse:collapse;margin-top:4px}
+                    .vpd-tbl td{padding:2px 10px 2px 0}
+                </style>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                        <span style="font-size:0.9em;"><span class="de">Aktiv</span><span class="en">Active</span></span>
+                        <input type="checkbox" id="vpdEnabled" style="width:18px;height:18px;">
+                    </label>
+                    <span id="vpdBadge" class="device-badge" style="background:#6c757d;">--</span>
+                </div>
+
+                <!-- Live-Status -->
+                <div id="vpdLiveWrap">
+                    <div class="vpd-live">
+                        <div class="vpd-box"><div class="status-label"><span class="de">VPD Blatt (geregelt)</span><span class="en">Leaf VPD (controlled)</span></div><div class="vpd-big"><span id="vpdLeaf">--</span> <small>kPa</small></div></div>
+                        <div class="vpd-box"><div class="status-label"><span class="de">VPD Luft</span><span class="en">Air VPD</span></div><div class="vpd-big"><span id="vpdAir">--</span> <small>kPa</small></div></div>
+                        <div class="vpd-box"><div class="status-label"><span class="de">Zielbereich</span><span class="en">Target range</span> <span id="vpdPhaseNow" style="color:#999;"></span></div><div class="vpd-big"><span id="vpdSoll">--</span> <small>kPa</small></div></div>
+                        <div class="vpd-box"><div class="status-label"><span class="de">Befeuchter / Abluft</span><span class="en">Humidifier / exhaust</span></div><div class="vpd-big"><span id="vpdOut">--</span></div></div>
+                    </div>
+                    <div class="vpd-gauge" title="0 – 2,0 kPa"><div class="band" id="vpdGaugeBand"></div><div class="mark" id="vpdGaugeMark"></div></div>
+                    <div class="vpd-reasons" id="vpdReasons"></div>
+                </div>
+
+                <!-- Einstellungen -->
+                <div class="vpd-grid">
+                    <div>
+                        <div class="status-label"><span class="de">Wachstumsphase</span><span class="en">Growth stage</span></div>
+                        <select id="vpdPhase" class="vpd-in">
+                            <option value="0" class="i18n-opt" data-de="Steckling / Keimling" data-en="Clone / seedling">Steckling / Keimling</option>
+                            <option value="1" class="i18n-opt" data-de="Wachstum" data-en="Vegetative">Wachstum</option>
+                            <option value="2" class="i18n-opt" data-de="Blüte früh" data-en="Early flower">Blüte früh</option>
+                            <option value="3" class="i18n-opt" data-de="Blüte spät" data-en="Late flower">Blüte spät</option>
+                            <option value="4" class="i18n-opt" data-de="Eigene Werte" data-en="Custom values">Eigene Werte</option>
+                        </select>
+                        <table class="vpd-tbl"><tr><td>☀️ <span class="de">Licht an</span><span class="en">Lights on</span></td><td><b id="vpdPhaseDay">--</b> kPa</td></tr>
+                               <tr><td>🌙 <span class="de">Licht aus</span><span class="en">Lights off</span></td><td><b id="vpdPhaseNight">--</b> kPa</td></tr></table>
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Blatttemperatur-Offset (°C)</span><span class="en">Leaf temperature offset (°C)</span></div>
+                        <input type="number" id="vpdLeafOffset" class="vpd-in" min="-5" max="3" step="0.1">
+                        <div class="vpd-hint"><span class="de">Blatt = Luft + Offset, nur bei Licht an. Unter LED meist −1 … −2 °C.</span><span class="en">Leaf = air + offset, lights on only. Under LED usually −1 … −2 °C.</span></div>
+                    </div>
+                </div>
+                <div class="vpd-grid" id="vpdCustomRow" style="display:none;">
+                    <div><div class="status-label">☀️ <span class="de">Tag min (kPa)</span><span class="en">Day min (kPa)</span></div><input type="number" id="vpdDayMin" class="vpd-in" min="0.1" max="2.5" step="0.05"></div>
+                    <div><div class="status-label">☀️ <span class="de">Tag max (kPa)</span><span class="en">Day max (kPa)</span></div><input type="number" id="vpdDayMax" class="vpd-in" min="0.1" max="2.5" step="0.05"></div>
+                    <div><div class="status-label">🌙 <span class="de">Nacht min (kPa)</span><span class="en">Night min (kPa)</span></div><input type="number" id="vpdNightMin" class="vpd-in" min="0.1" max="2.5" step="0.05"></div>
+                    <div><div class="status-label">🌙 <span class="de">Nacht max (kPa)</span><span class="en">Night max (kPa)</span></div><input type="number" id="vpdNightMax" class="vpd-in" min="0.1" max="2.5" step="0.05"></div>
+                </div>
+                <div class="vpd-grid">
+                    <div>
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="vpdUseHumid" style="width:18px;height:18px;"><span style="font-size:0.9em;"><span class="de">Regelt den Befeuchter</span><span class="en">Controls the humidifier</span></span></label>
+                        <div class="vpd-hint" id="vpdHumidHint"><span class="de">Steckdose/Ausgang wie unter „Luftbefeuchtung“; deren Min/Max ruht dann.</span><span class="en">Socket/output as under "Humidification"; its min/max is then ignored.</span></div>
+                    </div>
+                    <div>
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="vpdUseFan" style="width:18px;height:18px;"><span style="font-size:0.9em;"><span class="de">Regelt den Abluftlüfter</span><span class="en">Controls the exhaust fan</span></span></label>
+                        <div class="vpd-hint" id="vpdFanHint"><span class="de">Zwischen Mindest- und Höchstdrehzahl aus „Abluftlüfter-Steuerung“; deren Modus ruht dann.</span><span class="en">Between min and max speed from "Exhaust Fan Control"; its mode is then ignored.</span></div>
+                    </div>
+                </div>
+                <div class="vpd-grid">
+                    <div><div class="status-label"><span class="de">Temperatur min (°C)</span><span class="en">Temperature min (°C)</span></div><input type="number" id="vpdTempMin" class="vpd-in" min="5" max="30" step="1"><div class="vpd-hint"><span class="de">Darunter wird die Abluft für den VPD nicht weiter erhöht, sondern langsam zurückgenommen (kühlt sonst nachts aus).</span><span class="en">Below this, exhaust is not increased for VPD but slowly reduced (would otherwise cool the tent at night).</span></div></div>
+                    <div><div class="status-label"><span class="de">Temperatur max (°C)</span><span class="en">Temperature max (°C)</span></div><input type="number" id="vpdTempMax" class="vpd-in" min="18" max="40" step="1"><div class="vpd-hint"><span class="de">Ab 1 °C darunter fährt der Lüfter hoch – hat Vorrang.</span><span class="en">From 1 °C below the fan ramps up – takes priority.</span></div></div>
+                    <div><div class="status-label"><span class="de">Feuchte max (%)</span><span class="en">Humidity max (%)</span></div><input type="number" id="vpdHumMax" class="vpd-in" min="40" max="95" step="1"><div class="vpd-hint"><span class="de">Darüber Befeuchter aus und Lüfter hoch (Schimmelschutz) – hat Vorrang.</span><span class="en">Above: humidifier off and fan up (mould protection) – takes priority.</span></div></div>
+                    <div><div class="status-label"><span class="de">Alarm nach (min)</span><span class="en">Alarm after (min)</span></div><input type="number" id="vpdAlarmMin" class="vpd-in" min="0" max="240" step="5"><div class="vpd-hint"><span class="de">So lange außerhalb des Zielbereichs → Benachrichtigung. 0 = aus.</span><span class="en">Out of range this long → notification. 0 = off.</span></div></div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;">
+                    <button onclick="vpdSave()"
+                        style="background:#27ae60;color:white;border:none;padding:9px 22px;border-radius:5px;cursor:pointer;font-size:0.95em;">
+                        <span class="de">Speichern</span><span class="en">Save</span></button>
+                    <span id="vpdSaveStatus" style="font-size:0.85em;color:#888;"></span>
+                </div>
+                <div class="vpd-hint" style="margin-top:10px;">
+                    <span class="de">Zu feucht → Befeuchter aus, dann Abluft schrittweise hoch (nur wenn die Raumluft trockener ist als die Zeltluft und gerade kein CO₂ dosiert wird). Richtung zu trocken (obere Bandhälfte) → erst Abluft runter bis zur Mindestdrehzahl, dann Befeuchter an (mind. 60 s an/aus). Beim Wechsel Licht an/aus wandert der Zielbereich langsam (max. 0,45 kPa in 30 min).</span>
+                    <span class="en">Too humid → humidifier off, then exhaust up step by step (only if the room air is drier than the tent air and no CO₂ is being dosed). Towards too dry (upper half of band) → first exhaust down to minimum speed, then humidifier on (min. 60 s on/off). When the lights switch on/off, the target range moves slowly (max. 0.45 kPa in 30 min).</span>
+                </div>
+                <script>
+                (function () {
+                    function L(de, en) { return (typeof currentLang !== 'undefined' && currentLang === 'en') ? en : de; }
+                    const $ = id => document.getElementById(id);
+                    const PHASE_NAMES = () => [L('Steckling','Clone'), L('Wachstum','Vegetative'), L('Blüte früh','Early flower'), L('Blüte spät','Late flower'), L('Eigene Werte','Custom')];
+                    let cfgLoaded = false, phases = null, dirty = false;
+                    const k = v => (v / 100).toFixed(2);
+
+                    function showPhase() {
+                        const p = +$('vpdPhase').value;
+                        $('vpdCustomRow').style.display = p === 4 ? '' : 'none';
+                        let a;
+                        if (p === 4) a = [$('vpdDayMin').value * 100, $('vpdDayMax').value * 100, $('vpdNightMin').value * 100, $('vpdNightMax').value * 100];
+                        else if (phases) a = phases[p];
+                        if (a) { $('vpdPhaseDay').textContent = k(a[0]) + ' – ' + k(a[1]); $('vpdPhaseNight').textContent = k(a[2]) + ' – ' + k(a[3]); }
+                    }
+                    ['vpdPhase', 'vpdDayMin', 'vpdDayMax', 'vpdNightMin', 'vpdNightMax'].forEach(id => $(id).addEventListener('input', () => { dirty = true; showPhase(); }));
+                    document.querySelectorAll('#klimaTab input[id^="vpd"], #klimaTab select[id^="vpd"]').forEach(el => el.addEventListener('change', () => { dirty = true; }));
+
+                    function fillForm(d) {
+                        $('vpdEnabled').checked = d.enabled;
+                        $('vpdPhase').value     = d.phase;
+                        $('vpdDayMin').value    = k(d.day_min);   $('vpdDayMax').value   = k(d.day_max);
+                        $('vpdNightMin').value  = k(d.night_min); $('vpdNightMax').value = k(d.night_max);
+                        $('vpdLeafOffset').value = (d.leaf_offset / 10).toFixed(1);
+                        $('vpdUseHumid').checked = d.use_humid;
+                        $('vpdUseFan').checked   = d.use_fan;
+                        $('vpdTempMax').value    = d.temp_max;
+                        $('vpdHumMax').value     = d.hum_max;
+                        $('vpdAlarmMin').value   = d.alarm_min;
+                        $('vpdTempMin').value    = d.temp_min;
+                        showPhase();
+                    }
+
+                    function showState(d) {
+                        const R = d.reasons || 0;
+                        // Was die VPD-Regelung fuehrt, wird in Luftbefeuchtung/Abluftluefter ausgeblendet
+                        // (gespeicherter Stand, nicht die noch ungespeicherten Haken oben)
+                        const vh = !!(d.enabled && d.use_humid), vf = !!(d.enabled && d.use_fan);
+                        if ($('humidLimitsSection')) { $('humidLimitsSection').style.display = vh ? 'none' : 'grid'; $('humidVpdNote').style.display = vh ? '' : 'none'; }
+                        if ($('fanModeWrap'))        { $('fanModeWrap').style.display        = vf ? 'none' : '';     $('fanVpdNote').style.display   = vf ? '' : 'none'; }
+                        const badge = $('vpdBadge');
+                        $('vpdLiveWrap').style.opacity = d.enabled ? '1' : '0.45';
+                        if (!d.enabled)          { badge.textContent = L('aus', 'off'); badge.style.background = '#6c757d'; }
+                        else if (!d.valid)       { badge.textContent = L('keine Messwerte', 'no readings'); badge.style.background = '#dc3545'; }
+                        else if (R & 0x0002)     { badge.textContent = L('im Zielbereich', 'on target'); badge.style.background = '#28a745'; }
+                        else if (R & 0x0004)     { badge.textContent = L('zu feucht', 'too humid'); badge.style.background = '#2e86de'; }
+                        else                     { badge.textContent = L('zu trocken', 'too dry'); badge.style.background = '#e67e22'; }
+                        const f2 = v => (+v).toFixed(2);   // JSON verliert die Nullen am Ende (0.90 -> 0.9)
+                        $('vpdLeaf').textContent = d.valid ? f2(d.vpd_leaf) : '--';
+                        $('vpdAir').textContent  = d.valid ? f2(d.vpd_air) : '--';
+                        $('vpdSoll').textContent = d.valid ? f2(d.soll_min) + ' – ' + f2(d.soll_max) : '--';
+                        $('vpdPhaseNow').textContent = '(' + PHASE_NAMES()[d.phase] + ', ' + (d.light_on ? '☀️' : '🌙') + ')';
+                        const hum = d.use_humid ? (d.humid_want ? '💧' + L('an', 'on') : d.humid_demand ? '💧' + L('Takt', 'pulse') : '💧' + L('aus', 'off')) : '💧–';
+                        const fan = d.use_fan ? (d.fan_pct >= 0 ? '🌀' + d.fan_pct + ' %' : '🌀' + L('hält', 'holds')) : '🌀–';
+                        $('vpdOut').textContent = d.enabled ? hum + '  ' + fan : '--';
+                        // Skala 0..2 kPa
+                        const pos = v => Math.max(0, Math.min(100, v / 2 * 100));
+                        if (d.valid) {
+                            $('vpdGaugeBand').style.left  = pos(+d.soll_min) + '%';
+                            $('vpdGaugeBand').style.width = (pos(+d.soll_max) - pos(+d.soll_min)) + '%';
+                            $('vpdGaugeMark').style.left  = 'calc(' + pos(+d.vpd_leaf) + '% - 1px)';
+                            $('vpdGaugeMark').style.display = '';
+                        } else $('vpdGaugeMark').style.display = 'none';
+                        const lines = [];
+                        if (d.enabled && d.valid) {
+                            if (R & 0x0200) lines.push('🌗 ' + L('Zielbereich wandert gerade (Licht an/aus)', 'Target range is moving (lights on/off)'));
+                            if (R & 0x0010) lines.push('🌡️ ' + L('Temperaturgrenze erreicht – Lüfter hat Vorrang', 'Temperature limit reached – fan takes priority'));
+                            if (R & 0x0020) lines.push('💦 ' + L('Feuchtegrenze erreicht – Befeuchter aus, Lüfter hoch', 'Humidity limit reached – humidifier off, fan up'));
+                            if (R & 0x0040) lines.push('🏠 ' + L('Raumluft ist nicht trockener als die Zeltluft – mehr Abluft hilft nicht', 'Room air is not drier than tent air – more exhaust won’t help'));
+                            if (R & 0x0400) lines.push('🥶 ' + L('Zelt an der Mindesttemperatur – Abluft wird nicht erhöht', 'Tent at minimum temperature – exhaust is not increased'));
+                            if (R & 0x0100) lines.push('🫧 ' + L('CO₂ wird dosiert – Lüfter wird nicht hochgefahren', 'CO₂ is being dosed – fan is not increased'));
+                            if (R & 0x0080) lines.push('⚠️ ' + L('Lüfter am Anschlag – Raumluft reicht nicht', 'Fan at maximum – room air is not enough'));
+                            if (d.ah_tent) lines.push('<span style="color:#999;">' + L('Absolute Feuchte Zelt ', 'Absolute humidity tent ') + d.ah_tent + ' g/m³' + (d.ah_room ? ' · ' + L('Raum ', 'room ') + d.ah_room + ' g/m³' : '') + '</span>');
+                        }
+                        if (d.enabled && d.use_humid && !d.humid_dev) lines.push('⚠️ ' + L('„Luftbefeuchtung“ ist nicht aktiv – der Befeuchter wird nicht geschaltet', '"Humidification" is not active – the humidifier is not switched'));
+                        $('vpdReasons').innerHTML = lines.join('<br>');
+                    }
+
+                    function poll() {
+                        const tab = $('klimaTab');
+                        if (!tab || !tab.classList.contains('active')) return;
+                        fetch('/api/vpd').then(r => r.json()).then(d => {
+                            phases = d.phases;
+                            if (!cfgLoaded || !dirty) { fillForm(d); cfgLoaded = true; }
+                            showState(d);
+                        }).catch(() => {});
+                    }
+                    setInterval(poll, 4000);
+                    setTimeout(poll, 500);
+                    document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => setTimeout(poll, 50)));
+
+                    window.vpdSave = function () {
+                        const n = id => parseFloat($(id).value);
+                        const body = {
+                            enabled: $('vpdEnabled').checked, phase: +$('vpdPhase').value,
+                            day_min: Math.round(n('vpdDayMin') * 100), day_max: Math.round(n('vpdDayMax') * 100),
+                            night_min: Math.round(n('vpdNightMin') * 100), night_max: Math.round(n('vpdNightMax') * 100),
+                            leaf_offset: Math.round(n('vpdLeafOffset') * 10),
+                            use_humid: $('vpdUseHumid').checked, use_fan: $('vpdUseFan').checked,
+                            temp_max: Math.round(n('vpdTempMax')), hum_max: Math.round(n('vpdHumMax')), alarm_min: Math.round(n('vpdAlarmMin')),
+                            temp_min: Math.round(n('vpdTempMin'))
+                        };
+                        const st = $('vpdSaveStatus');
+                        fetch('/api/vpd/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+                            .then(r => r.json()).then(d => {
+                                st.style.color = d.success ? '#27ae60' : '#dc3545';
+                                st.textContent = d.success ? L('Gespeichert', 'Saved') : L('Fehler', 'Error');
+                                if (d.success) { dirty = false; setTimeout(() => st.textContent = '', 2000); poll(); }
+                            }).catch(() => { st.style.color = '#dc3545'; st.textContent = L('Verbindungsfehler', 'Connection error'); });
+                    };
+                })();
+                </script>
+            </div>
+
             <!-- Luftbefeuchtung-Steuerung — 1:1 Kopie der CO2-Steuerung, Feuchte statt CO2 -->
             <h3 class="section-heading">💧 <span class="de">Luftbefeuchtung</span><span class="en">Humidification</span></h3>
             <div class="status-box-info">
@@ -287,7 +492,8 @@ R"rawliteral(
                     </div>
                 </div>
 
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+                <div id="humidVpdNote" style="display:none;font-size:0.85em;color:#155724;background:#d4edda;border-radius:5px;padding:8px 12px;margin-bottom:16px;"><span class="de">Feuchte Min/Max entfällt – der Befeuchter wird von der VPD-Regelung geschaltet. Hier gelten nur Steckdose und Ausgang.</span><span class="en">Humidity min/max not used – the humidifier is switched by the VPD control. Only socket and output apply here.</span></div>
+                <div id="humidLimitsSection" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
                     <div>
                         <div class="status-label"><span class="de">Feuchte Min (%)</span><span class="en">Humidity Min (%)</span></div>
                         <input type="number" id="humidMin" min="0" max="100" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
@@ -315,17 +521,9 @@ R"rawliteral(
                     <span class="de">Ausgang (MARS Hydro / Analog) wird oben unter Geräte festgelegt.</span>
                     <span class="en">Output (MARS Hydro / Analog) is set above under Devices.</span>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                        <span style="font-size:0.9em;"><span class="de">Eigene Steuerung aktiv</span><span class="en">Own control active</span></span>
-                        <input type="checkbox" id="fanEnabled" style="width:18px;height:18px;">
-                    </label>
-                </div>
-                <div style="font-size:0.78em;color:#888;margin-bottom:16px;">
-                    <span class="de">Wenn deaktiviert, sendet der Master keine eigenen Befehle — der iControl-Hub behält die Kontrolle über den Lüfter.</span>
-                    <span class="en">When disabled, the master sends no commands of its own — the iControl hub retains control over the fan.</span>
-                </div>
 
+                <div id="fanVpdNote" style="display:none;font-size:0.85em;color:#155724;background:#d4edda;border-radius:5px;padding:8px 12px;margin-bottom:16px;"><span class="de">Modus entfällt – der Lüfter wird von der VPD-Regelung geführt (inkl. deren Temperatur- und Feuchtegrenzen). Hier gelten nur Mindest- und Höchstdrehzahl.</span><span class="en">Mode not used – the fan is driven by the VPD control (including its temperature and humidity limits). Only min and max speed apply here.</span></div>
+                <div id="fanModeWrap">
                 <div style="margin-bottom:16px;">
                     <div class="status-label"><span class="de">Modus</span><span class="en">Mode</span></div>
                     <select id="fanMode" onchange="updateFanModeVisibility()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
@@ -384,6 +582,7 @@ R"rawliteral(
                         </div>
                     </div>
                 </div>
+                </div><!-- /fanModeWrap -->
 
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
                     <div>
@@ -394,7 +593,7 @@ R"rawliteral(
                         <div class="status-label"><span class="de">Höchstdrehzahl (%)</span><span class="en">Maximum Speed (%)</span></div>
                         <input type="number" id="fanMaxSpeed" min="0" max="100" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                     </div>
-                    <div style="grid-column:1/-1;font-size:0.78em;color:#888;margin-top:-6px;"><span class="de">Gilt für beide Automatik-Modi.</span><span class="en">Applies to both auto modes.</span></div>
+                    <div style="grid-column:1/-1;font-size:0.78em;color:#888;margin-top:-6px;"><span class="de">Gilt für beide Automatik-Modi und die VPD-Regelung. MARS-Lüfter: unter 25 % läuft er im 10-min-Takt (z. B. 5 % = 2 von 10 min mit Minimum) — die Mindestdrehzahl ist damit die Grundlüftung, 0 % = darf ganz aus.</span><span class="en">Applies to both auto modes and VPD control. MARS fan: below 25 % it runs in a 10-min cycle (e.g. 5 % = 2 of 10 min at minimum) — the minimum speed is thus the base ventilation, 0 % = may switch off.</span></div>
                 </div>
 
                 <div style="display:flex;gap:8px;align-items:center;">

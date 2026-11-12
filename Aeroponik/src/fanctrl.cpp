@@ -16,11 +16,12 @@ void loadFanConfig() {
         fanConfig.hum_max        = FAN_HUM_MAX_DEFAULT;
         fanConfig.temp_min       = FAN_TEMP_MIN_DEFAULT;
         fanConfig.temp_max       = FAN_TEMP_MAX_DEFAULT;
-        fanConfig.enabled        = false;  // sicherer Default: iControl behaelt Kontrolle bis aktiviert
         fanConfig.temp_mode      = FAN_TEMP_MODE_ABSOLUTE;
         fanConfig.temp_cap_diff  = 0;       // Bremse standardmaessig aus
         saveFanConfig();
     }
+    // Schalter "Eigene Steuerung aktiv" entfernt (1.21.5): der Master steuert den Luefter immer
+    fanConfig.enabled = true;
     if (EEPROM.read(EEPROM_FAN_MAX_MAGIC_ADDR) == EEPROM_FAN_MAX_MAGIC_BYTE) {
         fanMaxSpeed = EEPROM.read(EEPROM_FAN_MAX_BASE);
         if (fanMaxSpeed > 100) fanMaxSpeed = FAN_MAX_SPEED_DEFAULT;

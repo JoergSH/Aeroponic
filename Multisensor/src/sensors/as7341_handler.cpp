@@ -39,7 +39,10 @@ static const double H_PLANCK = 6.62607015e-34;   // J*s
 static const double C_LIGHT  = 2.99792458e8;     // m/s
 static const double NA_UMOL  = 6.02214076e17;    // Teilchen pro Mikromol
 static float K_PPFD[8];                          // in as7341_init() berechnet, siehe compute_ppfd_weights()
-static const float K_CAL = 0.0731f;               // siehe Licht-Meter/src/main.cpp (gleicher Sensor/gleiche Einstellungen)
+// Vorlaeufig (07.11.2026): alter Wert 0.0731 x 1.6 -- 300-W-LM301H-Board (308 W an der Steckdose)
+// in 40 cm mittig gemessen 671, erwartet ca. 1000-1200 umol/m2/s. Geschaetzt, nicht gegen ein
+// PAR-Referenzgeraet abgeglichen -- spaeter mit OSLON-LEDs/PAR-Messgeraet ersetzen.
+static const float K_CAL = 0.117f;               // siehe Licht-Meter/src/main.cpp (gleicher Sensor/gleiche Einstellungen)
 
 // ADC-Vollausschlag = (ATIME+1)*(ASTEP+1) (Datasheet Equation 2), bei ATIME=35/ASTEP=999 also
 // 36000, NICHT 65535 -- die alte feste Schwelle 60000 fuer die Auto-Gain-Saettigungserkennung

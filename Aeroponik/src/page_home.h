@@ -86,7 +86,7 @@ R"rawliteral(
                             <strong>🌫️ CO2-<span class="de">Steuerung</span><span class="en">Control</span></strong>
                             <span id="co2OutputBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
                         </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
+                        <div class="status-pair" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
                             <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="co2StatusNow">--</div><div class="sensor-unit">ppm CO2</div></div>
                             <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="co2StatusRange">--</div><div class="sensor-unit">Min / Max</div></div>
                         </div>
@@ -97,7 +97,7 @@ R"rawliteral(
                             <strong>🌀 <span class="de">Abluftlüfter</span><span class="en">Exhaust Fan</span></strong>
                             <span id="fanModeBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
                         </div>
-                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
+                        <div class="status-pair" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
                             <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="fanPercent">--</div><div class="sensor-unit">% <span class="de">Leistung</span><span class="en">Power</span></div></div>
                             <div class="sensor-box" style="padding:8px;" id="fanRpmBox"><div class="sensor-value" style="font-size:1.4em;" id="fanRpm">--</div><div class="sensor-unit">RPM</div></div>
                         </div>
@@ -118,9 +118,9 @@ R"rawliteral(
                         <strong>💧 <span class="de">Luftbefeuchtung</span><span class="en">Humidification</span></strong>
                         <span id="humidOutputBadge" style="background:#6c757d;color:white;padding:2px 10px;border-radius:10px;font-size:0.85em;">--</span>
                     </div>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
+                    <div class="status-pair" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95em;margin-top:10px;">
                         <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="humidStatusNow">--</div><div class="sensor-unit">% <span class="de">Feuchte</span><span class="en">Humidity</span></div></div>
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="humidStatusRange">--</div><div class="sensor-unit">Min / Max</div></div>
+                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.4em;" id="humidStatusRange">--</div><div class="sensor-unit" id="humidStatusRangeUnit">Min / Max</div></div>
                     </div>
                 </div>
 

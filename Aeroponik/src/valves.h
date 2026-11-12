@@ -16,15 +16,16 @@ struct BehaelterConfig {
   uint8_t  pausenzeit_min_dunkel;   // wie pausenzeit_min, aber während der Dunkelphase
 };
 
+// Anzahl Behaelter = Duesenventile 1-4. Ventil 4 war frueher das Ruecklaufventil; die
+// Rueckleitung ist seit 11/2026 ein Handventil (Kugelhahn), der Ruecklauf-Vorlauf entfaellt.
+#define BEHAELTER_ANZAHL 4
+
 // ========== Gesamte Ventilkonfiguration ==========
 struct VentilConfig {
-  BehaelterConfig behaelter[3];
-  uint8_t  vorlaufzeit_s;    // Rücklaufventil Vorlaufzeit (Sekunden)
-  bool     vorlauf_aktiv;    // Vorlauf aktiviert
+  BehaelterConfig behaelter[BEHAELTER_ANZAHL];
   bool     gleiche_zeiten;   // "Gleiche Zeiten für alle": ein gemeinsamer Batch-Durchlauf
-                              // (Vorlauf nur einmal vor dem ersten aktiven Behälter, dann
-                              // alle aktiven Behälter direkt nacheinander, eine gemeinsame
-                              // Pause) statt 3 unabhängiger Timer — siehe loopVentile().
+                              // (alle aktiven Behälter direkt nacheinander, eine gemeinsame
+                              // Pause) statt unabhängiger Timer — siehe loopVentile().
   uint8_t  druckaufbau_s;    // Pumpe läuft so lange VOR dem Öffnen des Düsenventils (0 = aus) —
                               // sonst sprüht jeder Zyklus mit erst steigendem Druck, Menge und
                               // Durchfluss-Impulse schwanken dann stark von Zyklus zu Zyklus.
@@ -34,9 +35,9 @@ struct VentilConfig {
 };
 
 // ========== Zustand pro Behälter ==========
-// Ablauf: Pause → [Vorlauf] → [Druckaufbau] → Aktiv → [Nachlauf] → Pause
+// Ablauf: Pause → [Druckaufbau] → Aktiv → [Nachlauf] → Pause
 // (Batch: Nachlauf des einen Behälters ersetzt den Druckaufbau des nächsten)
-enum VentilZustand { V_PAUSE, V_VORLAUF, V_AKTIV, V_DRUCKAUFBAU, V_NACHLAUF };
+enum VentilZustand { V_PAUSE, V_AKTIV, V_DRUCKAUFBAU, V_NACHLAUF };
 
 struct BehaelterZustand {
   VentilZustand zustand;
@@ -45,7 +46,7 @@ struct BehaelterZustand {
 
 // Globale Instanzen
 extern VentilConfig    ventilConfig;
-extern BehaelterZustand behaelterZustand[3];
+extern BehaelterZustand behaelterZustand[BEHAELTER_ANZAHL];
 
 // Funktionen
 void setupVentile();
@@ -62,7 +63,6 @@ void resetVentilRuntimeState();
 
 // Aktueller Status für API
 const char* ventilZustandText(VentilZustand z);
-bool        ventilRueckOffen();
 
 // Pumpe: automatisch an, sobald irgendein Behälter im Druckaufbau/Nachlauf ist oder gerade
 // aktiv wässert (Ventil offen).
@@ -84,10 +84,12 @@ void saveUmwaelzConfig();
 void loadUmwaelzConfig();
 
 // Ausgangs-Direkttest (pausiert automatische Ventil-/Pumpensteuerung) zur
-// Verkabelungspruefung. Index 0-3 = Ventil 1-4 (Behälter 1-3 + Rücklauf),
+// Verkabelungspruefung. Index 0-3 = Ventil 1-4 (Behälter 1-4),
 // 4 = Umwälzpumpe, 5 = Pumpe — siehe OUTPUT_TEST_COUNT/output_test_name().
 #define OUTPUT_TEST_COUNT 6
-void        output_test_mode(bool enable);
+// keepUmwaelz = true (manueller Einzelzyklus): Umwaelzpumpe bleibt in ihrem Automatik-Takt und
+// verzoegert den Start nicht.
+void        output_test_mode(bool enable, bool keepUmwaelz = false);
 void        output_test_set(uint8_t index, bool on);
 bool        output_test_active();
 // true, solange output_test_mode(true) angefordert wurde, aber noch auf das Ende eines gerade

@@ -36,17 +36,21 @@ void storage_log(time_t ts, const LogEntry &e) {
         // Bereits vorhandene Tagesdatei kann noch das alte, kuerzere Spaltenformat haben
         // (vor Erweiterung um Raum/Zelt/Luefter/CO2/Luftbefeuchtung/Duesen-Durchfluss). In dem
         // Fall beiseitelegen statt Zeilen mit unterschiedlicher Spaltenzahl zu mischen. Pruefung
-        // auf die jeweils neueste Spalte (aktuell HeapMin_kB) faengt automatisch auch alle
-        // aelteren Formate.
+        // auf ein Merkmal des neuesten Formats (aktuell die VPD-Regelungsspalten) faengt
+        // automatisch auch alle aelteren Formate.
         File check = SD.open(filename, FILE_READ);
         if (check) {
             String firstLine = check.readStringUntil('\n');
             check.close();
-            if (firstLine.indexOf("HeapMin_kB") < 0) {
-                char oldName[28];
+            if (firstLine.indexOf("VPD_Soll_max") < 0) {
+                // Mehrere Formatwechsel am selben Tag (mehrere Updates): nie ein vorhandenes
+                // _alt ueberschreiben, sondern _alt2, _alt3 ... verwenden (sonst Datenverlust).
+                char oldName[32];
                 snprintf(oldName, sizeof(oldName), "/%04d-%02d-%02d_alt.csv",
                          t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
-                SD.remove(oldName);
+                for (int n = 2; SD.exists(oldName) && n < 100; n++)
+                    snprintf(oldName, sizeof(oldName), "/%04d-%02d-%02d_alt%d.csv",
+                             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, n);
                 SD.rename(filename, oldName);
                 isNew = true;
             }
@@ -63,8 +67,9 @@ void storage_log(time_t ts, const LogEntry &e) {
                    "RaumTemp_C,RaumFeuchte_%,ZeltTemp_C,ZeltFeuchte_%,ZeltCO2_ppm,ZeltVPD_kPa,ZeltPPFD_umol,"
                    "LichtMaske,LuefterLeistung_%,LuefterRPM,CO2Ausgang,HumidAusgang,"
                    "ImpulseBehaelter1,DauerBehaelter1_s,ImpulseBehaelter2,DauerBehaelter2_s,"
-                   "ImpulseBehaelter3,DauerBehaelter3_s,Laufzeit_min,NeustartGrund,Lichtx4Starts,Lichtx4Grund,Netzaussetzer,NetzaussetzerMax_ms,"
-                   "CO2Steckdose,HumidSteckdose,WLAN_dBm,WLAN_Abbrueche,EspNow_online,HeapMin_kB");
+                   "ImpulseBehaelter3,DauerBehaelter3_s,ImpulseBehaelter4,DauerBehaelter4_s,Laufzeit_min,NeustartGrund,Lichtx4Starts,Lichtx4Grund,Netzaussetzer,NetzaussetzerMax_ms,"
+                   "CO2Steckdose,HumidSteckdose,WLAN_dBm,WLAN_Abbrueche,EspNow_online,HeapMin_kB,"
+                   "MS2_Abfragen,MS2_Timeouts,VPD_Blatt_kPa,VPD_Soll_min,VPD_Soll_max");
     }
 
     char zeit[9];
@@ -88,7 +93,7 @@ void storage_log(time_t ts, const LogEntry &e) {
                   (e.fanOk ? String(e.fanRpm) : String("")) + "," +
                   String(e.co2Ausgang ? 1 : 0) + "," +
                   String(e.humidAusgang ? 1 : 0);
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
         line += "," + (e.flowValid[i] ? String(e.flowImpulse[i]) : String("")) +
                 "," + (e.flowValid[i] ? String(e.flowDauerS[i], 1) : String(""));
     }
@@ -100,6 +105,10 @@ void storage_log(time_t ts, const LogEntry &e) {
             "," + (e.humidSteckdose >= 0 ? String(e.humidSteckdose) : String(""));
     line += "," + (e.wlanOk ? String(e.wlanDbm) : String("")) + "," + String(e.wlanAbbrueche);
     line += "," + String(e.espnowOnline) + "/" + String(e.espnowGekoppelt) + "," + String(e.heapMinKb);
+    line += "," + String(e.ms2Abfragen) + "," + String(e.ms2Timeouts);
+    line += "," + (e.vpdOk ? String(e.vpdBlatt, 2)   : String("")) +
+            "," + (e.vpdOk ? String(e.vpdSollMin, 2) : String("")) +
+            "," + (e.vpdOk ? String(e.vpdSollMax, 2) : String(""));
 
     f.println(line);
     f.close();

@@ -34,6 +34,7 @@
 #include "storage.h"
 #include "co2ctrl.h"
 #include "humidctrl.h"
+#include "vpdctrl.h"
 #include "dwcctrl.h"
 #include "raumlichtctrl.h"
 #include "ds18b20cfg.h"
@@ -127,6 +128,7 @@ unsigned long lastRtcRetryMs = 0;
 // Aktueller Lichtstatus fuer die licht-/dunkelphasenabhaengige Bewaesserung — Fallback ohne
 // RTC ist true (Lichtphase-Werte, entspricht dem Verhalten vor dieser Funktion).
 bool lichtAnCached = true;
+static bool lichtStatusBekannt = false;   // erst nach der ersten RTC-Abfrage gesetzt (VPD-Zielbereich)
 #define WDT_TIMEOUT_S 30  // Watchdog-Timeout: haengt loop() laenger als das, Reset-Ausloeser
 #define RTC_RETRY_INTERVAL_MS 30000UL  // Falls rtc.begin() beim Boot einmal fehlschlaegt
                                         // (z.B. I2C-Timing-Race mit SD/W5500-Init), hier
@@ -272,7 +274,7 @@ static void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) 
 
 // Logging
 static uint32_t lastLogMs = 0;
-constexpr uint32_t LOG_INTERVAL_MS = 300000UL;  // 5 Minuten
+constexpr uint32_t LOG_INTERVAL_MS = 60000UL;   // 1 Minute (bis FW 1.20.1: 5 Minuten)
 
 // OTA Master
 bool otaInProgress = false;
@@ -552,151 +554,9 @@ void handleApiOutputTestStatus() {
     server.send(200, "application/json", response);
 }
 
-// ========== Durchflussmesser-Kalibrierung ==========
-// Ablauf: Pumpe an (Druck beobachten) -> Entlueften (Ventil auf/zu, Luft raus, beliebig oft) ->
-// Start (Ventil 4 auf, Pulse zaehlen) -> Stop (Ventil zu, Pulszahl einfrieren) -> gemessene Menge
-// in ml eingeben -> Pulse/Liter berechnen+speichern. Start ist erst nach mindestens einem
-// abgeschlossenen Entlueftungs-Zyklus moeglich (flowCalPurged), damit Luft im System nicht die
-// Pulszahl verfaelscht.
-// Nutzt den bestehenden Ausgangs-Direkttest (valves.h: output_test_*) fuer Pumpe (Index 5) und
-// Ruecklaufventil (Index 3) -- das pausiert automatisch die normale Ventil-/Pumpensteuerung
-// (output_test_mode(true)), genau wie beim manuellen Verkabelungstest.
-enum FlowCalState { FLOWCAL_IDLE, FLOWCAL_PUMP_ON, FLOWCAL_PURGING, FLOWCAL_COUNTING, FLOWCAL_STOPPED };
-static FlowCalState flowCalState          = FLOWCAL_IDLE;
-static uint32_t      flowCalResultPulses  = 0;   // eingefroren nach Stop
-static float          flowCalPulsesPerLiter = 0.0f;
-static bool           flowCalPurged         = false;  // true sobald einmal entlueftet wurde -- erst dann darf die eigentliche Messung starten
-
-void loadFlowCalConfig() {
-    if (EEPROM.read(EEPROM_FLOWCAL_MAGIC_ADDR) == EEPROM_FLOWCAL_MAGIC_BYTE) {
-        EEPROM.get(EEPROM_FLOWCAL_BASE, flowCalPulsesPerLiter);
-    } else {
-        flowCalPulsesPerLiter = 0.0f;
-    }
-}
-
-void saveFlowCalConfig() {
-    EEPROM.put(EEPROM_FLOWCAL_BASE, flowCalPulsesPerLiter);
-    EEPROM.write(EEPROM_FLOWCAL_MAGIC_ADDR, EEPROM_FLOWCAL_MAGIC_BYTE);
-    EEPROM.commit();
-}
-
-// Bricht die Kalibrierung aus jedem Zustand sauber ab: Ventil zu, Pumpe aus, Testmodus
-// verlassen (gibt die normale Ventil-/Pumpensteuerung wieder frei).
-static void flowCalAbort() {
-    output_test_set(3, false);  // Ruecklaufventil zu
-    output_test_set(5, false);  // Pumpe aus
-    output_test_mode(false);
-    flowCalState  = FLOWCAL_IDLE;
-    flowCalPurged = false;
-}
-
-void handleApiFlowCalStatus() {
-    JsonDocument doc;
-    doc["state"] = (int)flowCalState;
-    noInterrupts();
-    uint32_t live = flowPulseCount;
-    interrupts();
-    doc["pulses_live"]      = live;
-    doc["pulses_result"]    = flowCalResultPulses;
-    doc["druckBar"]         = serialized(String(druckBar, 2));
-    doc["pulses_per_liter"] = serialized(String(flowCalPulsesPerLiter, 1));
-    doc["purged"]           = flowCalPurged;
-    String response;
-    serializeJson(doc, response);
-    server.send(200, "application/json", response);
-}
-
-void handleApiFlowCalStart() {
-    if (server.method() != HTTP_POST) { server.send(405); return; }
-    output_test_mode(true);
-    output_test_set(5, true);   // Pumpe an
-    flowCalState  = FLOWCAL_PUMP_ON;
-    flowCalPurged = false;
-    server.send(200, "application/json", "{\"success\":true}");
-}
-
-// Entlueften: Ventil oeffnen/schliessen bevor die eigentliche Messung beginnt, damit Luft im
-// System (falls vorhanden) nicht die Pulszahl verfaelscht. Derselbe Button/Endpoint schaltet um --
-// erst nach dem Schliessen (flowCalPurged=true) laesst handleApiFlowCalBegin() den Start zu.
-void handleApiFlowCalPurge() {
-    if (server.method() != HTTP_POST) { server.send(405); return; }
-    if (flowCalState == FLOWCAL_PUMP_ON) {
-        output_test_set(3, true);   // Ruecklaufventil auf zum Entlueften
-        flowCalState = FLOWCAL_PURGING;
-    } else if (flowCalState == FLOWCAL_PURGING) {
-        output_test_set(3, false);  // Ruecklaufventil zu
-        flowCalPurged = true;
-        flowCalState  = FLOWCAL_PUMP_ON;
-    } else {
-        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
-        return;
-    }
-    server.send(200, "application/json", "{\"success\":true}");
-}
-
-void handleApiFlowCalBegin() {
-    if (server.method() != HTTP_POST) { server.send(405); return; }
-    if (flowCalState != FLOWCAL_PUMP_ON || !flowCalPurged) {
-        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
-        return;
-    }
-    noInterrupts(); flowPulseCount = 0; interrupts();
-    output_test_set(3, true);   // Ruecklaufventil auf
-    flowCalState = FLOWCAL_COUNTING;
-    server.send(200, "application/json", "{\"success\":true}");
-}
-
-void handleApiFlowCalStop() {
-    if (server.method() != HTTP_POST) { server.send(405); return; }
-    if (flowCalState != FLOWCAL_COUNTING) {
-        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
-        return;
-    }
-    output_test_set(3, false);  // Ruecklaufventil zu
-    noInterrupts(); flowCalResultPulses = flowPulseCount; interrupts();
-    flowCalState = FLOWCAL_STOPPED;
-    JsonDocument doc;
-    doc["success"]       = true;
-    doc["pulses_result"] = flowCalResultPulses;
-    String response;
-    serializeJson(doc, response);
-    server.send(200, "application/json", response);
-}
-
-void handleApiFlowCalCalc() {
-    if (server.method() != HTTP_POST) { server.send(405); return; }
-    if (flowCalState != FLOWCAL_STOPPED) {
-        server.send(400, "application/json", "{\"error\":\"Falscher Zustand\"}");
-        return;
-    }
-    JsonDocument doc;
-    deserializeJson(doc, server.arg("plain"));
-    float volume_ml = doc["volume_ml"] | 0.0f;
-    if (volume_ml <= 0 || flowCalResultPulses == 0) {
-        server.send(400, "application/json", "{\"error\":\"Ungueltige Menge\"}");
-        return;
-    }
-    flowCalPulsesPerLiter = flowCalResultPulses / (volume_ml / 1000.0f);
-    saveFlowCalConfig();
-    flowCalAbort();  // Pumpe aus, Ventil zu, Testmodus verlassen, state=IDLE
-
-    JsonDocument resp;
-    resp["success"]         = true;
-    resp["pulses_per_liter"] = serialized(String(flowCalPulsesPerLiter, 1));
-    String response;
-    serializeJson(resp, response);
-    server.send(200, "application/json", response);
-}
-
-void handleApiFlowCalCancel() {
-    if (server.method() != HTTP_POST) { server.send(405); return; }
-    flowCalAbort();
-    server.send(200, "application/json", "{\"success\":true}");
-}
-
-// Zugriffsschicht fuer flowmonitor.cpp (siehe flowsensor.h) -- Zaehler/ISR bleiben hier, damit
-// die Kalibrierroutine oben unveraendert bleibt.
+// Zugriffsschicht fuer flowmonitor.cpp (siehe flowsensor.h) -- Zaehler/ISR leben hier.
+// (Die ml-Kalibrierung ist mit FW 1.19.0 entfallen: Ueberwacht wird in Impulsen pro Sekunde,
+// Mengen lassen sich bei Bedarf aus den Impulsen im SD-Log selbst ausrechnen.)
 uint32_t flowsensor_take_pulses() {
     noInterrupts();
     uint32_t p = flowPulseCount;
@@ -705,27 +565,20 @@ uint32_t flowsensor_take_pulses() {
     return p;
 }
 
-float flowsensor_pulses_per_liter() {
-    return flowCalPulsesPerLiter;
-}
-
 // ========== Duesen-Ueberwachung API (siehe flowmonitor.h) ==========
 
 void handleApiFlowMonGet() {
     JsonDocument doc;
     doc["enabled"]          = flowMonitorConfig.enabled;
     doc["toleranz_prozent"] = flowMonitorConfig.toleranz_prozent;
-    JsonArray soll = doc["erwarteter_durchfluss_ml_s"].to<JsonArray>();
-    for (uint8_t i = 0; i < 3; i++) soll.add(serialized(String(flowMonitorConfig.erwarteter_durchfluss_ml_s[i], 2)));
-
-    JsonArray letzte = doc["last_cycle_ml"].to<JsonArray>();
-    JsonArray summe   = doc["total_ml"].to<JsonArray>();
-    for (uint8_t i = 0; i < 3; i++) {
-        letzte.add(serialized(String(flowMonitorState.last_cycle_ml[i], 0)));
-        summe.add(serialized(String(flowMonitorState.total_ml[i], 0)));
+    JsonArray soll   = doc["erwartet_impulse_s"].to<JsonArray>();
+    JsonArray impulse = doc["last_cycle_pulses"].to<JsonArray>();
+    JsonArray dauer   = doc["last_cycle_s"].to<JsonArray>();
+    for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
+        soll.add(serialized(String(flowMonitorConfig.erwartet_impulse_s[i], 1)));
+        impulse.add(flowMonitorState.last_cycle_pulses[i]);
+        dauer.add(serialized(String(flowMonitorState.last_cycle_s[i], 1)));
     }
-    doc["total_ml_all"]     = serialized(String(flowMonitorState.total_ml_all, 0));
-    doc["pulses_per_liter"] = serialized(String(flowsensor_pulses_per_liter(), 1));
 
     String response;
     serializeJson(doc, response);
@@ -739,10 +592,10 @@ void handleApiFlowMonSave() {
     if (doc["enabled"].is<bool>()) flowMonitorConfig.enabled = doc["enabled"];
     if (doc["toleranz_prozent"].is<int>())
         flowMonitorConfig.toleranz_prozent = (uint8_t)constrain((int)doc["toleranz_prozent"], 1, 100);
-    if (doc["erwarteter_durchfluss_ml_s"].is<JsonArray>()) {
-        JsonArray arr = doc["erwarteter_durchfluss_ml_s"];
-        for (uint8_t i = 0; i < 3 && i < arr.size(); i++)
-            flowMonitorConfig.erwarteter_durchfluss_ml_s[i] = constrain((float)arr[i], 0.0f, 1000.0f);
+    if (doc["erwartet_impulse_s"].is<JsonArray>()) {
+        JsonArray arr = doc["erwartet_impulse_s"];
+        for (uint8_t i = 0; i < BEHAELTER_ANZAHL && i < arr.size(); i++)
+            flowMonitorConfig.erwartet_impulse_s[i] = constrain((float)arr[i], 0.0f, 1000.0f);
     }
     saveFlowMonitorConfig();
     server.send(200, "application/json", "{\"success\":true}");
@@ -1017,7 +870,7 @@ void handleApiTankConfigSave() {
 
 void handleApiVentilStatus() {
   JsonDocument doc;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < BEHAELTER_ANZAHL; i++) {
     JsonObject b = doc["behaelter"][i].to<JsonObject>();
     b["zustand"]        = ventilZustandText(behaelterZustand[i].zustand);
     b["aktiv"]          = ventilConfig.behaelter[i].aktiv;
@@ -1028,11 +881,8 @@ void handleApiVentilStatus() {
     unsigned long vergangen = (millis() - behaelterZustand[i].timerStart) / 1000;
     b["timer_s"]        = vergangen;
   }
-  doc["vorlaufzeit_s"]      = ventilConfig.vorlaufzeit_s;
-  doc["vorlauf_aktiv"]      = ventilConfig.vorlauf_aktiv;
   doc["druckaufbau_s"]      = ventilConfig.druckaufbau_s;
   doc["gleiche_zeiten"]     = ventilConfig.gleiche_zeiten;
-  doc["rueck_offen"]        = ventilRueckOffen();
   doc["pumpe_aktiv"]        = pumpeAktiv();
   doc["umwaelzpumpe_aktiv"] = umwaelzpumpeAktiv();
   doc["licht_an"]           = lichtAnCached;
@@ -1073,7 +923,7 @@ void handleApiVentilConfig() {
 
   bool wasGleicheZeiten = ventilConfig.gleiche_zeiten;
 
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < BEHAELTER_ANZAHL; i++) {
     if (doc["behaelter"][i]["oeffnungszeit_s"].is<int>())
       ventilConfig.behaelter[i].oeffnungszeit_s = constrain((int)doc["behaelter"][i]["oeffnungszeit_s"], 1, 60);
     if (doc["behaelter"][i]["pausenzeit_min"].is<int>())
@@ -1085,19 +935,15 @@ void handleApiVentilConfig() {
     if (doc["behaelter"][i]["aktiv"].is<bool>())
       ventilConfig.behaelter[i].aktiv = doc["behaelter"][i]["aktiv"];
   }
-  if (doc["vorlaufzeit_s"].is<int>())
-    ventilConfig.vorlaufzeit_s = constrain((int)doc["vorlaufzeit_s"], 0, 30);
-  if (doc["vorlauf_aktiv"].is<bool>())
-    ventilConfig.vorlauf_aktiv = doc["vorlauf_aktiv"];
   if (doc["druckaufbau_s"].is<int>())
     ventilConfig.druckaufbau_s = constrain((int)doc["druckaufbau_s"], 0, 30);
   if (doc["gleiche_zeiten"].is<bool>())
     ventilConfig.gleiche_zeiten = doc["gleiche_zeiten"];
 
-  // Im Batch-Modus muessen alle 3 Behaelter dieselbe Zeit haben — Behaelter 1 ist die
+  // Im Batch-Modus muessen alle Behaelter dieselbe Zeit haben — Behaelter 1 ist die
   // massgebliche Quelle (das Frontend zeigt dann ohnehin nur noch ein gemeinsames Feld).
   if (ventilConfig.gleiche_zeiten) {
-    for (int i = 1; i < 3; i++) {
+    for (int i = 1; i < BEHAELTER_ANZAHL; i++) {
       ventilConfig.behaelter[i].oeffnungszeit_s        = ventilConfig.behaelter[0].oeffnungszeit_s;
       ventilConfig.behaelter[i].pausenzeit_min         = ventilConfig.behaelter[0].pausenzeit_min;
       ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = ventilConfig.behaelter[0].oeffnungszeit_s_dunkel;
@@ -1116,19 +962,29 @@ void handleApiVentilConfig() {
 // konfigurierte Oeffnungszeit (je nach aktueller Licht-/Dunkelphase, siehe lichtAnCached) und
 // schliesst danach automatisch wieder. Nutzt denselben Ausgangs-Direkttest wie beim
 // Verkabelungstest/der Durchflussmesser-Kalibrierung -- pausiert dabei die normale Automatik.
-static int8_t   manualDoseBehaelter = -1;   // -1 = inaktiv, sonst Index 0-2
+static int8_t   manualDoseBehaelter = -1;   // -1 = inaktiv, sonst Index 0..BEHAELTER_ANZAHL-1
 static uint32_t manualDoseEndMs     = 0;   // Ende Druckaufbau bzw. (Ventil offen) Ende Oeffnungszeit
 static uint8_t  manualDoseSekunden  = 0;
 static bool     manualDoseValveOpen = false;
+// Der Testmodus wird nicht sofort aktiv, solange gerade ein Giesszyklus laeuft (Ventil offen,
+// Druckaufbau oder Nachlauf, siehe output_test_mode()). Bis dahin regelt
+// loopVentile() die Pumpe weiter selbst und wuerde sie sofort wieder ausschalten -- daher
+// erst starten, wenn output_test_active() true ist.
+static bool     manualDoseStarted   = false;
 
 void handleApiManualDoseStatus() {
     JsonDocument doc;
     doc["active"] = (manualDoseBehaelter >= 0);
     if (manualDoseBehaelter >= 0) {
         doc["index"] = manualDoseBehaelter;
+        doc["waiting"] = !manualDoseStarted;
         uint32_t now = millis();
-        uint32_t rest = (manualDoseEndMs > now) ? (manualDoseEndMs - now + 999) / 1000 : 0;
-        if (!manualDoseValveOpen) rest += manualDoseSekunden;   // Druckaufbau + folgende Spruehzeit
+        uint32_t rest;
+        if (!manualDoseStarted)
+            rest = ventilConfig.druckaufbau_s + manualDoseSekunden;
+        else
+            rest = (manualDoseEndMs > now) ? (manualDoseEndMs - now + 999) / 1000 : 0;
+        if (manualDoseStarted && !manualDoseValveOpen) rest += manualDoseSekunden;   // Druckaufbau + folgende Spruehzeit
         doc["remaining_s"] = rest;
     }
     String response;
@@ -1145,34 +1001,44 @@ void handleApiManualDoseStart() {
     JsonDocument doc;
     deserializeJson(doc, server.arg("plain"));
     int idx = doc["index"] | -1;
-    if (idx < 0 || idx > 2) {
+    if (idx < 0 || idx >= BEHAELTER_ANZAHL) {
         server.send(400, "application/json", "{\"error\":\"Ungueltiger Index\"}");
         return;
     }
     uint8_t sekunden = lichtAnCached ? ventilConfig.behaelter[idx].oeffnungszeit_s
                                      : ventilConfig.behaelter[idx].oeffnungszeit_s_dunkel;
-    output_test_mode(true);
-    output_test_set(5, true);   // Pumpe an -- erst Druck aufbauen (wie im Automatikbetrieb)
+    output_test_mode(true, true);   // Umwaelzpumpe bleibt unberuehrt; wartet nur auf laufenden Giesszyklus
     manualDoseBehaelter  = idx;
     manualDoseSekunden   = sekunden;
     manualDoseValveOpen  = false;
-    manualDoseEndMs      = millis() + (uint32_t)ventilConfig.druckaufbau_s * 1000UL;   // Ende Druckaufbau
+    manualDoseStarted    = false;   // Pumpe/Ventil schaltet loopManualDose(), sobald Testmodus aktiv
     server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleApiManualDoseCancel() {
     if (server.method() != HTTP_POST) { server.send(405); return; }
     if (manualDoseBehaelter >= 0) {
-        output_test_set((uint8_t)manualDoseBehaelter, false);
-        output_test_set(5, false);
-        output_test_mode(false);
+        if (manualDoseStarted) {
+            output_test_set((uint8_t)manualDoseBehaelter, false);
+            output_test_set(5, false);
+        }
+        output_test_mode(false);   // zieht auch eine noch wartende Anfrage zurueck
         manualDoseBehaelter = -1;
+        manualDoseStarted   = false;
     }
     server.send(200, "application/json", "{\"success\":true}");
 }
 
 void loopManualDose() {
     if (manualDoseBehaelter < 0) return;
+    if (!manualDoseStarted) {
+        if (!output_test_active()) return;   // Automatik laeuft noch -- warten
+        output_test_set(5, true);   // Pumpe an -- erst Druck aufbauen (wie im Automatikbetrieb)
+        manualDoseEndMs   = millis() + (uint32_t)ventilConfig.druckaufbau_s * 1000UL;   // Ende Druckaufbau
+        manualDoseStarted = true;
+        dbgPrintf("Manueller Zyklus Behälter %d: Druckaufbau\n", manualDoseBehaelter + 1);
+        return;
+    }
     if (!manualDoseValveOpen) {
         // Druckaufbau vorbei -> Duesenventil auf, ab jetzt laeuft die eigentliche Oeffnungszeit
         if (millis() >= manualDoseEndMs) {
@@ -1187,6 +1053,7 @@ void loopManualDose() {
         output_test_set(5, false);
         output_test_mode(false);
         manualDoseBehaelter = -1;
+        manualDoseStarted   = false;
     }
 }
 
@@ -1745,6 +1612,9 @@ void loopHumidCtrl() {
         // Keine verlaessliche Feuchte-Messung -> sicherheitshalber abschalten, statt den
         // zuletzt bekannten Zustand (moeglicherweise "EIN") blind weiterlaufen zu lassen.
         humidOutputOn = false;
+    } else if (vpdConfig.enabled && vpdConfig.use_humid) {
+        // VPD-Regelung fuehrt (siehe vpdctrl.cpp, loopVpdCtrl) -- Min/Max hier bleibt unbenutzt
+        humidOutputOn = vpdState.valid && vpdState.humidWant;
     } else {
         uint16_t humNow = (uint16_t)roundf(ms2.hum_pct * 10.0f);
         if (humNow <= humidConfig.humid_min)      humidOutputOn = true;
@@ -1783,6 +1653,12 @@ void handleApiHumidGet() {
     const Rs485SensorData& ms2 = rs485_get_ms2();
     doc["humid_online"]     = ms2_klima_ok(ms2);
     if (ms2_klima_ok(ms2)) doc["humid_now"] = serialized(String(ms2.hum_pct, 1));
+    doc["vpd"]              = vpdConfig.enabled && vpdConfig.use_humid;   // Min/Max ruhen dann
+    doc["pulse_pause"]      = vpdConfig.enabled && vpdConfig.use_humid && vpdState.humidDemand && !humidOutputOn;
+    if (vpdState.valid) {
+        doc["vpd_min"] = serialized(String(vpdState.sollMin, 2));
+        doc["vpd_max"] = serialized(String(vpdState.sollMax, 2));
+    }
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -2037,7 +1913,7 @@ void handleApiLueftmodulSave() {
 #define NOTIFY_NODE_DELAY_MS (2UL * 60000UL)  // ESP-NOW-Node: so lange offline, bevor gemeldet wird
 
 struct NotifyAlertState { bool aktiv = false; unsigned long lastSentMs = 0; bool problem = false; unsigned long problemSinceMs = 0; };
-static NotifyAlertState alertNetz, alertSensor, alertFeuchte, alertTemperatur, alertTank, alertLueft, alertNodes;
+static NotifyAlertState alertNetz, alertSensor, alertFeuchte, alertTemperatur, alertTank, alertLueft, alertNodes, alertVpd;
 
 // Alarm "Verbindung" (WLAN-Ausfall, ESP-NOW-Node offline). Eigener NVS-Eintrag statt
 // NotifyConfig, weil dessen EEPROM-Block keinen Platz mehr fuer ein weiteres Feld hat.
@@ -2134,6 +2010,27 @@ void loopNotify() {
                  fuellstandProzent, notifyConfig.tank_min_prozent);
         checkAlert(alertTank, notifyConfig.tank_enabled, fuellstandProzent < notifyConfig.tank_min_prozent,
                    tkmsg, "✅ Vorratsbehälter wieder ausreichend gefüllt.");
+    }
+
+    // VPD-Regelung: Zielbereich seit alarm_min Minuten verfehlt (meist: Grenze der Raumluft
+    // erreicht -- Luefter am Anschlag, Raumluft zu feucht, Befeuchter schafft es nicht)
+    {
+        const uint16_t r = vpdState.reasons;
+        String why;
+        if (r & VPD_R_FAN_MAX)    why += " Lüfter am Anschlag.";
+        if (r & VPD_R_ROOM_WET)   why += " Raumluft ist nicht trockener als die Zeltluft.";
+        if (r & VPD_R_CO2)        why += " CO2-Dosierung bremst den Lüfter.";
+        if (r & VPD_R_COLD)       why += " Zelt an der Mindesttemperatur, Abluft wird nicht erhöht.";
+        if (r & VPD_R_TEMP_LIMIT) why += " Temperaturgrenze hat Vorrang.";
+        if (r & VPD_R_HUM_LIMIT)  why += " Feuchtegrenze hat Vorrang.";
+        if ((r & VPD_R_TOO_DRY) && vpdState.humidDemand) why += " Befeuchter läuft, schafft es aber nicht.";
+        char vmsg[220];
+        snprintf(vmsg, sizeof(vmsg), "🌿 VPD %s: %.2f kPa (Soll %.2f–%.2f kPa) seit %u min.%s",
+                 (r & VPD_R_TOO_HUMID) ? "zu niedrig (zu feucht)" : "zu hoch (zu trocken)",
+                 vpdState.vpdLeaf, vpdState.sollMin, vpdState.sollMax, vpdConfig.alarm_min, why.c_str());
+        checkAlert(alertVpd, vpdConfig.enabled && vpdConfig.alarm_min > 0,
+                   vpdState.valid && vpdState.outOfBand, vmsg,
+                   "✅ VPD wieder im Zielbereich.", (unsigned long)vpdConfig.alarm_min * 60000UL);
     }
 
     {
@@ -2325,11 +2222,18 @@ static bool ds18b20HexToAddr(const String& hex, uint8_t* addr) {
 // ggf. bereits zugewiesener Rolle.
 void handleApiDs18b20Scan() {
     JsonDocument doc;
-    uint8_t count = sensors.getDeviceCount();
+    // Live-Suche auf dem Bus statt sensors.getDeviceCount(): der Zaehler wird nur einmal in
+    // sensors.begin() beim Booten ermittelt. Antworten die Sensoren da noch nicht (Spannung
+    // noch nicht stabil), bleibt er bis zum naechsten Neustart 0 -- die Messwerte laufen
+    // trotzdem weiter, weil sie ueber die gespeicherten ROM-Adressen gelesen werden.
+    uint8_t count = 0;
     JsonArray arr = doc["devices"].to<JsonArray>();
-    for (uint8_t i = 0; i < count; i++) {
-        DeviceAddress addr;
-        if (!sensors.getAddress(addr, i)) continue;
+    DeviceAddress addr;
+    oneWire.reset_search();
+    while (count < 16 && oneWire.search(addr)) {
+        if (OneWire::crc8(addr, 7) != addr[7]) continue;  // gestoerte Suche verwerfen
+        if (!sensors.validFamily(addr)) continue;
+        count++;
         JsonObject o = arr.add<JsonObject>();
         o["addr"] = ds18b20AddrToHex(addr);
         float t = sensors.getTempC(addr);
@@ -2394,6 +2298,16 @@ static uint8_t fanRampPercent(float value, uint8_t minVal, uint8_t maxVal, uint8
 // Zuletzt berechnete Luefter-Ziel-Leistung (fuer Statusanzeige bei Ausgaengen ohne
 // Ruecklesewert wie GP8403). -1 = noch kein Wert.
 static int gFanTargetPct = -1;
+static bool gFanPulsed   = false;   // Sollwert unter der MARS-Mindestdrehzahl -> Taktbetrieb
+
+// Der MARS-Luefter (iControl) laeuft bei jedem Wert > 0 mit seiner Mindestdrehzahl (~900 RPM,
+// meldet dann 25 %), darunter kennt er nur "aus". Sollwerte zwischen 0 und dieser Grenze werden
+// deshalb im Takt umgesetzt: in einem 10-min-Raster laeuft er target/25 der Zeit mit Minimum,
+// sonst aus -- im Mittel also wirklich weniger Luftaustausch. Die Mindestdrehzahl der
+// Abluftsteuerung wird damit zur Grundlueftung (z. B. 5 % = 2 von 10 min).
+#define FAN_MARS_FLOOR_PCT   25
+#define FAN_PULSE_PERIOD_S   600UL
+#define FAN_PULSE_MIN_ON_S   60UL
 
 void loopFanCtrl() {
     if (!fanConfig.enabled) return;
@@ -2404,7 +2318,11 @@ void loopFanCtrl() {
     static uint8_t last_sent = 0xFF;  // 0xFF = unbekannt, erzwingt ersten Send
     uint8_t target;
 
-    if (fanConfig.mode == FAN_MODE_MANUAL) {
+    if (vpdConfig.enabled && vpdConfig.use_fan) {
+        // VPD-Regelung fuehrt (inkl. Temperatur-/Feuchtegrenzen), -1 = Wert halten
+        if (vpdState.fanPct < 0) return;
+        target = (uint8_t)constrain(vpdState.fanPct, 0, 100);
+    } else if (fanConfig.mode == FAN_MODE_MANUAL) {
         target = fanConfig.manual_percent;
     } else {
         const Rs485SensorData& ms2 = rs485_get_ms2();
@@ -2428,7 +2346,17 @@ void loopFanCtrl() {
     }
 
     gFanTargetPct = target;
-    if (target != last_sent) {
+    uint8_t send = target;
+    gFanPulsed = false;
+    if (outputConfig.fan_output == FAN_OUTPUT_MARS && target > 0 && target < FAN_MARS_FLOOR_PCT) {
+        uint32_t onS = (uint32_t)target * FAN_PULSE_PERIOD_S / FAN_MARS_FLOOR_PCT;
+        if (onS < FAN_PULSE_MIN_ON_S) onS = FAN_PULSE_MIN_ON_S;   // kurze Anlaeufe vermeiden
+        uint32_t phase = (millis() / 1000UL) % FAN_PULSE_PERIOD_S;
+        send = phase < onS ? FAN_MARS_FLOOR_PCT : 0;
+        gFanPulsed = true;
+    }
+    if (send != last_sent) {
+        target = send;
         uint16_t raw = (uint16_t)roundf(target / 100.0f * 4095);
         bool sent;
         const char* out;
@@ -2446,6 +2374,100 @@ void loopFanCtrl() {
     }
 }
 
+// ========== VPD-Regelung (vpdctrl.cpp) ==========
+// Berechnet alle 5 s die Vorgaben fuer Befeuchter und Abluftluefter; loopHumidCtrl() und
+// loopFanCtrl() uebernehmen sie, wenn use_humid bzw. use_fan gesetzt ist.
+void loopVpdCtrl() {
+    static uint32_t last_check = 0;
+    // Nach dem Start erst den echten Lichtstatus abwarten -- sonst startet der Zielbereich mit dem
+    // Default "Licht an" (Tagband) und wandert nachts erst 30 min lang herunter (ohne RTC nach 30 s)
+    if (!lichtStatusBekannt && millis() < 30000) return;
+    if (millis() - last_check < 5000) return;
+    last_check = millis();
+    const Rs485SensorData& ms2 = rs485_get_ms2();
+    VpdInputs in;
+    in.klimaOk    = ms2_klima_ok(ms2);
+    in.tempC      = ms2.temp_c;
+    in.humPct     = ms2.hum_pct;
+    in.roomOk     = aht21Ok;
+    in.roomTempC  = aht21Temp;
+    in.roomHumPct = aht21Hum;
+    in.lightOn    = lichtAnCached;
+    in.co2Dosing  = co2Config.enabled && co2OutputOn;
+    in.fanMin     = fanConfig.min_speed;
+    in.fanMax     = fanMaxSpeed;
+    in.fanNow     = gFanTargetPct;
+    vpdUpdate(in);
+}
+
+void handleApiVpdGet() {
+    JsonDocument doc;
+    doc["enabled"]     = vpdConfig.enabled;
+    doc["phase"]       = vpdConfig.phase;
+    doc["day_min"]     = vpdConfig.day_min;
+    doc["day_max"]     = vpdConfig.day_max;
+    doc["night_min"]   = vpdConfig.night_min;
+    doc["night_max"]   = vpdConfig.night_max;
+    doc["leaf_offset"] = vpdConfig.leaf_offset;
+    doc["use_humid"]   = vpdConfig.use_humid;
+    doc["use_fan"]     = vpdConfig.use_fan;
+    doc["temp_max"]    = vpdConfig.temp_max;
+    doc["hum_max"]     = vpdConfig.hum_max;
+    doc["alarm_min"]   = vpdConfig.alarm_min;
+    doc["temp_min"]    = vpdConfig.temp_min;
+    // Richtwerte aller Phasen fuer die Anzeige (kPa*100: Tag min/max, Nacht min/max)
+    JsonArray ph = doc["phases"].to<JsonArray>();
+    for (uint8_t p = 0; p < VPD_PHASE_COUNT; p++) {
+        float a, b, c, d;
+        vpdPhaseBand(p, true, a, b); vpdPhaseBand(p, false, c, d);
+        JsonArray row = ph.add<JsonArray>();
+        row.add((int)roundf(a * 100)); row.add((int)roundf(b * 100));
+        row.add((int)roundf(c * 100)); row.add((int)roundf(d * 100));
+    }
+    // Zustand
+    doc["valid"]      = vpdState.valid;
+    doc["light_on"]   = lichtAnCached;
+    doc["reasons"]    = vpdState.reasons;
+    doc["humid_want"] = vpdState.humidWant;
+    doc["humid_demand"] = vpdState.humidDemand;
+    doc["fan_pct"]    = vpdState.fanPct;
+    doc["humid_dev"]  = humidConfig.enabled;
+    doc["fan_dev"]    = fanConfig.enabled;
+    if (vpdState.valid) {
+        doc["vpd_air"]   = serialized(String(vpdState.vpdAir, 2));
+        doc["vpd_leaf"]  = serialized(String(vpdState.vpdLeaf, 2));
+        doc["soll_min"]  = serialized(String(vpdState.sollMin, 2));
+        doc["soll_max"]  = serialized(String(vpdState.sollMax, 2));
+        doc["ah_tent"]   = serialized(String(vpdState.tentAbsHum, 1));
+        if (aht21Ok) doc["ah_room"] = serialized(String(vpdState.roomAbsHum, 1));
+    }
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleApiVpdSave() {
+    if (server.method() != HTTP_POST) { server.send(405); return; }
+    JsonDocument doc;
+    deserializeJson(doc, server.arg("plain"));
+    if (doc["enabled"].is<bool>())     vpdConfig.enabled     = doc["enabled"];
+    if (doc["phase"].is<int>())        vpdConfig.phase       = constrain((int)doc["phase"], 0, VPD_PHASE_COUNT - 1);
+    if (doc["day_min"].is<int>())      vpdConfig.day_min     = constrain((int)doc["day_min"],   10, 250);
+    if (doc["day_max"].is<int>())      vpdConfig.day_max     = constrain((int)doc["day_max"],   10, 250);
+    if (doc["night_min"].is<int>())    vpdConfig.night_min   = constrain((int)doc["night_min"], 10, 250);
+    if (doc["night_max"].is<int>())    vpdConfig.night_max   = constrain((int)doc["night_max"], 10, 250);
+    if (doc["leaf_offset"].is<int>())  vpdConfig.leaf_offset = constrain((int)doc["leaf_offset"], -50, 30);
+    if (doc["use_humid"].is<bool>())   vpdConfig.use_humid   = doc["use_humid"];
+    if (doc["use_fan"].is<bool>())     vpdConfig.use_fan     = doc["use_fan"];
+    if (doc["temp_max"].is<int>())     vpdConfig.temp_max    = constrain((int)doc["temp_max"], 18, 40);
+    if (doc["hum_max"].is<int>())      vpdConfig.hum_max     = constrain((int)doc["hum_max"],  40, 95);
+    if (doc["alarm_min"].is<int>())    vpdConfig.alarm_min   = constrain((int)doc["alarm_min"], 0, 240);
+    if (doc["temp_min"].is<int>())     vpdConfig.temp_min    = constrain((int)doc["temp_min"], 5, 30);
+    saveVpdConfig();
+    vpdReset();
+    server.send(200, "application/json", "{\"success\":true}");
+}
+
 // ========== Fan API ==========
 
 void handleApiFanGet() {
@@ -2461,6 +2483,7 @@ void handleApiFanGet() {
     doc["enabled"]         = fanConfig.enabled;
     doc["temp_mode"]       = fanConfig.temp_mode;
     doc["temp_cap_diff"]   = fanConfig.temp_cap_diff;
+    doc["vpd"]             = vpdConfig.enabled && vpdConfig.use_fan;      // Modus ruht dann
     doc["room_ok"]         = aht21Ok;
     if (aht21Ok) doc["room_temp"] = serialized(String(aht21Temp, 1));
 
@@ -2482,6 +2505,8 @@ void handleApiFanGet() {
             doc["percent"] = fan.percent;
             doc["rpm"]     = fan.rpm;
         }
+        if (fanConfig.enabled && gFanTargetPct >= 0) doc["target"] = gFanTargetPct;
+        doc["pulsed"] = fanConfig.enabled && gFanPulsed;
     }
     String response;
     serializeJson(doc, response);
@@ -2658,7 +2683,6 @@ void handleApiFanSave() {
     if (doc["hum_max"].is<int>())         fanConfig.hum_max        = constrain((int)doc["hum_max"], 0, 100);
     if (doc["temp_min"].is<int>())        fanConfig.temp_min       = constrain((int)doc["temp_min"], 0, 60);
     if (doc["temp_max"].is<int>())        fanConfig.temp_max       = constrain((int)doc["temp_max"], 0, 60);
-    if (doc["enabled"].is<bool>())        fanConfig.enabled        = doc["enabled"];
     if (doc["temp_mode"].is<int>())       fanConfig.temp_mode      = constrain((int)doc["temp_mode"], 0, 1);
     if (doc["temp_cap_diff"].is<int>())   fanConfig.temp_cap_diff  = constrain((int)doc["temp_cap_diff"], 0, 30);
     saveFanConfig();
@@ -2828,9 +2852,9 @@ void setup() {
   loadTankConfig();
   loadScheduleConfig();
   loadCo2Config();
-  loadFlowCalConfig();
   loadFlowMonitorConfig();
   loadHumidConfig();
+  loadVpdConfig();
   loadDwcConfig();
   loadRaumlichtConfig();
   loadDruckSensorConfig();
@@ -2994,13 +3018,6 @@ void setup() {
   server.on("/api/ventile",         handleApiVentilStatus);
   server.on("/api/output/test",     HTTP_POST, handleApiOutputTest);
   server.on("/api/output/test",     HTTP_GET,  handleApiOutputTestStatus);
-  server.on("/api/flowcal/status",  HTTP_GET,  handleApiFlowCalStatus);
-  server.on("/api/flowcal/start",   HTTP_POST, handleApiFlowCalStart);
-  server.on("/api/flowcal/purge",   HTTP_POST, handleApiFlowCalPurge);
-  server.on("/api/flowcal/begin",   HTTP_POST, handleApiFlowCalBegin);
-  server.on("/api/flowcal/stop",    HTTP_POST, handleApiFlowCalStop);
-  server.on("/api/flowcal/calc",    HTTP_POST, handleApiFlowCalCalc);
-  server.on("/api/flowcal/cancel",  HTTP_POST, handleApiFlowCalCancel);
   server.on("/api/flowmon",         HTTP_GET,  handleApiFlowMonGet);
   server.on("/api/flowmon/save",    HTTP_POST, handleApiFlowMonSave);
   server.on("/api/rs485",           handleApiRs485);
@@ -3024,6 +3041,8 @@ void setup() {
   server.on("/api/co2/save",        HTTP_POST, handleApiCo2Save);
   server.on("/api/humid",           HTTP_GET,  handleApiHumidGet);
   server.on("/api/humid/save",      HTTP_POST, handleApiHumidSave);
+  server.on("/api/vpd",             HTTP_GET,  handleApiVpdGet);
+  server.on("/api/vpd/save",        HTTP_POST, handleApiVpdSave);
   server.on("/api/dwc",             HTTP_GET,  handleApiDwcGet);
   server.on("/api/dwc/save",        HTTP_POST, handleApiDwcSave);
   server.on("/api/raumlicht",        HTTP_GET,  handleApiRaumlichtGet);
@@ -3369,6 +3388,7 @@ void loop() {
     DateTime now;
     if (rtcOK && rtcNowValid(now)) {
       lichtAnCached = schedLichtIstAn(now.hour() * 60 + now.minute());
+      lichtStatusBekannt = true;
       rs485log_set_time(now.unixtime());   // Zeitstempel fuer den RS485-Mitschnitt
     }
   }
@@ -3400,6 +3420,7 @@ void loop() {
   loopLichtKalib();
   loopScheduler();
   loopCo2Ctrl();
+  loopVpdCtrl();     // vor Befeuchter/Luefter: liefert deren Vorgaben bei aktiver VPD-Regelung
   loopHumidCtrl();
   loopDwcCtrl();
   loopGehaeuseFan();
@@ -3486,7 +3507,7 @@ void loop() {
       e.fanRpm      = fan.rpm;
       e.co2Ausgang    = co2OutputOn;
       e.humidAusgang  = humidOutputOn;
-      for (uint8_t i = 0; i < 3; i++) {
+      for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
         e.flowValid[i]   = flowMonitorState.log_pending[i];
         e.flowImpulse[i] = flowMonitorState.last_cycle_pulses[i];
         e.flowDauerS[i]  = flowMonitorState.last_cycle_s[i];
@@ -3517,6 +3538,11 @@ void loop() {
         if (espnow_nodes[i].online) e.espnowOnline++;
       }
       e.heapMinKb = ESP.getMinFreeHeap() / 1024;
+      rs485_take_ms2_stats(e.ms2Abfragen, e.ms2Timeouts);
+      e.vpdOk      = vpdConfig.enabled && vpdState.valid;
+      e.vpdBlatt   = vpdState.vpdLeaf;
+      e.vpdSollMin = vpdState.sollMin;
+      e.vpdSollMax = vpdState.sollMax;
       storage_log(rtc.now().unixtime(), e);
     }
     #ifdef DEBUG_DISTANZ

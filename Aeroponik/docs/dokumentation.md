@@ -28,8 +28,9 @@ Systemdokumentation — Master (ESP32-S3) mit RS485-Geräten und drahtlosen Sens
 - [Analog-Ausgangsmodul](#analog-ausgangsmodul)
 - [CO2-Steuerung](#co2-steuerung)
 - [Luftbefeuchtung-Steuerung](#luftbefeuchtung-steuerung)
+- [VPD-Regelung](#vpd-regelung)
 - [Raumlicht & DWC-Timer](#raumlicht--dwc-timer)
-- [Durchflussmesser-Kalibrierung & Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung)
+- [Durchflussmesser & Düsen-Überwachung](#durchflussmesser--düsen-überwachung)
 - [Raumklima & VPD](#raumklima--vpd)
 - [Daten-Log & Download](#daten-log--download)
 
@@ -150,13 +151,13 @@ Damit zwei Steuerungen in Funkreichweite sich nicht gegenseitig die Nodes wegneh
 |---|---|---|
 | `1` | `RS485_RX` | UART1 RX ← MAX13487 Receive Out |
 | `2` | `RS485_TX` | UART1 TX → MAX13487 Data In |
-| `3` | `FLOW_SENSOR_PIN` | Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber, push-pull) — siehe [Durchflussmesser-Kalibrierung & Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung) |
+| `3` | `FLOW_SENSOR_PIN` | Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber, push-pull) — siehe [Durchflussmesser & Düsen-Überwachung](#durchflussmesser--düsen-überwachung) |
 | `4` | `DS18B20_PIN` | OneWire — DS18B20 (Vorrat, Pflanze, optional Innentemperatur), Zuordnung über ROM-Adresse (siehe [Funktionen](#funktionen)) |
 | `5` | `PRESSURE_PIN` | Analog — Drucksensor 0,5–4,5 V ratiometrisch (per Web-UI abschaltbar, siehe [Drucksensor](#drucksensor-pumpendruck)) |
 | `6` | `GEHAEUSE_FAN_PIN` | Gehäuselüfter, An/Aus (kein PWM), temperaturgeregelt über Innen-DS18B20 |
 | `7` | `VENTIL2_PIN` | Magnetventil Behälter 2 (direkte GPIO) |
 | `8` | `VENTIL1_PIN` | Magnetventil Behälter 1 |
-| `9` | `VENTIL4_PIN` | Rücklaufventil |
+| `9` | `VENTIL4_PIN` | Ventil Behälter 4 (bis FW 1.18 Rücklaufventil) |
 | `10` | `VENTIL3_PIN` | Magnetventil Behälter 3 |
 | `11` | `SPI_MOSI` | SPI2 MOSI — W5500 + MicroSD |
 | `12` | `SPI_SCK` | SPI2 SCK |
@@ -192,13 +193,13 @@ Die vier Magnetventile, die Hauptpumpe und die Umwälzpumpe sind direkte GPIO-Au
 | `VENTIL1_PIN` | MV1 | Zulauf Behälter 1 |
 | `VENTIL2_PIN` | MV2 | Zulauf Behälter 2 |
 | `VENTIL3_PIN` | MV3 | Zulauf Behälter 3 |
-| `VENTIL4_PIN` | MV4 | Rücklauf / Ablauf |
+| `VENTIL4_PIN` | MV4 | Zulauf Behälter 4 |
 
 #### Hauptpumpe & Umwälzpumpe
 
 Die Hauptpumpe (`PUMPE_GPIO`) schaltet automatisch mit, sobald irgendein Behälter gerade aktiv wässert (Ventil offen) — unabhängig davon, ob im normalen oder im Batch-Zeitmodus (siehe [Ventilsteuerung](#funktionen)).
 
-**Druckaufbau:** Vor jedem Sprühvorgang läuft die Pumpe eine einstellbare Zeit (Standard 5 s, 0 = aus) bei noch geschlossenem Düsenventil, erst dann öffnet das Ventil. Ablauf je Behälter: Pause → [Vorlauf über MV4] → Druckaufbau → Aktiv. Ohne Druckaufbau sprühte jeder Zyklus mit erst steigendem Druck — Menge und Durchfluss-Impulse schwankten dann deutlich. Gilt auch im Batch-Modus vor jedem einzelnen Behälter (die Pumpe läuft dazwischen weiter) und beim manuellen Einzelzyklus. Voraussetzung: Die Pumpe muss kurz gegen geschlossene Ventile fördern dürfen (Anlage steht unter Druck / Druckschalter).
+**Druckaufbau:** Vor jedem Sprühvorgang läuft die Pumpe eine einstellbare Zeit (Standard 5 s, 0 = aus) bei noch geschlossenem Düsenventil, erst dann öffnet das Ventil. Ablauf je Behälter: Pause → Druckaufbau → Aktiv → Nachlauf. Ohne Druckaufbau sprühte jeder Zyklus mit erst steigendem Druck — Menge und Durchfluss-Impulse schwankten dann deutlich. Gilt auch im Batch-Modus vor jedem einzelnen Behälter (die Pumpe läuft dazwischen weiter) und beim manuellen Einzelzyklus. Voraussetzung: Die Pumpe muss kurz gegen geschlossene Ventile fördern dürfen (Anlage steht unter Druck / Druckschalter).
 
 **Nachlauf:** Nach dem Schließen des Düsenventils läuft die Pumpe noch einmal dieselbe Zeit weiter (Zustand „Nachlauf“). Gedacht für einen Druckspeicher zwischen Durchflussmesser und Ventilen: Er überbrückt den Druckeinbruch beim Öffnen (die Drosseldüse im Durchflussmesser liefert nicht schnell genug nach) und wird im Nachlauf wieder aufgefüllt. Die Durchflussmessung zählt vom Öffnen bis zum Ende des Nachlaufs, damit auch das aus dem Speicher gesprühte Wasser beim richtigen Behälter landet; als Dauer gilt nur die Ventil-offen-Zeit. Im Batch-Modus öffnet der nächste Behälter direkt nach dem Nachlauf des vorigen (kein eigener Druckaufbau mehr, nur noch vor dem ersten Behälter). Ohne Druckspeicher fließt im Nachlauf praktisch nichts, die Messwerte bleiben gleich. Der manuelle Einzelzyklus hat keinen Nachlauf.
 
@@ -214,13 +215,15 @@ Ohne Router: Master startet als **AP auf Kanal 6** (`ESPNOW_DEFAULT_CHANNEL`). N
 
 #### Ventilsteuerung
 
-Drei unabhängige Bewässerungskreise mit konfigurierbarer Öffnungszeit (Sek.) und Pausenintervall (Min., jeweils getrennt für Licht- und Dunkelphase). Optional vorgeschalteter Rücklauf-Vorlauf via MV4 (konfigurierbare Vorlaufzeit). Im Modus "Gleiche Zeiten für alle" läuft statt drei unabhängiger Timer ein gemeinsamer Batch-Durchlauf (Vorlauf einmal vor dem ersten aktiven Behälter, dann alle aktiven Behälter direkt nacheinander, eine gemeinsame Pause).
+Vier unabhängige Bewässerungskreise (MV1–MV4) mit konfigurierbarer Öffnungszeit (Sek.) und Pausenintervall (Min., jeweils getrennt für Licht- und Dunkelphase). Im Modus "Gleiche Zeiten für alle" läuft statt unabhängiger Timer ein gemeinsamer Batch-Durchlauf (alle aktiven Behälter direkt nacheinander, eine gemeinsame Pause).
+
+**Umbau FW 1.19.0 (11/2026):** MV4 war bisher das Rücklaufventil mit optionalem „Rücklauf-Vorlauf“ vor jedem Zyklus; zwei Behälter hingen an einem gemeinsamen Ventil. Die Rückleitung ist jetzt ein Handventil (Kugelhahn), MV4 versorgt Behälter 4, jeder Behälter hat damit sein eigenes Ventil und seine eigenen Durchfluss-Impulse. Der Vorlauf entfällt. Beim ersten Start mit 1.19.0 übernimmt Behälter 4 die Zeiten von Behälter 3, bleibt aber deaktiviert, bis er auf der Ventil-Seite eingeschaltet wird. Die Konfiguration von Behälter 4 liegt in einem eigenen EEPROM-Block (560–565, Sollwert der Düsen-Überwachung 566–569); der EEPROM-Bereich wächst dafür von 570 auf 600 Bytes, vorhandene Einstellungen bleiben erhalten.
 
 Nach einem Neustart wird **sofort** gewässert, statt erst die volle Pausenzeit (bis zu 60 min) abzuwarten.
 
 **Manueller Einzelzyklus:** Auf der Aeroponik-Seite lässt sich pro Behälter ein einzelner Gießzyklus von Hand auslösen — das Ventil öffnet einmal für die aktuell gültige Öffnungszeit (Licht- bzw. Dunkelphase) und schließt danach automatisch (`/api/ventile/dose/start`, `/status`, `/cancel`). Die normale Automatik pausiert währenddessen.
 
-**Ausgangstest:** Der Direkttest der Ausgänge (Verkabelungsprüfung, Durchflussmesser-Kalibrierung) unterbricht keinen laufenden Gießzyklus mehr — ist gerade ein Ventil/eine Pumpe automatisch aktiv, wird der Testmodus erst aktiv, sobald der Zyklus von selbst beendet ist. Die UI zeigt den Wartezustand an (`GET /api/output/test`).
+**Ausgangstest:** Der Direkttest der Ausgänge (Verkabelungsprüfung, manueller Einzelzyklus) unterbricht keinen laufenden Gießzyklus mehr — ist gerade ein Ventil/eine Pumpe automatisch aktiv, wird der Testmodus erst aktiv, sobald der Zyklus von selbst beendet ist. Die UI zeigt den Wartezustand an (`GET /api/output/test`). Beim manuellen Einzelzyklus läuft die Umwälzpumpe in ihrem eigenen Takt weiter und verzögert den Start nicht. **Sicherheitsnetz (seit FW 1.19.2):** Ein vergessener Testmodus pausiert die Bewässerung — er endet deshalb nach spätestens 30 Minuten automatisch, die Automatik läuft weiter und es geht eine [Benachrichtigung](#benachrichtigungen) raus.
 
 #### Tanküberwachung (Kegelstumpf)
 
@@ -260,13 +263,13 @@ Drei unabhängig voneinander aktivierbare Kanäle — CallMeBot ist erfahrungsge
 | Temperatur | Zelt-Temperatur (RS485-Multisensor) außerhalb `temperatur_min`/`temperatur_max` |
 | Behälter fast leer | Vorratsbehälter-Füllstand unter `tank_min_prozent` |
 | Zeltlüfter-Drehzahl | Ist-Drehzahl weicht mindestens 3 Minuten am Stück vom Erwartungswert ab (Anlauf/Modul-Neustart lösen keinen Alarm aus), siehe [Lueftermodul](#lueftermodul) |
-| Düsen-Durchfluss | Soll/Ist-Abweichung je Behälter, siehe [Düsen-Überwachung](#durchflussmesser-kalibrierung--düsen-überwachung) |
+| Düsen-Durchfluss | Soll/Ist-Abweichung je Behälter, siehe [Düsen-Überwachung](#durchflussmesser--düsen-überwachung) |
 
 Jeder Kanal hat ein eigenes Rate-Limit (30 s) gegen versehentliches Zuspammen; ein eigener Test-Button pro Kanal in der Konfiguration verifiziert die Zugangsdaten unabhängig von den anderen.
 
 #### SD-Logging
 
-Alle 5 Minuten werden sämtliche Mess- und Steuerwerte in CSV-Dateien nach dem Schema `/JJJJ-MM-TT.csv` geschrieben, inkl. Raum-/Zeltklima, Lüfter- und Lichtstatus. Details, vollständige Spaltenliste sowie Download/Löschen über das Webinterface: siehe [Daten-Log & Download](#daten-log--download).
+Jede Minute (bis FW 1.20.1: alle 5 Minuten) werden sämtliche Mess- und Steuerwerte in CSV-Dateien nach dem Schema `/JJJJ-MM-TT.csv` geschrieben, inkl. Raum-/Zeltklima, Lüfter- und Lichtstatus. Details, vollständige Spaltenliste sowie Download/Löschen über das Webinterface: siehe [Daten-Log & Download](#daten-log--download).
 
 #### Node-OTA
 
@@ -319,7 +322,7 @@ Zweiter, vom ESP-NOW-Netz unabhängiger Kommunikationsweg für fest verdrahtete 
 
 #### Protokoll
 
-Vereinfachtes Modbus-RTU: **FC03** (Read Holding Registers) zum Auslesen, **FC06** (Write Single Register) zum Schreiben. CRC16 nach Modbus-Standard (Polynom `0xA001`). Ein schlankes Zustandsautomat-Modell (`mb_state_t`) fragt die Busteilnehmer nacheinander ab; nur eine Anfrage gleichzeitig offen, Antwort-Timeout **2000 ms**.
+Vereinfachtes Modbus-RTU: **FC03** (Read Holding Registers) zum Auslesen, **FC06** (Write Single Register) zum Schreiben. CRC16 nach Modbus-Standard (Polynom `0xA001`). Ein schlankes Zustandsautomat-Modell (`mb_state_t`) fragt die Busteilnehmer nacheinander ab; nur eine Anfrage gleichzeitig offen, Antwort-Timeout **2000 ms**. Vor jeder Anfrage hält der Master mindestens **10 ms** Buspause ein (seit FW 1.21.4): die Slaves erkennen das Frame-Ende an einer 4-ms-Lücke, ohne Pause klebte die MS2-Anfrage an der 39-Byte-Antwort des MARS-Lüfters und ging verloren (Ursache der sporadischen `MS2_Timeouts`, gefunden über den Zelt-Logger am 12.11.). Das Multimodul (ab FW 1.3.4) löst zusätzlich eine gültige Anfrage am Ende eines verklebten Frames heraus und beantwortet sie.
 
 Nach jedem Senden wird das eigene Sende-Echo aktiv weggeräumt (`flush()` + kurze Pause + Restpuffer leeren), bevor auf die Antwort gewartet wird — nötig, weil der MAX13487 auf allen eigenen Platinen mit fest auf Empfang liegendem RE die eigene Sendung immer mit auf RX zurückspiegelt.
 
@@ -406,6 +409,7 @@ MARS Hydro (RS485). Werksseitig fertige Lüfterplatine, RS485-Adresse `6`, urspr
 | Auto — Temperatur, Differenz | Zelt-Temperatur − Raumtemperatur | Ramp direkt über die Temperaturdifferenz zwischen `temp_min`/`temp_max` |
 
 Eine gemeinsame Mindest- und Höchstdrehzahl (`min_speed`, `max_speed`, Standard 100 %) gilt für beide Automodi. Bei 0 % wird zusätzlich das Enable-Register (reg15) des MARS-Lüfters auf 0 gesetzt, da er sonst mit Grunddrehzahl weiterläuft. Die Differenz-Modi benötigen den [Raumklimasensor](#raumklima--vpd); ist dieser nicht verfügbar, bleibt die letzte Zielleistung unverändert.
+**Taktbetrieb unter der Mindestdrehzahl (seit FW 1.21.3, nur MARS):** Der MARS-Lüfter läuft bei jedem Wert > 0 mit seiner eingebauten Mindestdrehzahl (~900 RPM, meldet 25 %), darunter kennt er nur „aus“. Sollwerte zwischen 1 und 24 % setzt der Master deshalb im 10-Minuten-Takt um: der Lüfter läuft Sollwert/25 der Zeit mit Minimum (mind. 1 min am Stück) und ist sonst aus — z. B. 5 % = 2 von 10 min, 10 % = 4 von 10 min. Die Mindestdrehzahl wird damit zur Grundlüftung, 0 % erlaubt komplettes Abschalten. Die Startseite zeigt im Takt den Sollwert mit ⏱ statt der Rückmeldung.
 
 #### Konfiguration (EEPROM, Magic 0x92)
 
@@ -553,6 +557,38 @@ Auf der Startseite erscheint eine Status-Karte nur, wenn die Funktion aktiviert 
 
 Eigene Status-Karte auf der Startseite, nur sichtbar wenn aktiviert.
 
+### VPD-Regelung
+
+Seit FW 1.21.0 (`vpdctrl.cpp`). Führt **Befeuchter und Abluftlüfter gemeinsam** auf einen VPD-Zielbereich statt auf feste Feuchte-/Temperaturgrenzen. Befeuchter und Lüfter behalten ihre eigenen Einstellungen (Steckdose/Ausgang bzw. Mindest-/Höchstdrehzahl; den Schalter „Eigene Steuerung aktiv“ gibt es seit 1.21.5 nicht mehr, der Master steuert den Lüfter immer); nur deren Min/Max- bzw. Modus-Regelung ruht, solange „Regelt den Befeuchter“ bzw. „Regelt den Abluftlüfter“ angehakt ist. Seit 1.21.5 blendet der Klima-Tab diese ruhenden Felder dann aus und zeigt stattdessen einen Hinweis. Abschalten der VPD-Regelung stellt das alte Verhalten sofort wieder her.
+
+#### Zielbereich
+
+| Phase | ☀️ Licht an | 🌙 Licht aus |
+|---|---|---|
+| Steckling / Keimling | 0,40–0,80 kPa | 0,30–0,60 kPa |
+| Wachstum | 0,80–1,20 kPa | 0,60–1,00 kPa |
+| Blüte früh | 1,00–1,40 kPa | 0,80–1,20 kPa |
+| Blüte spät | 1,20–1,60 kPa | 1,00–1,40 kPa |
+| Eigene Werte | frei einstellbar | frei einstellbar |
+
+Beim Wechsel Licht an/aus wandert der Bereich gleitend (max. 0,45 kPa in 30 min), damit Befeuchter und Lüfter nicht schlagartig umschalten.
+
+**Geregelt wird der Blatt-VPD:** Blatttemperatur = Lufttemperatur + Offset (Standard −1,5 °C, nur bei Licht an – nachts sind Blatt und Luft praktisch gleich warm). VPD Blatt = Sättigungsdampfdruck(Blatt) − Dampfdruck der Luft. Angezeigt werden Blatt- und Luft-VPD.
+
+#### Logik (alle 5 s)
+
+- **Befeuchter:** an, sobald der VPD im oberen Fünftel des Bandes liegt **und die Abluft schon auf Mindestdrehzahl steht** (seit FW 1.21.3 — erst drosseln, dann befeuchten), oder sofort, wenn der VPD über dem Band liegt; aus, sobald er unter die Bandmitte fällt. Mindestens 60 s an bzw. aus. **Takt (seit FW 1.21.3):** bei Bedarf läuft er 60 s und pausiert dann 120 s, damit der träge Feuchtesensor die Wirkung sieht, bevor nachgelegt wird (am Stück lief die Feuchte im Log vom 12.11. in 7 min von 46 auf 75 %). Die Klima-Seite zeigt in der Pause „Takt“. Nach einem Neustart wartet die Regelung auf den echten Lichtstatus, statt mit dem Tag-Zielbereich zu starten. Der Blatttemperatur-Offset wird beim Licht-Wechsel ebenfalls gleitend übernommen (max. 3 °C in 30 min, seit FW 1.21.4), sonst springt das Blatt-VPD beim Einschalten schlagartig nach unten und die Abluft fährt grundlos hoch.
+- **Abluftlüfter:** integrierend – unter dem Band (zu feucht) → sanft hoch (max. 1 %/5 s, seit FW 1.21.3); in der oberen Bandhälfte, über dem Band oder solange der Befeuchter läuft → schrittweise runter bis zur Mindestdrehzahl (je näher an der Obergrenze, desto schneller; seit FW 1.21.3); zwischen Untergrenze und Mitte bleibt er stehen. Hochgefahren wird **nur**, wenn die Raumluft (AHT21) absolut trockener ist als die Zeltluft (sonst bringt mehr Abluft nichts), gerade kein CO₂ dosiert wird und das Zelt wärmer als `temp_min` ist (Standard 18 °C, seit FW 1.21.2) — darunter wird die Abluft langsam zurückgenommen, damit das Zelt nachts nicht auskühlt. Auf der Startseite stehen „VPD-Regelung“ als Lüftermodus und der VPD-Zielbereich statt Feuchte-Min/Max.
+- **Grenzen mit Vorrang:** Zelttemperatur ab `temp_max` − 1 °C → Lüfter rampt bis `temp_max` + 2 °C auf Höchstdrehzahl. Luftfeuchte ≥ `hum_max` → Befeuchter sofort aus, Lüfter rampt bis `hum_max` + 5 % auf Höchstdrehzahl.
+- **Ohne gültige Zelt-Messwerte:** Befeuchter aus, Lüfter hält seinen Wert.
+- **Alarm:** liegt der VPD `alarm_min` Minuten am Stück außerhalb des Bandes, geht eine [Benachrichtigung](#benachrichtigungen) mit dem Grund raus (Lüfter am Anschlag, Raumluft zu feucht, Befeuchter schafft es nicht, …).
+
+#### Konfiguration (EEPROM 570–582, Magic 0x56)
+
+`enabled` · `phase` · `day_min/max`, `night_min/max` (kPa×100, nur „Eigene Werte“) · `leaf_offset` (Zehntel °C) · `use_humid` · `use_fan` · `temp_min` (°C, Standard 18) · `temp_max` (°C, Standard 28) · `hum_max` (%, Standard 75) · `alarm_min` (Standard 30, 0 = aus). API: `GET /api/vpd` (Konfiguration, Richtwerte aller Phasen, aktueller Zustand), `POST /api/vpd/save`.
+
+SD-Log: `VPD_Blatt_kPa`, `VPD_Soll_min`, `VPD_Soll_max`; die [Auswertung](#auswertung-tab--auswertung-seit-fw-1200) zeigt den Sollbereich als grünes Band und den Blatt-VPD als eigene Kurve.
+
 ### Raumlicht & DWC-Timer
 
 Zwei einfache Schalt-Funktionen, die — wie [CO2-](#co2-steuerung) und [Luftbefeuchtung-Steuerung](#luftbefeuchtung-steuerung) — genau einen Ausgang (`target_relay_bit`, 0–3) eines **ESP-NOW-Steckdosen-Nodes** (`target_node_id`) schalten; die übrigen Relais-Bits des Nodes bleiben unangetastet.
@@ -565,27 +601,21 @@ Rein **manueller** Ein/Aus-Schalter, ohne Automatik, Hysterese oder Zeitplan. De
 
 Einfacher Ein/Aus-Beleuchtungstimer für ein separates DWC-System, wie eine haushaltsübliche Zeitschaltuhr (kein Sonnenauf-/-untergang wie beim [Beleuchtungs-Scheduler](#beleuchtungs-scheduler)): `enabled` · `target_node_id` · `target_relay_bit` · `on_min` / `off_min` (Minuten seit Mitternacht; `off_min < on_min` = über Mitternacht).
 
-### Durchflussmesser-Kalibrierung & Düsen-Überwachung
+### Durchflussmesser & Düsen-Überwachung
 
-Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber mit Push-Pull-Ausgang, kein Pull-up nötig) in der gemeinsamen Zulaufleitung **vor** dem Ventil-Verteiler — sieht damit den Durchfluss aller 4 Ventile nacheinander, da laut [Ventilsteuerung](#funktionen) ohnehin immer nur eines gleichzeitig offen ist. Interrupt an `FLOW_SENSOR_PIN` (GPIO3) zählt nur die Pulse; die Umrechnung in ml läuft über eine einmalige Kalibrierung.
+Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber mit Push-Pull-Ausgang, kein Pull-up nötig) in der gemeinsamen Zulaufleitung **vor** dem Ventil-Verteiler — sieht damit den Durchfluss aller 4 Ventile nacheinander, da laut [Ventilsteuerung](#funktionen) ohnehin immer nur eines gleichzeitig offen ist. Interrupt an `FLOW_SENSOR_PIN` (GPIO3) zählt die Impulse.
 
-#### Kalibrierung (Konfiguration → Ventile)
-
-1. **„Kalibrierung starten“** — Pumpe an (GPIO48), Druck wird live angezeigt. Nutzt denselben Ausgangs-Direkttest wie die Verkabelungsprüfung (pausiert damit automatisch die normale Ventil-/Pumpensteuerung).
-2. **„Entlüften“** — Ventil auf/zu, beliebig oft, bis keine Luft mehr im System ist (Luft würde die Impulszahl verfälschen). „Start“ ist erst nach mindestens einem abgeschlossenen Entlüftungszyklus möglich.
-3. **„Start“** — öffnet Rücklaufventil (MV4), zählt ab da die Impulse (live sichtbar).
-4. **„Stop“** — Ventil zu, Impulszahl eingefroren.
-5. Gemessene Menge in ml eintragen (z. B. mit einem Messbecher aufgefangen) → **„Berechnen“** ermittelt Pulse/Liter und speichert dauerhaft (eigener EEPROM-Block).
+**Keine Umrechnung in ml (seit FW 1.19.0):** Die frühere Kalibrierung (Pulse/Liter) samt ml-Anzeige und Summen ist entfallen — die Summen lagen ohnehin nur im RAM und waren nach jedem Neustart weg, und für die Kontrolle der Düsen reicht die rohe Impulsrate. Wer Mengen braucht, fängt einmal eine bekannte Menge auf und rechnet die Impulse aus dem SD-Log selbst um.
 
 #### Düsen-Überwachung (`flowmonitor.cpp`)
 
-Beobachtet den Ventilzustand (`behaelterZustand[]`) von außen: Wechselt ein Behälter in den Zustand „Aktiv“, wird der Impulszähler geleert (verwirft Reste aus der Vorlaufphase über MV4); beim Verlassen des Zustands wird die Menge berechnet und zu laufenden Summen addiert (je Behälter + Gesamt, nur im RAM seit letztem Neustart — eine echte Lebenszeit-Summe lässt sich bei Bedarf aus dem SD-Log rekonstruieren).
+Beobachtet den Ventilzustand (`behaelterZustand[]`) von außen: Wechselt ein Behälter in den Zustand „Aktiv“, wird der Impulszähler geleert (verwirft Reste aus dem Druckaufbau); gezählt wird bis zum Ende des Nachlaufs (ein Druckspeicher hinter dem Zähler wird erst dann wieder aufgefüllt), als Dauer zählt die Ventil-offen-Zeit. Impulse und Dauer des letzten Zyklus werden je Behälter angezeigt und ins SD-Log geschrieben.
 
-Pro Behälter wird ein **Sollwert** (ml/s) geführt:
+Pro Behälter wird ein **Sollwert** (Impulse/s) geführt:
 
-- Ist noch keiner hinterlegt (0 bzw. per „Sollwerte löschen“ zurückgesetzt), übernimmt das System automatisch den **nächsten abgeschlossenen Gießzyklus** als neue Referenz — keine manuelle Berechnung nötig.
+- Ist noch keiner hinterlegt (0 bzw. per „Sollwerte löschen“ zurückgesetzt), übernimmt das System automatisch den **nächsten abgeschlossenen Gießzyklus** als neue Referenz — keine manuelle Berechnung nötig. Beim Update auf 1.19.0 werden die alten ml/s-Sollwerte verworfen und neu gelernt.
 - Ist einer hinterlegt und der Soll/Ist-Vergleich aktiviert, wird jeder Zyklus mit konfigurierbarer Toleranz (%) verglichen; bei Abweichung nach unten (verstopfte Düse) oder oben (Leck) geht eine [Benachrichtigung](#benachrichtigungen) über alle aktiven Kanäle raus.
-- „Sollwerte löschen“ setzt alle drei Werte auf 0 zurück — praktisch nach dem Düsenreinigen, damit nicht die alten (jetzt wieder gültigen) Werte fälschlich als Abweichung gewertet werden.
+- „Sollwerte löschen“ setzt alle Werte auf 0 zurück — praktisch nach dem Düsenreinigen oder einem Umbau der Leitungen, damit nicht die alten Werte fälschlich als Abweichung gewertet werden.
 
 SD-Log-Spalten: siehe [Daten-Log & Download](#daten-log--download).
 
@@ -614,7 +644,7 @@ Anzeige zwischen Luftfeuchte und CO₂ in der Messwerte-Karte; Raum- und Zelttem
 
 ### Daten-Log & Download
 
-Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibintervall **5 Minuten**. Werte einer gerade nicht erreichbaren Quelle (Raumsensor, RS485-Multisensor, Lüfter offline) werden als **leere Zelle** statt eines irreführenden Nullwerts geschrieben.
+Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibintervall **1 Minute** (bis FW 1.20.1: 5 Minuten; rund 0,4 MB pro Tag). Werte einer gerade nicht erreichbaren Quelle (Raumsensor, RS485-Multisensor, Lüfter offline) werden als **leere Zelle** statt eines irreführenden Nullwerts geschrieben.
 
 #### Spalten
 
@@ -632,8 +662,8 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `LuefterLeistung_%`, `LuefterRPM` | Abluftlüfter |
 | `CO2Ausgang` | CO2-Steuerung Relaiszustand (0/1) |
 | `HumidAusgang` | Luftbefeuchtung-Steuerung Relaiszustand (0/1) |
-| `ImpulseBehaelter1` … `3` | Durchflussmesser-Impulse des letzten Sprühvorgangs je Behälter (roh, unabhängig von der Kalibrierung) — bei gleicher Dauer ein direktes Maß für die Durchgängigkeit der Düse |
-| `DauerBehaelter1_s` … `3` | Dauer dieses Sprühvorgangs (Licht-/Dunkelphase können unterschiedlich lang sein) |
+| `ImpulseBehaelter1` … `4` | Durchflussmesser-Impulse des letzten Sprühvorgangs je Behälter (roh, unabhängig von der Kalibrierung) — bei gleicher Dauer ein direktes Maß für die Durchgängigkeit der Düse |
+| `DauerBehaelter1_s` … `4` | Dauer dieses Sprühvorgangs (Licht-/Dunkelphase können unterschiedlich lang sein) |
 | `Laufzeit_min` | Minuten seit dem letzten Neustart des Masters — springt der Wert zurück, gab es einen Neustart |
 | `NeustartGrund` | Grund des letzten Neustarts (Power-On, Software, Watchdog, Brownout, …) |
 | `Lichtx4Starts` | Startzähler des Lichtx4 (ab Lichtx4-FW 1.2.0, sonst leer) — steigt er, hat das Modul neu gestartet und alle Lampen waren kurz aus |
@@ -643,6 +673,8 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `WLAN_dBm` / `WLAN_Abbrueche` | WLAN-Signalstärke (leer ohne Verbindung) und Zahl der WLAN-Abbrüche seit der vorigen Zeile |
 | `EspNow_online` | ESP-NOW-Nodes online / gekoppelt, z. B. `2/3` |
 | `HeapMin_kB` | Kleinster freier Arbeitsspeicher seit dem Start |
+| `MS2_Abfragen` / `MS2_Timeouts` | RS485-Abfragen an den Zelt-Sensor (Adresse 0x20, alle 15 s) seit der vorigen Zeile und wie viele davon unbeantwortet blieben. Eine einzige ausbleibende Antwort genügt, damit der Master den Sensor bis zur nächsten erfolgreichen Abfrage als offline führt (leere Zelt-Spalten) — die Zähler zeigen solche Aussetzer auch zwischen zwei Log-Zeilen (seit FW 1.20.2) |
+| `VPD_Blatt_kPa`, `VPD_Soll_min`, `VPD_Soll_max` | [VPD-Regelung](#vpd-regelung): geregelter Blatt-VPD und aktueller (ggf. gerade wandernder) Zielbereich; leer, wenn die Regelung aus ist (seit FW 1.21.0) |
 
 > **Automatische Migration:** Trifft die Firmware beim Schreiben auf eine bereits vorhandene Tagesdatei mit dem alten, kürzeren Spaltenformat (vor dieser Erweiterung), wird diese zu `_alt.csv` umbenannt (Daten bleiben erhalten) und eine neue Datei mit vollständigem Header begonnen — kein Vermischen unterschiedlicher Spaltenzahlen in einer Datei.
 
@@ -656,6 +688,19 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `/api/logs/delete-all` | POST | Löscht alle `*.csv`/`*.txt`-Dateien auf der SD-Karte, Antwort enthält die Anzahl (UI fragt vorher nach) |
 
 Dateinamen werden serverseitig gegen Pfad-Traversal geprüft (kein `/` oder `..` zulässig).
+
+#### Auswertung (Tab „📈 Auswertung“, seit FW 1.20.0)
+
+Diagramme direkt aus den Tageslogs, komplett im Browser berechnet (`page_charts.h`): Der ESP liefert nur die CSV-Dateien über die beiden Endpunkte oben aus, die Seite zeichnet selbst auf `<canvas>` (keine externe Bibliothek, funktioniert auch ohne Internet). Spalten werden über den Header-Namen gefunden, ältere Dateien (`_alt.csv`, nur 3 Behälter) funktionieren ebenso.
+
+- **Zeitraum** 1 Tag oder 1 Woche bis zum gewählten Tag; **Ausschnitt** 1 h … 7 Tage, Laufleiste und ◀/▶ zum Verschieben, Mausrad/Zwei-Finger zum Zoomen, Ziehen/Wischen zum Verschieben, Doppelklick zeigt alles.
+- **Diagramme** (je Kurve abschaltbar, Auswahl bleibt im Browser gespeichert): Temperatur (Zelt, Raum/draußen, Nährlösung, Wurzelraum), Luftfeuchte Zelt/Raum + VPD auf eigener Achse mit grünem Zielband 0,8–1,2 kPa, Licht (PPFD), CO₂, Füllstand, Aktoren (Lüfter %, Befeuchter- und CO₂-Ausgang als Balken), Verbindung (WLAN-Signal, unbeantwortete RS485-Abfragen an den Zelt-Sensor). Alle Diagramme teilen sich die Zeitachse; der Cursor zeigt die Werte aller Kurven zur selben Uhrzeit in der Legende.
+- **Markierungen:** grau hinterlegt = Licht aus (`LichtMaske` = 0), rot gestrichelt ↻ = Neustart (aus `Laufzeit_min`), orange ⚡ = Netzaussetzer, graues ▲ = Zelt-Sensor nicht erreichbar (Zelt-Temperatur und -Feuchte leer). Kurze Messlücken (unter 16 min) werden in den Linien überbrückt, längere unterbrechen sie; Sensor-Aussetzer werden zusätzlich in der Ereignis-Karte und der Tagesübersicht gezählt.
+- **Kennzahlen** für den sichtbaren Ausschnitt: ⌀/min/max je Kurve, getrennt nach Licht an/aus, Anteil VPD im Zielbereich bei Licht, Lichtsumme, Zahl der Neustarts/Netzaussetzer.
+- **Tagesübersicht:** je Tag DLI (mol/m²·d aus PPFD), Lichtstunden, Zelt-Temperatur und -Feuchte Tag/Nacht, VPD bei Licht und Anteil im Zielbereich, Zahl der Gießzyklen, Neustarts. Klick auf eine Zeile springt zu diesem Tag.
+- **Düsen-Auswertung:** jeder Gießzyklus als Punkt, je Behälter ein gleitender Median über 9 Zyklen, Ausreißer (>15 % vom Median) rot umringt. Anzeige als Impulse pro Sekunde (bleibt vergleichbar, wenn die Öffnungszeit geändert wurde) oder Impulse je Zyklus. Je Behälter eine Karte mit Median, Streuung, Trend (letztes gegen erstes Drittel der Zyklen im Ausschnitt), Ausreißern, Abweichung zum Durchschnitt aller Behälter und einer Ampel: 🟢 stabil · 🟠 Trend ≤ −10 % (Düse/Filter setzt sich zu) bzw. ≥ +10 % (Leck, lose Düse) · 🟡 Streuung > 15 % (Luft, Schmutz) · ⚪ weniger als 6 Zyklen.
+
+Der laufende Tag wird bei „Neu laden“ jedes Mal frisch geholt, ältere Tage nur einmal pro Seitenaufruf.
 
 ---
 
@@ -799,8 +844,9 @@ System documentation — master (ESP32-S3) with RS485 devices and wireless senso
 - [Analog Output Module](#analog-output-module)
 - [CO2 Control](#co2-control)
 - [Humidity Control](#humidity-control)
+- [VPD Control](#vpd-control)
 - [Room Light & DWC Timer](#room-light--dwc-timer)
-- [Flow Sensor Calibration & Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring)
+- [Flow Sensor & Nozzle Monitoring](#flow-sensor--nozzle-monitoring)
 - [Room Climate & VPD](#room-climate--vpd)
 - [Data Log & Download](#data-log--download)
 
@@ -921,13 +967,13 @@ So that two controllers within radio range do not take each other's nodes, nodes
 |---|---|---|
 | `1` | `RS485_RX` | UART1 RX ← MAX13487 Receive Out |
 | `2` | `RS485_TX` | UART1 TX → MAX13487 Data In |
-| `3` | `FLOW_SENSOR_PIN` | Flow meter (YF-S401-like, Hall pulse output, push-pull) — see [Flow Sensor Calibration & Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring) |
+| `3` | `FLOW_SENSOR_PIN` | Flow meter (YF-S401-like, Hall pulse output, push-pull) — see [Flow Sensor & Nozzle Monitoring](#flow-sensor--nozzle-monitoring) |
 | `4` | `DS18B20_PIN` | OneWire — DS18B20 (reservoir, plant, optional internal temperature), assigned by ROM address (see [Features](#features)) |
 | `5` | `PRESSURE_PIN` | Analog — pressure sensor 0.5–4.5 V ratiometric (can be disabled in the web UI, see [Pressure Sensor](#pressure-sensor-pump-pressure)) |
 | `6` | `GEHAEUSE_FAN_PIN` | Enclosure fan, on/off (no PWM), temperature-controlled via the internal DS18B20 |
 | `7` | `VENTIL2_PIN` | Solenoid valve reservoir 2 (direct GPIO) |
 | `8` | `VENTIL1_PIN` | Solenoid valve reservoir 1 |
-| `9` | `VENTIL4_PIN` | Return valve |
+| `9` | `VENTIL4_PIN` | Valve reservoir 4 (return valve up to FW 1.18) |
 | `10` | `VENTIL3_PIN` | Solenoid valve reservoir 3 |
 | `11` | `SPI_MOSI` | SPI2 MOSI — W5500 + MicroSD |
 | `12` | `SPI_SCK` | SPI2 SCK |
@@ -963,13 +1009,13 @@ The four solenoid valves, the main pump, and the circulation pump are direct GPI
 | `VENTIL1_PIN` | MV1 | Inlet reservoir 1 |
 | `VENTIL2_PIN` | MV2 | Inlet reservoir 2 |
 | `VENTIL3_PIN` | MV3 | Inlet reservoir 3 |
-| `VENTIL4_PIN` | MV4 | Return / drain |
+| `VENTIL4_PIN` | MV4 | Supply reservoir 4 |
 
 #### Main Pump & Circulation Pump
 
 The main pump (`PUMPE_GPIO`) switches on automatically whenever any reservoir is actively watering (valve open) — regardless of whether the normal or batch timing mode is active (see [Valve Control](#features)).
 
-**Pressure build-up:** Before every spray cycle the pump runs for a configurable time (default 5 s, 0 = off) with the nozzle valve still closed; only then does the valve open. Sequence per reservoir: pause → [pre-flush via MV4] → pressure build-up → active. Without it, every cycle sprayed at a still-rising pressure — volume and flow pulses varied noticeably. Also applies in batch mode before each individual reservoir (the pump keeps running in between) and to the manual single cycle. Requirement: the pump must be allowed to run briefly against closed valves (system under pressure / pressure switch).
+**Pressure build-up:** Before every spray cycle the pump runs for a configurable time (default 5 s, 0 = off) with the nozzle valve still closed; only then does the valve open. Sequence per reservoir: pause → pressure build-up → active → refill. Without it, every cycle sprayed at a still-rising pressure — volume and flow pulses varied noticeably. Also applies in batch mode before each individual reservoir (the pump keeps running in between) and to the manual single cycle. Requirement: the pump must be allowed to run briefly against closed valves (system under pressure / pressure switch).
 
 **Refill (Nachlauf):** After the nozzle valve closes, the pump keeps running for the same time again (state "Nachlauf"). Intended for a pressure accumulator between flow meter and valves: it bridges the pressure drop when a valve opens (the restrictor nozzle in the flow meter cannot supply fast enough) and is refilled during this phase. Flow measurement counts from valve opening until the end of the refill, so water sprayed from the accumulator is attributed to the right reservoir; only the valve-open time counts as duration. In batch mode the next reservoir opens directly after the previous one's refill (no separate build-up any more, only before the first reservoir). Without an accumulator practically nothing flows during the refill, so readings stay the same. The manual single cycle has no refill phase.
 
@@ -985,13 +1031,15 @@ Without a router: the master starts as an **AP on channel 6** (`ESPNOW_DEFAULT_C
 
 #### Valve Control
 
-Three independent irrigation circuits with configurable open time (sec.) and pause interval (min., separately configurable for the light and dark phases). Optional return pre-flush via MV4 (configurable pre-flush time). In "same times for all" mode, a single shared batch run replaces the three independent timers (pre-flush once before the first active reservoir, then all active reservoirs directly in sequence, one shared pause).
+Four independent irrigation circuits (MV1–MV4) with configurable open time (sec.) and pause interval (min., separately configurable for the light and dark phases). In "same times for all" mode, a single shared batch run replaces the independent timers (all active reservoirs directly in sequence, one shared pause).
+
+**Rebuild FW 1.19.0 (11/2026):** MV4 used to be the return valve with an optional "return pre-flush" before each cycle; two reservoirs shared one valve. The return line is now a manual ball valve, MV4 supplies reservoir 4, so every reservoir has its own valve and its own flow pulses. The pre-flush is gone. On the first start with 1.19.0, reservoir 4 takes over the times of reservoir 3 but stays disabled until it is switched on on the valve page. Reservoir 4's configuration lives in its own EEPROM block (560–565, nozzle-monitoring target 566–569); the EEPROM area grows from 570 to 600 bytes for this, existing settings are kept.
 
 After a restart, watering starts **immediately** instead of first waiting out the full pause time (up to 60 min).
 
 **Manual single cycle:** On the Aeroponik page, a single watering cycle can be triggered manually per reservoir — the valve opens once for the currently valid open time (light or dark phase) and closes again automatically (`/api/ventile/dose/start`, `/status`, `/cancel`). Normal automation is paused meanwhile.
 
-**Output test:** The direct output test (wiring check, flow sensor calibration) no longer interrupts a running watering cycle — if a valve/pump is currently active automatically, test mode only becomes active once the cycle has finished on its own. The UI shows the waiting state (`GET /api/output/test`).
+**Output test:** The direct output test (wiring check, manual single cycle) no longer interrupts a running watering cycle — if a valve/pump is currently active automatically, test mode only becomes active once the cycle has finished on its own. The UI shows the waiting state (`GET /api/output/test`). During a manual single cycle the circulation pump keeps its own schedule and doesn't delay the start. **Safety net (since FW 1.19.2):** a forgotten test mode pauses watering — so it ends automatically after 30 minutes at the latest, automation resumes and a [notification](#notifications) goes out.
 
 #### Tank Monitoring (Truncated Cone)
 
@@ -1031,13 +1079,13 @@ Three independently enabled channels — CallMeBot tends to be unreliable at tim
 | Temperature | Tent temperature (RS485 multisensor) outside `temperatur_min`/`temperatur_max` |
 | Reservoir nearly empty | Reservoir fill level below `tank_min_prozent` |
 | Tent fan RPM | Actual RPM deviates from the expected value for at least 3 minutes in a row (spin-up/module restart do not trigger an alarm), see [Lueftermodul](#lueftermodul-1) |
-| Nozzle flow | Target/actual deviation per reservoir, see [Nozzle Monitoring](#flow-sensor-calibration--nozzle-monitoring) |
+| Nozzle flow | Target/actual deviation per reservoir, see [Nozzle Monitoring](#flow-sensor--nozzle-monitoring) |
 
 Each channel has its own rate limit (30 s) against accidental spamming; a dedicated test button per channel in the configuration verifies its credentials independently of the others.
 
 #### SD Logging
 
-Every 5 minutes, all measurement and control values are written to CSV files following the scheme `/YYYY-MM-DD.csv`, including room/tent climate, fan and light status. Details, full column list, and download/delete via the web interface: see [Data Log & Download](#data-log--download).
+Every minute (up to FW 1.20.1: every 5 minutes), all measurement and control values are written to CSV files following the scheme `/YYYY-MM-DD.csv`, including room/tent climate, fan and light status. Details, full column list, and download/delete via the web interface: see [Data Log & Download](#data-log--download).
 
 #### Node OTA
 
@@ -1090,7 +1138,7 @@ A second communication path, independent of the ESP-NOW network, for hard-wired 
 
 #### Protocol
 
-Simplified Modbus RTU: **FC03** (Read Holding Registers) for reading, **FC06** (Write Single Register) for writing. CRC16 per the Modbus standard (polynomial `0xA001`). A lean state-machine model (`mb_state_t`) polls the bus participants in turn; only one request outstanding at a time, response timeout **2000 ms**.
+Simplified Modbus RTU: **FC03** (Read Holding Registers) for reading, **FC06** (Write Single Register) for writing. CRC16 per the Modbus standard (polynomial `0xA001`). A lean state-machine model (`mb_state_t`) polls the bus participants in turn; only one request outstanding at a time, response timeout **2000 ms**. Before every request the master keeps at least **10 ms** of bus silence (since FW 1.21.4): the slaves detect the end of a frame by a 4 ms gap; without the pause the MS2 request stuck to the 39-byte reply of the MARS fan and got lost (cause of the sporadic `MS2_Timeouts`, found via the tent logger on 12 Nov). The Multimodul (from FW 1.3.4) additionally extracts a valid request at the end of a glued frame and answers it.
 
 After every send, the transceiver's own transmit echo is actively drained (`flush()` + a short pause + clearing any leftover bytes) before waiting for the response — needed because the MAX13487 on all of our boards has RE tied permanently to receive, so it always reflects its own transmission back onto RX.
 
@@ -1177,6 +1225,7 @@ MARS Hydro (RS485). Factory-built fan controller board, RS485 address `6`, origi
 | Auto — temperature, differential | Tent temperature − room temperature | Ramp directly over the temperature differential between `temp_min`/`temp_max` |
 
 A shared minimum and maximum speed (`min_speed`, `max_speed`, default 100 %) applies to both auto modes. At 0 % the MARS fan's enable register (reg15) is also set to 0, otherwise it keeps running at base speed. The differential modes require the [room climate sensor](#room-climate--vpd); if it is unavailable, the last target power remains unchanged.
+**Pulsed mode below the minimum speed (since FW 1.21.3, MARS only):** the MARS fan runs at its built-in minimum speed (~900 RPM, reports 25 %) for any value > 0; below that it only knows "off". The master therefore turns setpoints of 1–24 % into a 10-minute cycle: the fan runs setpoint/25 of the time at minimum (at least 1 min at a time) and is off otherwise — e.g. 5 % = 2 of 10 min, 10 % = 4 of 10 min. The minimum speed thus becomes the base ventilation, 0 % allows switching off completely. While pulsing, the home page shows the setpoint with ⏱ instead of the read-back value.
 
 #### Configuration (EEPROM, Magic 0x92)
 
@@ -1324,6 +1373,38 @@ Exactly the same hysteresis logic as [CO2 Control](#co2-control), just using ten
 
 Own status card on the home page, visible only when enabled.
 
+### VPD Control
+
+Since FW 1.21.0 (`vpdctrl.cpp`). Drives the **humidifier and the exhaust fan together** towards a VPD target range instead of fixed humidity/temperature limits. Humidifier and fan keep their own settings (socket/output, or min/max speed; the "own control active" switch was removed in 1.21.5, the master always drives the fan); only their min/max or mode logic is bypassed while "Controls the humidifier" or "Controls the exhaust fan" is ticked. Since 1.21.5 the Climate tab hides those resting fields and shows a note instead. Switching VPD control off restores the previous behaviour immediately.
+
+#### Target range
+
+| Stage | ☀️ Lights on | 🌙 Lights off |
+|---|---|---|
+| Clone / seedling | 0.40–0.80 kPa | 0.30–0.60 kPa |
+| Vegetative | 0.80–1.20 kPa | 0.60–1.00 kPa |
+| Early flower | 1.00–1.40 kPa | 0.80–1.20 kPa |
+| Late flower | 1.20–1.60 kPa | 1.00–1.40 kPa |
+| Custom | freely adjustable | freely adjustable |
+
+When the lights switch on/off, the range moves gradually (max. 0.45 kPa in 30 min) so humidifier and fan don't switch abruptly.
+
+**The leaf VPD is controlled:** leaf temperature = air temperature + offset (default −1.5 °C, lights on only – at night leaf and air are practically the same temperature). Leaf VPD = saturation vapour pressure(leaf) − vapour pressure of the air. Both leaf and air VPD are shown.
+
+#### Logic (every 5 s)
+
+- **Humidifier:** on as soon as the VPD is in the upper fifth of the band **and the exhaust is already at minimum speed** (since FW 1.21.3 — throttle first, then humidify), or immediately when the VPD is above the band; off once it drops below the middle of the band. At least 60 s on or off. **Pulsing (since FW 1.21.3):** when needed it runs 60 s and then pauses 120 s so the slow humidity sensor sees the effect before more is added (running continuously, humidity went from 46 to 75 % in 7 min in the log of 12 Nov). The climate page shows "pulse" during the pause. After a restart the control waits for the real light status instead of starting with the day target. The leaf temperature offset is also applied gradually when the light switches (max. 3 °C in 30 min, since FW 1.21.4); otherwise the leaf VPD drops abruptly at lights-on and the exhaust ramps up for no reason.
+- **Exhaust fan:** integrating – below the band (too humid) → gently up (max. 1 %/5 s, since FW 1.21.3); in the upper half of the band, above the band or while the humidifier runs → step by step down to the minimum speed (faster the closer to the upper limit; since FW 1.21.3); between lower limit and middle it holds. It is **only** increased if the room air (AHT21) is absolutely drier than the tent air, no CO₂ is being dosed and the tent is warmer than `temp_min` (default 18 °C, since FW 1.21.2) — below that the exhaust is slowly reduced so the tent does not cool down at night. The home page then shows "VPD control" as fan mode and the VPD target instead of humidity min/max.
+- **Limits with priority:** tent temperature from `temp_max` − 1 °C → fan ramps to maximum speed at `temp_max` + 2 °C. Humidity ≥ `hum_max` → humidifier off immediately, fan ramps to maximum speed at `hum_max` + 5 %.
+- **Without valid tent readings:** humidifier off, fan holds its value.
+- **Alarm:** if the VPD stays outside the band for `alarm_min` minutes in a row, a [notification](#notifications) with the reason goes out (fan at maximum, room air too humid, humidifier can't keep up, …).
+
+#### Configuration (EEPROM 570–582, Magic 0x56)
+
+`enabled` · `phase` · `day_min/max`, `night_min/max` (kPa×100, "custom" only) · `leaf_offset` (tenths of °C) · `use_humid` · `use_fan` · `temp_min` (°C, default 18) · `temp_max` (°C, default 28) · `hum_max` (%, default 75) · `alarm_min` (default 30, 0 = off). API: `GET /api/vpd` (configuration, reference values of all stages, current state), `POST /api/vpd/save`.
+
+SD log: `VPD_Blatt_kPa`, `VPD_Soll_min`, `VPD_Soll_max`; the [analysis](#analysis-tab--analysis-since-fw-1200) shows the target range as a green band and the leaf VPD as its own curve.
+
 ### Room Light & DWC Timer
 
 Two simple switching features that — like [CO2](#co2-control) and [humidity control](#humidity-control) — switch exactly one output (`target_relay_bit`, 0–3) of an **ESP-NOW socket node** (`target_node_id`); the node's other relay bits are left untouched.
@@ -1336,27 +1417,21 @@ A purely **manual** on/off switch, with no automation, hysteresis, or schedule. 
 
 A simple on/off lighting timer for a separate DWC system, like an ordinary household timer switch (no sunrise/sunset like the [lighting scheduler](#lighting-scheduler)): `enabled` · `target_node_id` · `target_relay_bit` · `on_min` / `off_min` (minutes since midnight; `off_min < on_min` = across midnight).
 
-### Flow Sensor Calibration & Nozzle Monitoring
+### Flow Sensor & Nozzle Monitoring
 
-Flow meter (YF-S401-like, Hall pulse output with a push-pull driver, no pull-up needed) in the shared supply line **before** the valve manifold — so it sees the flow of all 4 valves in turn, since per [valve control](#features) only one is ever open at a time anyway. An interrupt on `FLOW_SENSOR_PIN` (GPIO3) just counts pulses; conversion to ml is done via a one-time calibration.
+Flow meter (YF-S401-like, Hall pulse output with a push-pull driver, no pull-up needed) in the shared supply line **before** the valve manifold — so it sees the flow of all 4 valves in turn, since per [valve control](#features) only one is ever open at a time anyway. An interrupt on `FLOW_SENSOR_PIN` (GPIO3) counts the pulses.
 
-#### Calibration (Configuration → Valves)
-
-1. **"Start calibration"** — pump on (GPIO48), pressure is shown live. Uses the same output direct-test as the wiring check (which automatically pauses normal valve/pump control).
-2. **"Purge"** — valve open/close, as often as needed, until there's no air left in the system (air would skew the pulse count). "Start" is only possible after at least one completed purge cycle.
-3. **"Start"** — opens the return valve (MV4), counts pulses from then on (shown live).
-4. **"Stop"** — valve closes, pulse count is frozen.
-5. Enter the measured amount in ml (e.g. collected in a measuring cup) → **"Calculate"** derives pulses/liter and saves it permanently (own EEPROM block).
+**No conversion to ml (since FW 1.19.0):** The former calibration (pulses/liter) together with the ml display and totals has been removed — the totals lived in RAM only and were lost on every restart, and the raw pulse rate is enough to keep an eye on the nozzles. If you need amounts, collect a known amount once and convert the pulses from the SD log yourself.
 
 #### Nozzle Monitoring (`flowmonitor.cpp`)
 
-Observes the valve state (`behaelterZustand[]`) from the outside: when a reservoir switches to the "active" state, the pulse counter is cleared (discarding leftovers from the MV4 pre-flush phase); when it leaves that state, the amount is calculated and added to running totals (per reservoir + overall, RAM-only since the last restart — a true lifetime total can be reconstructed from the SD log if needed).
+Observes the valve state (`behaelterZustand[]`) from the outside: when a reservoir switches to the "active" state, the pulse counter is cleared (discarding leftovers from the pressure build-up); counting runs until the end of the refill phase (a pressure accumulator behind the meter is only refilled then), the duration is the valve-open time. Pulses and duration of the last cycle are shown per reservoir and written to the SD log.
 
-Each reservoir keeps a **target value** (ml/s):
+Each reservoir keeps a **target value** (pulses/s):
 
-- If none is set yet (0, or reset via "Clear targets"), the system automatically adopts the **next completed watering cycle** as the new reference — no manual calculation needed.
+- If none is set yet (0, or reset via "Clear targets"), the system automatically adopts the **next completed watering cycle** as the new reference — no manual calculation needed. When updating to 1.19.0 the old ml/s targets are discarded and learned again.
 - If one is set and the target/actual comparison is enabled, every cycle is compared with a configurable tolerance (%); on deviation below (clogged nozzle) or above (leak), a [notification](#notifications) goes out over all active channels.
-- "Clear targets" resets all three values to 0 — handy after cleaning the nozzles, so the old (now valid again) values aren't wrongly flagged as a deviation.
+- "Clear targets" resets all values to 0 — handy after cleaning the nozzles or reworking the plumbing, so the old values aren't wrongly flagged as a deviation.
 
 SD log columns: see [Data Log & Download](#data-log--download).
 
@@ -1385,7 +1460,7 @@ Displayed between humidity and CO₂ in the measurements card; room and tent tem
 
 ### Data Log & Download
 
-One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5 minutes**. Values from a currently unreachable source (room sensor, RS485 multisensor, fan offline) are written as an **empty cell** instead of a misleading zero.
+One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **1 minute** (up to FW 1.20.1: 5 minutes; about 0.4 MB per day). Values from a currently unreachable source (room sensor, RS485 multisensor, fan offline) are written as an **empty cell** instead of a misleading zero.
 
 #### Columns
 
@@ -1403,8 +1478,8 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5
 | `LuefterLeistung_%`, `LuefterRPM` | Exhaust fan |
 | `CO2Ausgang` | CO2 control relay state (0/1) |
 | `HumidAusgang` | Humidity control relay state (0/1) |
-| `ImpulseBehaelter1` … `3` | Flow meter pulses of the last spray cycle per reservoir (raw, independent of calibration) — at equal duration a direct measure of nozzle throughput |
-| `DauerBehaelter1_s` … `3` | Duration of that spray cycle (light/dark phase may differ) |
+| `ImpulseBehaelter1` … `4` | Flow meter pulses of the last spray cycle per reservoir (raw, independent of calibration) — at equal duration a direct measure of nozzle throughput |
+| `DauerBehaelter1_s` … `4` | Duration of that spray cycle (light/dark phase may differ) |
 | `Laufzeit_min` | Minutes since the master's last restart — if the value drops, a restart occurred |
 | `NeustartGrund` | Reason of the last restart (power-on, software, watchdog, brownout, …) |
 | `Lichtx4Starts` | Lichtx4 boot counter (Lichtx4 FW 1.2.0 or later, otherwise empty) — if it increases, the module restarted and all lamps were briefly off |
@@ -1414,6 +1489,8 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5
 | `WLAN_dBm` / `WLAN_Abbrueche` | WiFi signal strength (empty without connection) and number of WiFi disconnects since the previous row |
 | `EspNow_online` | ESP-NOW nodes online / paired, e.g. `2/3` |
 | `HeapMin_kB` | Lowest free memory since startup |
+| `MS2_Abfragen` / `MS2_Timeouts` | RS485 polls of the tent sensor (address 0x20, every 15 s) since the previous row and how many of them went unanswered. A single missing reply is enough for the master to treat the sensor as offline until the next successful poll (empty tent columns) — the counters show such dropouts even between two log rows (since FW 1.20.2) |
+| `VPD_Blatt_kPa`, `VPD_Soll_min`, `VPD_Soll_max` | [VPD control](#vpd-control): controlled leaf VPD and current (possibly moving) target range; empty when the control is off (since FW 1.21.0) |
 
 > **Automatic migration:** If the firmware encounters an existing daily file with the old, shorter column format (prior to this extension) when writing, it renames it to `_alt.csv` (data is preserved) and starts a new file with the full header — no mixing of different column counts within one file.
 
@@ -1427,6 +1504,19 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **5
 | `/api/logs/delete-all` | POST | Deletes all `*.csv`/`*.txt` files on the SD card, response contains the count (UI asks for confirmation first) |
 
 Filenames are checked server-side against path traversal (no `/` or `..` allowed).
+
+#### Analysis (tab "📈 Analysis", since FW 1.20.0)
+
+Charts straight from the daily logs, computed entirely in the browser (`page_charts.h`): the ESP only serves the CSV files via the two endpoints above, the page draws on `<canvas>` itself (no external library, works without internet too). Columns are looked up by header name, so older files (`_alt.csv`, only 3 reservoirs) work as well.
+
+- **Period** 1 day or 1 week up to the selected day; **window** 1 h … 7 days, slider and ◀/▶ to pan, mouse wheel/pinch to zoom, drag/swipe to pan, double-click shows everything.
+- **Charts** (each curve can be toggled, the choice is remembered in the browser): temperature (tent, room/outside, nutrient solution, root zone), humidity tent/room + VPD on its own axis with a green target band 0.8–1.2 kPa, light (PPFD), CO₂, tank level, actuators (fan %, humidifier and CO₂ output as bars), connection (WiFi signal, unanswered RS485 polls of the tent sensor). All charts share the time axis; the cursor shows the values of all curves at the same time in the legend.
+- **Markers:** grey background = lights off (`LichtMaske` = 0), red dashed ↻ = restart (from `Laufzeit_min`), orange ⚡ = mains dropout, grey ▲ = tent sensor unreachable (tent temperature and humidity empty). Short gaps (under 16 min) are bridged in the lines, longer ones break them; sensor dropouts are also counted in the events card and the daily summary.
+- **Key figures** for the visible window: ⌀/min/max per curve, split by lights on/off, share of VPD in the target range with lights on, light sum, number of restarts/mains dropouts.
+- **Daily summary:** per day DLI (mol/m²·d from PPFD), light hours, tent temperature and humidity day/night, VPD with lights on and share on target, number of watering cycles, restarts. Clicking a row jumps to that day.
+- **Nozzle analysis:** every watering cycle as a dot, a rolling median over 9 cycles per reservoir, outliers (>15 % from the median) circled in red. Shown as pulses per second (stays comparable when the open time was changed) or pulses per cycle. One card per reservoir with median, spread, trend (last vs. first third of the cycles in the window), outliers, deviation from the average of all reservoirs and a traffic light: 🟢 stable · 🟠 trend ≤ −10 % (nozzle/filter clogging) or ≥ +10 % (leak, loose nozzle) · 🟡 spread > 15 % (air, dirt) · ⚪ fewer than 6 cycles.
+
+The current day is fetched fresh on every "Reload", older days only once per page load.
 
 ---
 

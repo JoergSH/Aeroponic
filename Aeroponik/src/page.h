@@ -34,6 +34,9 @@ const char* htmlPage = R"rawliteral(
         }
         /* Kompakte Aeroponik-Zeile auf der Startseite: Boxen teilen sich die Breite gleichmaessig */
         .aero-row > .sensor-box { flex: 1 1 0; min-width: 0; margin: 0; }
+        /* Zweier-Kacheln in den Statuskarten (CO2, Abluft, Befeuchtung): min-width der .sensor-box
+           wuerde die Spalten sonst ueber den Kartenrand druecken */
+        .status-pair > .sensor-box { min-width: 0; margin: 0; overflow: hidden; }
         .sensor-box {
             text-align: center;
             background-color: #e8f8f0;
@@ -249,6 +252,7 @@ const char* htmlPage = R"rawliteral(
             <button class="tab"        onclick="showTab('alarme',     this)">🔔 <span class="de">Alarme</span><span class="en">Alarms</span></button>
             <button class="tab"        onclick="showTab('aeroponik',  this)">🚿 <span class="de">Aeroponik</span><span class="en">Aeroponics</span></button>
             <button class="tab"        onclick="showTab('klima',      this)">🌡️ <span class="de">Klima</span><span class="en">Climate</span></button>
+            <button class="tab"        onclick="showTab('charts',     this)">📈 <span class="de">Auswertung</span><span class="en">Analysis</span></button>
         </div>
 
 )rawliteral"
@@ -257,6 +261,7 @@ const char* htmlPage = R"rawliteral(
 #include "page_alarme.h"
 #include "page_aeroponik.h"
 #include "page_klima.h"
+#include "page_charts.h"
 R"rawliteral(
 
         <!-- Geraetestatus (immer sichtbar, unabhaengig vom aktiven Tab) -->

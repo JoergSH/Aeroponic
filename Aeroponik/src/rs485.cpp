@@ -26,8 +26,14 @@
 #define LICHT_BAUD_END()     do {} while (0)
 #endif
 #define POLL_INTERVAL_MS     15000UL
+#define RS485_INTER_FRAME_MS 10UL   // Mindestpause auf dem Bus vor jeder Anfrage (Slaves trennen Frames per 4-ms-Luecke)
+static uint32_t bus_free_ms = 0;
 #define MS2_FAST_POLL_MS      5000UL  // waehrend der Lampen-Kennlinie (rs485_set_ms2_fast_poll)
 static bool ms2_fast_poll = false;
+// Diagnose fuers SD-Log: MS2-Abfragen und davon unbeantwortete seit dem letzten Abholen
+// (rs485_take_ms2_stats) -- zeigt Aussetzer auch zwischen zwei Log-Zeilen.
+static uint16_t ms2_poll_cnt    = 0;
+static uint16_t ms2_timeout_cnt = 0;
 #define LICHT_POLL_INTERVAL_MS 15000UL
 #define FAN_POLL_INTERVAL_MS  3000UL  // Luefter-Leistung aendert sich schneller als Zeitplan/Ventile
 #define FAN_HEARTBEAT_INTERVAL_MS 6000UL  // Takt des echten iControl-Broadcasts, siehe unten
@@ -904,6 +910,7 @@ void loopRS485() {
             }
             rx_len   = 0;
             mb_state = MB_IDLE;
+            bus_free_ms = millis();
         } else if (timed_out) {
             if (rs485log_enabled()) {
                 char info[48];
@@ -913,6 +920,7 @@ void loopRS485() {
             switch (active_target) {
                 case TARGET_MS2_READ:
                     dbgPrintf("[RS485] MS2 Timeout (rx_len=%d)\n", rx_len);
+                    ms2_timeout_cnt++;
                     ms2.online = false;
                     break;
                 case TARGET_FAN_ENABLE_WRITE:
@@ -940,10 +948,14 @@ void loopRS485() {
             }
             rx_len   = 0;
             mb_state = MB_IDLE;
+            bus_free_ms = millis();
         }
     }
 
-    if (mb_state == MB_IDLE && !ota_requested) {
+    // Pause zwischen Antwort und naechster Anfrage: ohne sie klebte die MS2-Anfrage direkt an
+    // der 39-Byte-Antwort des MARS-Luefters, das Multimodul sah einen Frame mit falscher CRC und
+    // die Anfrage ging verloren (= MS2-Timeout, Zelt-Logger 12.11.)
+    if (mb_state == MB_IDLE && !ota_requested && millis() - bus_free_ms >= RS485_INTER_FRAME_MS) {
         if (licht_write_pending) {
             licht_write_pending = false;
             send_ms             = now;
@@ -999,6 +1011,7 @@ void loopRS485() {
             poll_ms    = now;
             send_ms    = now;
             dbgPrintln("[RS485] Poll MS2 (0x20) ...");
+            ms2_poll_cnt++;
             send_fc03(RS485_ADDR_MS2, 0, RS485_MS2_REGS);
             active_target = TARGET_MS2_READ;
             mb_state      = MB_WAIT_RESPONSE;
@@ -1036,6 +1049,7 @@ void loopRS485() {
             fan_heartbeat_ms = now;
             dbgPrintln("[RS485] Fan-Heartbeat-Broadcast (Master-Erkennungsexperiment) ...");
             send_fan_heartbeat_broadcast();
+            bus_free_ms = millis();   // auch nach dem Broadcast die Pause einhalten
             // bleibt MB_IDLE: Broadcast, keine Antwort erwartet
         }
     }
@@ -1043,6 +1057,10 @@ void loopRS485() {
 
 const Rs485SensorData& rs485_get_ms2() { return ms2; }
 void rs485_set_ms2_fast_poll(bool fast) { ms2_fast_poll = fast; }
+void rs485_take_ms2_stats(uint16_t& polls, uint16_t& timeouts) {
+    polls = ms2_poll_cnt; timeouts = ms2_timeout_cnt;
+    ms2_poll_cnt = 0; ms2_timeout_cnt = 0;
+}
 
 bool rs485_set_licht_mask(uint8_t mask) {
     licht_commanded     = true;

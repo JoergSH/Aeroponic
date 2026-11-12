@@ -109,6 +109,10 @@ R"rawliteral(
                     <span class="de">• Stromversorgung nicht unterbrechen<br>• Nur .bin Dateien<br>• System startet nach Update neu</span>
                     <span class="en">• Do not interrupt the power supply<br>• Only .bin files<br>• System restarts after the update</span>
                 </div>
+                <div style="margin:10px 0;">
+                    <span class="de">Laufende Version:</span><span class="en">Running version:</span>
+                    <strong id="fwVersionOta">--</strong>
+                </div>
                 <form method='POST' action='/update' enctype='multipart/form-data' onsubmit='return startUpdate()'>
                     <label>Firmware (.bin):</label>
                     <input type='file' name='update' accept='.bin' class="file-input" required>

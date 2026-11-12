@@ -103,10 +103,7 @@ R"rawliteral(
             <!-- Ventile-Konfiguration -->
             <h3 class="section-heading">🚿 <span class="de">Ventile-Konfiguration</span><span class="en">Valve Configuration</span></h3>
             <div style="margin-bottom:15px; padding:12px; background:#f0f8ff; border-radius:8px; border-left:4px solid #17a2b8;">
-                <label><input type="checkbox" id="vorlaufAktiv" onchange="saveVentilConfig()"> <span class="de">Vorlauf Rückleitung aktiv</span><span class="en">Return pre-flush active</span></label>
-                &nbsp;&nbsp;
-                <label><span class="de">Vorlaufzeit</span><span class="en">Pre-flush time</span>: <input type="number" id="vorlaufzeit" min="1" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
-                <div style="margin-top:8px;">
+                <div>
                     <label><span class="de">Druckaufbau / Nachlauf</span><span class="en">Pressure build-up / refill</span>: <input type="number" id="druckaufbau" min="0" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
                     <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Pumpe läuft so lange bei geschlossenem Düsenventil, bevor es öffnet — gleichbleibender Druck beim Sprühen — und nach dem Schließen weiter, damit ein Druckspeicher wieder voll ist (wird noch mitgezählt). Im Batch ersetzt der Nachlauf den Druckaufbau des nächsten Behälters. 0 = aus.</span><span class="en">Pump runs this long with the nozzle valve closed before it opens — constant pressure while spraying — and again after it closes so a pressure accumulator is refilled (still counted). In batch mode the refill replaces the next reservoir's build-up. 0 = off.</span></div>
                 </div>
@@ -156,8 +153,8 @@ R"rawliteral(
                     </div>
                 </div>
                 <div style="font-size:0.78em;color:#888;margin-top:6px;">
-                    <span class="de">Aktiv laufen alle aktiven Behälter direkt nacheinander in einem Durchlauf — der Rücklauf-Vorlauf öffnet dabei nur einmal vor dem ersten, nicht vor jedem einzelnen Behälter.</span>
-                    <span class="en">When active, all active reservoirs run back-to-back in one pass — the return pre-flush only opens once before the first one, not before each individual reservoir.</span>
+                    <span class="de">Aktiv laufen alle aktiven Behälter direkt nacheinander in einem Durchlauf, danach folgt eine gemeinsame Pause.</span>
+                    <span class="en">When active, all active reservoirs run back-to-back in one pass, followed by one shared pause.</span>
                 </div>
             </div>
 
@@ -175,7 +172,7 @@ R"rawliteral(
                         <span class="de">Test starten</span><span class="en">Start Test</span></button>
                 </div>
                 <div id="pcfTestWarning" style="display:none;margin-bottom:12px;padding:8px;background:#f8d7da;border-radius:4px;font-size:0.85em;color:#721c24;">
-                    ⚠ <span class="de">Automatische Ventil-/Pumpensteuerung pausiert!</span><span class="en">Automatic valve/pump control paused!</span>
+                    ⚠ <span class="de">Automatische Ventil-/Pumpensteuerung pausiert! Der Testmodus endet spätestens nach 30 Minuten automatisch (mit Benachrichtigung).</span><span class="en">Automatic valve/pump control paused! Test mode ends automatically after 30 minutes at the latest (with a notification).</span>
                 </div>
                 <div id="pcfTestPendingInfo" style="display:none;margin-bottom:12px;padding:8px;background:#fff3cd;border-radius:4px;font-size:0.85em;color:#856404;">
                     ⏳ <span class="de">Wird aktiviert, sobald der laufende Gießzyklus beendet ist …</span><span class="en">Activating once the current watering cycle finishes …</span>
@@ -184,7 +181,7 @@ R"rawliteral(
                     <button id="pcf_btn_0" onclick="pcfToggle(0)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Ventil 1 (Beh. 1)</span><span class="en">Valve 1 (Res. 1)</span></small></button>
                     <button id="pcf_btn_1" onclick="pcfToggle(1)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Ventil 2 (Beh. 2)</span><span class="en">Valve 2 (Res. 2)</span></small></button>
                     <button id="pcf_btn_2" onclick="pcfToggle(2)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Ventil 3 (Beh. 3)</span><span class="en">Valve 3 (Res. 3)</span></small></button>
-                    <button id="pcf_btn_3" onclick="pcfToggle(3)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Rücklaufventil</span><span class="en">Return Valve</span></small></button>
+                    <button id="pcf_btn_3" onclick="pcfToggle(3)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Ventil 4 (Beh. 4)</span><span class="en">Valve 4 (Res. 4)</span></small></button>
                     <button id="pcf_btn_4" onclick="pcfToggle(4)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Umwälzpumpe</span><span class="en">Circulation Pump</span></small></button>
                     <button id="pcf_btn_5" onclick="pcfToggle(5)" class="pcf-btn"><span>AUS</span><br><small><span class="de">Pumpe</span><span class="en">Pump</span></small></button>
                 </div>
@@ -207,100 +204,22 @@ R"rawliteral(
                 <span id="druckSensorSaveStatus" style="font-size:0.85em;color:#888;"></span>
             </div>
 
-            <!-- Durchflussmesser-Kalibrierung: Pumpe an -> Druck beobachten -> Start (Ventil 4
-                 auf, Pulse zaehlen) -> Stop -> Menge in ml eingeben -> Pulse/Liter berechnen.
-                 Nutzt denselben Ausgangs-Direkttest wie oben (Pumpe=Index 5, Ventil 4=Index 3). -->
-            <div style="margin-top:20px;padding:16px;background:#e8f4fd;border-radius:8px;border-left:4px solid #17a2b8;">
-                <h4 style="margin:0 0 12px 0;">💧 <span class="de">Durchflussmesser-Kalibrierung</span><span class="en">Flow Sensor Calibration</span></h4>
-
-                <div id="flowcalCurrent" style="display:none;margin-bottom:10px;font-size:0.85em;color:#555;">
-                    <span class="de">Aktuelle Kalibrierung:</span><span class="en">Current calibration:</span>
-                    <strong id="flowcalCurrentValue">--</strong> Pulse/L
-                </div>
-
-                <div id="flowcalIdle">
-                    <button onclick="flowcalStart()" style="background:#17a2b8;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
-                        <span class="de">Kalibrierung starten (Pumpe an)</span><span class="en">Start calibration (pump on)</span>
-                    </button>
-                </div>
-
-                <div id="flowcalRunning" style="display:none;">
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;max-width:300px;">
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.3em;" id="flowcalDruck">--</div><div class="sensor-unit">bar</div></div>
-                        <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.3em;" id="flowcalPulses">--</div><div class="sensor-unit"><span class="de">Impulse</span><span class="en">Pulses</span></div></div>
-                    </div>
-
-                    <!-- Entlueften: Ventil auf/zu bevor die eigentliche Messung startet, damit Luft
-                         im System nicht die Pulszahl verfaelscht. Start bleibt gesperrt, bis dieser
-                         Zyklus einmal abgeschlossen (= Ventil wieder zu) wurde. -->
-                    <div style="margin-bottom:10px;">
-                        <button id="flowcalPurgeBtn" onclick="flowcalPurge()" style="background:#f39c12;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
-                            <span class="de">Entlüften (Ventil öffnen)</span><span class="en">Purge air (open valve)</span>
-                        </button>
-                        <div style="font-size:0.78em;color:#888;margin-top:4px;">
-                            <span class="de">Vor dem Start: Ventil öffnen, bis evtl. Luft aus dem System raus ist, dann hier wieder stoppen.</span>
-                            <span class="en">Before starting: open the valve until any air is out of the system, then stop here again.</span>
-                        </div>
-                    </div>
-
-                    <div style="display:flex;gap:8px;">
-                        <button id="flowcalBeginBtn" onclick="flowcalBegin()" disabled style="background:#28a745;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;opacity:0.4;pointer-events:none;">
-                            <span class="de">Start (Ventil öffnen)</span><span class="en">Start (open valve)</span>
-                        </button>
-                        <button id="flowcalStopBtn" style="display:none;background:#dc3545;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;" onclick="flowcalStop()">
-                            <span class="de">Stop</span><span class="en">Stop</span>
-                        </button>
-                        <button onclick="flowcalCancel()" style="background:#6c757d;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
-                            <span class="de">Abbrechen</span><span class="en">Cancel</span>
-                        </button>
-                    </div>
-                </div>
-
-                <div id="flowcalVolumeInput" style="display:none;">
-                    <div style="font-size:0.9em;margin-bottom:8px;">
-                        <span class="de">Gezählte Impulse:</span><span class="en">Counted pulses:</span>
-                        <strong id="flowcalPulsesResult">--</strong>
-                    </div>
-                    <div style="font-size:0.85em;color:#555;margin-bottom:8px;">
-                        <span class="de">Jetzt die aufgefangene Menge abmessen und hier eintragen:</span>
-                        <span class="en">Now measure the collected amount and enter it here:</span>
-                    </div>
-                    <div style="display:flex;gap:8px;align-items:center;">
-                        <input type="number" id="flowcalMl" placeholder="ml" style="width:120px;padding:7px;border:1px solid #ddd;border-radius:4px;">
-                        <button onclick="flowcalCalc()" style="background:#28a745;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
-                            <span class="de">Berechnen</span><span class="en">Calculate</span></button>
-                        <button onclick="flowcalCancel()" style="background:#6c757d;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
-                            <span class="de">Abbrechen</span><span class="en">Cancel</span></button>
-                    </div>
-                </div>
-
-                <div id="flowcalResult" style="display:none;margin-top:10px;padding:8px;background:#d4edda;border-radius:4px;font-size:0.9em;color:#155724;">
-                    <span class="de">Kalibriert:</span><span class="en">Calibrated:</span> <strong id="flowcalResultValue">--</strong> Pulse/L
-                </div>
-            </div>
-
-            <!-- Duesen-Ueberwachung: misst pro Giesszyklus die verspruehte Menge (ueber den
-                 kalibrierten Durchflussmesser) und vergleicht sie optional gegen einen erwarteten
-                 Durchfluss je Behaelter -- bei zu grosser Abweichung (verstopfte Duese oder Leck)
+            <!-- Duesen-Ueberwachung: zaehlt pro Giesszyklus die Durchflussmesser-Impulse und
+                 vergleicht die Rate (Impulse/s) optional gegen einen erwarteten Wert je Behaelter -- bei zu grosser Abweichung (verstopfte Duese oder Leck)
                  geht eine Benachrichtigung ueber die konfigurierten Kanaele raus. -->
             <div style="margin-top:20px;padding:16px;background:#fff3e0;border-radius:8px;border-left:4px solid #fb8c00;">
                 <h4 style="margin:0 0 12px 0;">🚿 <span class="de">Düsen-Überwachung</span><span class="en">Nozzle Monitoring</span></h4>
 
                 <div style="font-size:0.78em;color:#888;margin-bottom:12px;">
-                    <span class="de">Erfasst die verspritzte Menge je Behälter automatisch bei jedem Gießzyklus (braucht die Kalibrierung oben). Soll/Ist-Vergleich + Alarm sind optional.</span>
-                    <span class="en">Automatically measures the sprayed amount per reservoir on every watering cycle (needs the calibration above). Target/actual comparison + alert are optional.</span>
+                    <span class="de">Zählt bei jedem Gießzyklus die Durchflussmesser-Impulse je Behälter (roh, ohne Umrechnung in ml — Mengen lassen sich bei Bedarf aus dem SD-Log ermitteln). Soll/Ist-Vergleich + Alarm sind optional.</span>
+                    <span class="en">Counts the flow meter pulses per reservoir on every watering cycle (raw, not converted to ml — amounts can be derived from the SD log if needed). Target/actual comparison + alert are optional.</span>
                 </div>
 
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
-                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast1">--</div><div class="sensor-unit">ml <span class="de">Beh. 1 (letzter Zyklus)</span><span class="en">Res. 1 (last cycle)</span></div></div>
-                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast2">--</div><div class="sensor-unit">ml <span class="de">Beh. 2 (letzter Zyklus)</span><span class="en">Res. 2 (last cycle)</span></div></div>
-                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast3">--</div><div class="sensor-unit">ml <span class="de">Beh. 3 (letzter Zyklus)</span><span class="en">Res. 3 (last cycle)</span></div></div>
-                </div>
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px;">
-                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotal1">--</div><div class="sensor-unit">ml <span class="de">Beh. 1 gesamt</span><span class="en">Res. 1 total</span></div></div>
-                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotal2">--</div><div class="sensor-unit">ml <span class="de">Beh. 2 gesamt</span><span class="en">Res. 2 total</span></div></div>
-                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotal3">--</div><div class="sensor-unit">ml <span class="de">Beh. 3 gesamt</span><span class="en">Res. 3 total</span></div></div>
-                    <div class="sensor-box" style="padding:8px;background:#ffe0b2;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonTotalAll">--</div><div class="sensor-unit">ml <span class="de">Gesamt (seit Neustart)</span><span class="en">Total (since restart)</span></div></div>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast1">--</div><div class="sensor-unit"><span class="de">Impulse Beh. 1 (letzter Zyklus)</span><span class="en">Pulses res. 1 (last cycle)</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast2">--</div><div class="sensor-unit"><span class="de">Impulse Beh. 2 (letzter Zyklus)</span><span class="en">Pulses res. 2 (last cycle)</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast3">--</div><div class="sensor-unit"><span class="de">Impulse Beh. 3 (letzter Zyklus)</span><span class="en">Pulses res. 3 (last cycle)</span></div></div>
+                    <div class="sensor-box" style="padding:8px;"><div class="sensor-value" style="font-size:1.2em;" id="flowmonLast4">--</div><div class="sensor-unit"><span class="de">Impulse Beh. 4 (letzter Zyklus)</span><span class="en">Pulses res. 4 (last cycle)</span></div></div>
                 </div>
 
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
@@ -312,16 +231,20 @@ R"rawliteral(
 
                 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:12px;">
                     <div>
-                        <div class="status-label"><span class="de">Erwartet Beh. 1 (ml/s)</span><span class="en">Expected Res. 1 (ml/s)</span></div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 1 (Impulse/s)</span><span class="en">Expected res. 1 (pulses/s)</span></div>
                         <input type="number" id="flowmonSoll1" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                     </div>
                     <div>
-                        <div class="status-label"><span class="de">Erwartet Beh. 2 (ml/s)</span><span class="en">Expected Res. 2 (ml/s)</span></div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 2 (Impulse/s)</span><span class="en">Expected res. 2 (pulses/s)</span></div>
                         <input type="number" id="flowmonSoll2" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                     </div>
                     <div>
-                        <div class="status-label"><span class="de">Erwartet Beh. 3 (ml/s)</span><span class="en">Expected Res. 3 (ml/s)</span></div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 3 (Impulse/s)</span><span class="en">Expected res. 3 (pulses/s)</span></div>
                         <input type="number" id="flowmonSoll3" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                    </div>
+                    <div>
+                        <div class="status-label"><span class="de">Erwartet Beh. 4 (Impulse/s)</span><span class="en">Expected res. 4 (pulses/s)</span></div>
+                        <input type="number" id="flowmonSoll4" min="0" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                     </div>
                     <div>
                         <div class="status-label"><span class="de">Toleranz (%)</span><span class="en">Tolerance (%)</span></div>

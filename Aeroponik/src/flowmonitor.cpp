@@ -7,20 +7,36 @@
 #include <EEPROM.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 FlowMonitorConfig flowMonitorConfig;
 FlowMonitorState  flowMonitorState;
 
-static VentilZustand lastZustand[3]  = { V_PAUSE, V_PAUSE, V_PAUSE };
-static uint32_t      cycleStartMs[3] = { 0, 0, 0 };
-static float         aktivDauerS[3]  = { 0, 0, 0 };   // Ventil-offen-Zeit (ohne Nachlauf)
+static VentilZustand lastZustand[BEHAELTER_ANZAHL]  = {};   // = V_PAUSE
+static uint32_t      cycleStartMs[BEHAELTER_ANZAHL] = {};
+static float         aktivDauerS[BEHAELTER_ANZAHL]  = {};   // Ventil-offen-Zeit (ohne Nachlauf)
+
+// EEPROM-Adresse des Sollwerts je Behaelter: 1-3 im alten Block (gleiche Offsets wie das
+// fruehere Struct-Layout), 4 in einem eigenen Feld (siehe config.h). Feldweise statt als
+// ganzes Struct: EEPROM.put(struct) schrieb 3 Fuellbytes ueber das Blockende hinaus bis in
+// die Raumlicht-Konfiguration (550/551).
+static int sollAddr(uint8_t i) {
+    return (i < 3) ? EEPROM_FLOWMON_BASE + 4 + i * 4 : EEPROM_FLOWMON_SOLL4_ADDR;
+}
 
 void loadFlowMonitorConfig() {
     if (EEPROM.read(EEPROM_FLOWMON_MAGIC_ADDR) == EEPROM_FLOWMON_MAGIC_BYTE) {
-        EEPROM.get(EEPROM_FLOWMON_BASE, flowMonitorConfig);
+        flowMonitorConfig.enabled          = EEPROM.read(EEPROM_FLOWMON_BASE) != 0;
+        flowMonitorConfig.toleranz_prozent = EEPROM.read(EEPROM_FLOWMON_BASE + 16);
+        for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
+            float v;
+            EEPROM.get(sollAddr(i), v);
+            // Behaelter 4 war vorher unbelegt (0xFF = NaN) -> 0 = Sollwert wird gelernt
+            flowMonitorConfig.erwartet_impulse_s[i] = (isfinite(v) && v >= 0.0f && v <= 1000.0f) ? v : 0.0f;
+        }
     } else {
         flowMonitorConfig.enabled = false;
-        for (uint8_t i = 0; i < 3; i++) flowMonitorConfig.erwarteter_durchfluss_ml_s[i] = 0.0f;
+        for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) flowMonitorConfig.erwartet_impulse_s[i] = 0.0f;
         flowMonitorConfig.toleranz_prozent = 30;
         saveFlowMonitorConfig();
     }
@@ -28,58 +44,54 @@ void loadFlowMonitorConfig() {
 }
 
 void saveFlowMonitorConfig() {
-    EEPROM.put(EEPROM_FLOWMON_BASE, flowMonitorConfig);
+    EEPROM.write(EEPROM_FLOWMON_BASE, flowMonitorConfig.enabled ? 1 : 0);
+    EEPROM.write(EEPROM_FLOWMON_BASE + 16, flowMonitorConfig.toleranz_prozent);
+    for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++)
+        EEPROM.put(sollAddr(i), flowMonitorConfig.erwartet_impulse_s[i]);
     EEPROM.write(EEPROM_FLOWMON_MAGIC_ADDR, EEPROM_FLOWMON_MAGIC_BYTE);
     EEPROM.commit();
 }
 
-// Verarbeitet das Ende eines Giesszyklus: Menge berechnen, Summen fortschreiben, bei
-// aktivierter Ueberwachung Soll/Ist vergleichen und ggf. per sendNotification() alarmieren.
+// Verarbeitet das Ende eines Giesszyklus: Impulse/Dauer fuers Log merken, bei aktivierter
+// Ueberwachung die Impulsrate (Impulse pro Sekunde Ventil-offen-Zeit) gegen den Sollwert
+// vergleichen und ggf. per sendNotification() alarmieren.
 static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
-    float ppl = flowsensor_pulses_per_liter();
-    float ml  = (ppl > 0.0f) ? (pulses / ppl) * 1000.0f : 0.0f;
+    flowMonitorState.last_cycle_pulses[idx] = pulses;
+    flowMonitorState.last_cycle_s[idx]      = dauer_s;
+    flowMonitorState.log_pending[idx]       = true;
 
-    flowMonitorState.last_cycle_ml[idx]      = ml;
-    flowMonitorState.total_ml[idx]          += ml;
-    flowMonitorState.total_ml_all           += ml;
-    flowMonitorState.last_cycle_pulses[idx]  = pulses;
-    flowMonitorState.last_cycle_s[idx]       = dauer_s;
-    flowMonitorState.log_pending[idx]        = true;
+    dbgPrintf("[FLOWMON] Behaelter %u: %u Impulse in %.1fs\n", idx + 1, pulses, dauer_s);
 
-    dbgPrintf("[FLOWMON] Behaelter %u: %.0f ml in %.1fs (%u Impulse)\n",
-                  idx + 1, ml, dauer_s, pulses);
-
-    if (ppl <= 0.0f) return;      // nicht kalibriert -- weder lernen noch vergleichen
     if (dauer_s < 0.5f) return;   // zu kurzer Zyklus fuer eine belastbare Aussage
+    float rate = pulses / dauer_s;
 
     // Kein Sollwert fuer diesen Behaelter hinterlegt (0 = unkonfiguriert oder per "Sollwerte
     // loeschen" zurueckgesetzt, z.B. nach dem Duesenreinigen) -- diesen Zyklus automatisch als
-    // neue Referenz uebernehmen, statt eine manuelle ml/s-Eingabe zu verlangen. Laeuft immer,
-    // unabhaengig vom Alarm-Schalter, damit der Sollwert schon bereitsteht sobald man den Alarm
-    // aktiviert.
-    if (flowMonitorConfig.erwarteter_durchfluss_ml_s[idx] <= 0.0f) {
-        float rate = ml / dauer_s;
-        flowMonitorConfig.erwarteter_durchfluss_ml_s[idx] = rate;
+    // neue Referenz uebernehmen. Laeuft immer, unabhaengig vom Alarm-Schalter, damit der
+    // Sollwert schon bereitsteht sobald man den Alarm aktiviert.
+    if (flowMonitorConfig.erwartet_impulse_s[idx] <= 0.0f) {
+        if (pulses == 0) return;   // kein Durchfluss -- taugt nicht als Referenz
+        flowMonitorConfig.erwartet_impulse_s[idx] = rate;
         saveFlowMonitorConfig();
-        dbgPrintf("[FLOWMON] Behaelter %u: Sollwert automatisch ermittelt: %.2f ml/s\n", idx + 1, rate);
+        dbgPrintf("[FLOWMON] Behaelter %u: Sollwert automatisch ermittelt: %.1f Impulse/s\n", idx + 1, rate);
         return;  // dieser Zyklus ist die neue Referenz, nicht gegen sich selbst vergleichen
     }
 
     if (!flowMonitorConfig.enabled) return;
 
-    float erwartet   = flowMonitorConfig.erwarteter_durchfluss_ml_s[idx] * dauer_s;
-    float tolFactor  = flowMonitorConfig.toleranz_prozent / 100.0f;
+    float erwartet  = flowMonitorConfig.erwartet_impulse_s[idx] * dauer_s;
+    float tolFactor = flowMonitorConfig.toleranz_prozent / 100.0f;
     char  msg[160];
 
-    if (ml < erwartet * (1.0f - tolFactor)) {
+    if (pulses < erwartet * (1.0f - tolFactor)) {
         snprintf(msg, sizeof(msg),
-                 "⚠️ Behälter %u: Düse evtl. verstopft (erwartet ~%.0fml, gemessen %.0fml)",
-                 idx + 1, erwartet, ml);
+                 "⚠️ Behälter %u: Düse evtl. verstopft (erwartet ~%.0f Impulse, gemessen %u)",
+                 idx + 1, erwartet, pulses);
         sendNotification(msg);
-    } else if (ml > erwartet * (1.0f + tolFactor)) {
+    } else if (pulses > erwartet * (1.0f + tolFactor)) {
         snprintf(msg, sizeof(msg),
-                 "⚠️ Behälter %u: Zu viel Durchfluss, evtl. Leck (erwartet ~%.0fml, gemessen %.0fml)",
-                 idx + 1, erwartet, ml);
+                 "⚠️ Behälter %u: Zu viel Durchfluss, evtl. Leck (erwartet ~%.0f Impulse, gemessen %u)",
+                 idx + 1, erwartet, pulses);
         sendNotification(msg);
     }
 }
@@ -87,15 +99,15 @@ static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
 // Messfenster: Ventil auf bis Ende Nachlauf. Ein Druckspeicher hinter dem Durchflussmesser liefert
 // beim Oeffnen einen Teil des Spruehwassers selbst und wird erst im Nachlauf (Ventil zu, Pumpe an)
 // wieder aufgefuellt -- erst dann ist die gesamte gespruehte Menge durch den Zaehler gelaufen.
-// Als Dauer (Sollwert ml/s) zaehlt nur die Ventil-offen-Zeit.
+// Als Dauer (Sollwert Impulse/s) zaehlt nur die Ventil-offen-Zeit.
 void loopFlowMonitor() {
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
         VentilZustand z = behaelterZustand[i].zustand;
         VentilZustand l = lastZustand[i];
 
         if (z == V_AKTIV && l != V_AKTIV) {
-            // Zyklus beginnt -- Zaehler leeren (verwirft Reste aus Vorlauf/Druckaufbau, die ueber
-            // das Ruecklaufventil bzw. in den Druckspeicher liefen, nicht ueber diese Duese).
+            // Zyklus beginnt -- Zaehler leeren (verwirft Reste aus dem Druckaufbau, die in den
+            // Druckspeicher bzw. ueber den Ruecklauf-Kugelhahn liefen, nicht ueber diese Duese).
             flowsensor_take_pulses();
             cycleStartMs[i] = millis();
         } else if (l == V_AKTIV && z != V_AKTIV) {

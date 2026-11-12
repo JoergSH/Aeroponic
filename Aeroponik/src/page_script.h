@@ -46,6 +46,7 @@ R"rawliteral(
                 active: 'Aktiv',
                 doseOnce: 'Einmal auslösen',
                 doseRunning: (s) => 'Läuft... ' + s + 's',
+                doseWaiting: 'Wartet auf Automatik...',
                 openingLabel: 'Öffnung (s)',
                 pauseLabel: 'Pause (min)',
                 tentValues: 'Zeltwerte',
@@ -81,6 +82,9 @@ R"rawliteral(
                 fanModeManual: 'Manuell',
                 fanModeAutoHum: 'Automatik Feuchte',
                 fanModeAutoTemp: 'Automatik Temperatur',
+                fanModeVpd: 'VPD-Regelung',
+                humidPulsePause: 'Takt-Pause',
+                vpdTargetKpa: 'VPD-Ziel (kPa)',
                 diffMinLabel: 'Differenz Min (°C)',
                 diffMaxLabel: 'Differenz Max (°C)',
                 tempMinLabel: 'Temperatur Min (°C)',
@@ -90,7 +94,6 @@ R"rawliteral(
                 notConnected: 'Nicht verbunden',
                 loadError: 'Fehler beim Laden',
                 ssidEmptyAlert: 'SSID darf nicht leer sein',
-                flowcalInvalidVolume: 'Bitte eine gültige Menge in ml eingeben',
                 flowmonResetConfirm: 'Alle Sollwerte wirklich löschen?',
                 confirmRestart: 'Steuerung wirklich neu starten? Laufende Zyklen werden unterbrochen.',
                 debugCaptureRunning: (s) => 'Zeichnet auf … noch ' + s + ' s',
@@ -150,6 +153,7 @@ R"rawliteral(
                 active: 'Active',
                 doseOnce: 'Run once',
                 doseRunning: (s) => 'Running... ' + s + 's',
+                doseWaiting: 'Waiting for automation...',
                 openingLabel: 'Opening (s)',
                 pauseLabel: 'Pause (min)',
                 tentValues: 'Tent Values',
@@ -185,6 +189,9 @@ R"rawliteral(
                 fanModeManual: 'Manual',
                 fanModeAutoHum: 'Auto Humidity',
                 fanModeAutoTemp: 'Auto Temperature',
+                fanModeVpd: 'VPD control',
+                humidPulsePause: 'Pulse pause',
+                vpdTargetKpa: 'VPD target (kPa)',
                 diffMinLabel: 'Differential Min (°C)',
                 diffMaxLabel: 'Differential Max (°C)',
                 tempMinLabel: 'Temperature Min (°C)',
@@ -194,7 +201,6 @@ R"rawliteral(
                 notConnected: 'Not connected',
                 loadError: 'Error loading',
                 ssidEmptyAlert: 'SSID must not be empty',
-                flowcalInvalidVolume: 'Please enter a valid amount in ml',
                 flowmonResetConfirm: 'Really clear all target values?',
                 confirmRestart: 'Really restart the controller? Running cycles will be interrupted.',
                 debugCaptureRunning: (s) => 'Recording… ' + s + ' s left',
@@ -255,6 +261,7 @@ R"rawliteral(
             updateSchedPhase();
             updatePcfUi();
             updateFanModeVisibility();
+            if (typeof chartsOnLangChange === 'function') chartsOnLangChange();
         }
 
         function showTab(tabName, btn) {
@@ -282,6 +289,8 @@ R"rawliteral(
                 loadRaumlichtConfig();
                 loadFanConfig();
                 loadLueftmodulConfig();
+            } else if (tabName === 'charts') {
+                if (typeof chartsOnShow === 'function') chartsOnShow();   // siehe page_charts.h
             }
         }
 
@@ -344,6 +353,8 @@ R"rawliteral(
                         document.getElementById('freeHeap').textContent    = Math.round(d.freeHeap / 1024) + ' KB';
                         document.getElementById('uptime').textContent      = Math.round(d.uptime / 60) + ' Min';
                         document.getElementById('fwVersion').textContent  = d.fwVersion || '--';
+                        const fvo = document.getElementById('fwVersionOta');
+                        if (fvo) fvo.textContent = d.fwVersion || '--';
                         document.getElementById('chipModel').textContent   = d.chipModel;
                         document.getElementById('chipRevision').textContent = d.chipRevision;
                         document.getElementById('flashSize').textContent   = Math.round(d.flashSize / (1024 * 1024)) + ' MB';
@@ -1329,12 +1340,21 @@ R"rawliteral(
                 if (badge) {
                     if (!d.humid_online) { badge.textContent = t('noHumidValue'); badge.style.background = '#dc3545'; }
                     else if (d.target_node_id && d.node_state === -1) { badge.textContent = (d.output_on ? t('on') : t('off')) + ' — ' + t('socketOffline'); badge.style.background = '#dc3545'; }
+                    else if (d.pulse_pause) { badge.textContent = t('humidPulsePause'); badge.style.background = '#17a2b8'; }
                     else { badge.textContent = d.output_on ? t('on') : t('off'); badge.style.background = d.output_on ? '#28a745' : '#6c757d'; }
                 }
                 const nowEl = document.getElementById('humidStatusNow');
                 if (nowEl) nowEl.textContent = d.humid_online ? d.humid_now : '--';
                 const rangeEl = document.getElementById('humidStatusRange');
-                if (rangeEl) rangeEl.textContent = (d.humid_min / 10).toFixed(1) + ' / ' + (d.humid_max / 10).toFixed(1);
+                const unitEl = document.getElementById('humidStatusRangeUnit');
+                if (d.vpd) {
+                    // VPD-Regelung schaltet den Befeuchter -- statt der ruhenden %-Grenzen den VPD-Zielbereich zeigen
+                    if (rangeEl) { rangeEl.textContent = (d.vpd_min !== undefined) ? Number(d.vpd_min).toFixed(2) + '–' + Number(d.vpd_max).toFixed(2) : '--'; rangeEl.style.fontSize = '1.05em'; }
+                    if (unitEl) unitEl.textContent = t('vpdTargetKpa');
+                } else {
+                    if (rangeEl) { rangeEl.textContent = (d.humid_min / 10).toFixed(1) + ' / ' + (d.humid_max / 10).toFixed(1); rangeEl.style.fontSize = '1.4em'; }
+                    if (unitEl) unitEl.textContent = 'Min / Max';
+                }
             }).catch(() => {});
         }
 
@@ -1764,7 +1784,6 @@ R"rawliteral(
         function loadFanConfig() {
             if (fanConfigLoaded) return;
             fetch('/api/fan').then(r => r.json()).then(d => {
-                document.getElementById('fanEnabled').checked      = d.enabled;
                 document.getElementById('fanMode').value           = d.mode;
                 document.getElementById('fanManualPercent').value  = d.manual_percent;
                 document.getElementById('fanHumMin').value         = d.hum_min;
@@ -1814,7 +1833,6 @@ R"rawliteral(
 
         function saveFanConfigForm() {
             const body = {
-                enabled:        document.getElementById('fanEnabled').checked,
                 mode:           parseInt(document.getElementById('fanMode').value),
                 manual_percent: parseInt(document.getElementById('fanManualPercent').value),
                 hum_min:        parseInt(document.getElementById('fanHumMin').value),
@@ -2291,11 +2309,14 @@ R"rawliteral(
                 if (!d.online) return;
                 const badge = document.getElementById('fanModeBadge');
                 if (badge) {
-                    if (d.enabled) { badge.textContent = fanModeName(d.mode) || '--'; badge.style.background = '#28a745'; }
+                    if (d.enabled && d.vpd) { badge.textContent = t('fanModeVpd'); badge.style.background = '#28a745'; }
+                    else if (d.enabled) { badge.textContent = fanModeName(d.mode) || '--'; badge.style.background = '#28a745'; }
                     else { badge.textContent = t('externalControl'); badge.style.background = '#6c757d'; }
                 }
                 const pctEl = document.getElementById('fanPercent');
-                if (pctEl) pctEl.textContent = d.percent + '%';
+                // Taktbetrieb (Sollwert unter der Mindestdrehzahl des MARS-Luefters): Sollwert
+                // statt Rueckmeldung zeigen, die waere abwechselnd 25 % und 0 %
+                if (pctEl) pctEl.textContent = d.pulsed ? d.target + '% ⏱' : d.percent + '%';
                 // RPM-Rueckmeldung gibt es nur vom MARS-Luefter (Tacho), das Analogmodul hat
                 // keinen Ruecklesewert dafuer.
                 const rpmBox = document.getElementById('fanRpmBox');
@@ -2318,6 +2339,7 @@ R"rawliteral(
         }
 
         // ===== Ventile =====
+        const BEHAELTER_ANZAHL = 4;   // = BEHAELTER_ANZAHL in valves.h
         let ventilData = null;
         let ventilKonfigGeladen = false;
 
@@ -2328,7 +2350,7 @@ R"rawliteral(
                 // nur die Anzeige-Labels sind sprachabhaengig.
                 const farben = { 'Pause': '#6c757d', 'Vorlauf': '#ffc107', 'Druckaufbau': '#17a2b8', 'Aktiv': '#28a745', 'Nachlauf': '#17a2b8' };
                 const zustandLabel = { 'Pause': t('zustandPause'), 'Vorlauf': t('zustandVorlauf'), 'Druckaufbau': t('zustandDruckaufbau'), 'Aktiv': t('zustandAktiv'), 'Nachlauf': t('zustandNachlauf') };
-                const namen = [t('behaelter') + ' 1', t('behaelter') + ' 2', t('behaelter') + ' 3'];
+                const namen = d.behaelter.map((_, i) => t('behaelter') + ' ' + (i + 1));
 
                 // Status (Startseite) — eine Karte, jeden Poll neu befuellt, nur aktive Behälter.
                 // Die Box selbst ist nur sichtbar, wenn mindestens ein Behälter aktiv ist.
@@ -2354,7 +2376,7 @@ R"rawliteral(
                 const statusContainer = document.getElementById('behaelterStatusCards');
                 if (statusContainer && anyActive) {
                     let statusHtml = '';
-                    for (let i = 0; i < 3; i++) {
+                    for (let i = 0; i < d.behaelter.length; i++) {
                         const b = d.behaelter[i];
                         if (!b.aktiv) continue;
                         const farbe = farben[b.zustand] || '#6c757d';
@@ -2369,12 +2391,10 @@ R"rawliteral(
 
                 if (!ventilKonfigGeladen) {
                     // Einmalig: Konfig-Karten mit Eingabefeldern aufbauen (Konfiguration-Seite)
-                    document.getElementById('vorlaufAktiv').checked  = d.vorlauf_aktiv;
-                    document.getElementById('vorlaufzeit').value     = d.vorlaufzeit_s;
                     document.getElementById('druckaufbau').value     = d.druckaufbau_s;
                     document.getElementById('gleicheZeiten').checked = d.gleiche_zeiten;
                     let html = '';
-                    for (let i = 0; i < 3; i++) {
+                    for (let i = 0; i < d.behaelter.length; i++) {
                         const b = d.behaelter[i];
                         html += `<div class="status-box-info">
                             <strong>${namen[i]}</strong>
@@ -2431,14 +2451,16 @@ R"rawliteral(
 
         function updateManualDoseStatus() {
             fetch('/api/ventile/dose/status').then(r => r.json()).then(d => {
-                for (let i = 0; i < 3; i++) {
+                for (let i = 0; i < BEHAELTER_ANZAHL; i++) {
                     const btn = document.getElementById('doseBtn' + i);
                     if (!btn) continue;
                     const runningHere = d.active && d.index === i;
                     btn.disabled = d.active;
                     btn.style.opacity = d.active ? '0.5' : '1';
                     btn.style.pointerEvents = d.active ? 'none' : 'auto';
-                    btn.textContent = runningHere ? '💧 ' + t('doseRunning', d.remaining_s) : '💧 ' + t('doseOnce');
+                    btn.textContent = !runningHere ? '💧 ' + t('doseOnce')
+                                    : d.waiting ? '💧 ' + t('doseWaiting')
+                                    : '💧 ' + t('doseRunning', d.remaining_s);
                 }
             }).catch(() => {});
         }
@@ -2461,7 +2483,7 @@ R"rawliteral(
             const p  = document.getElementById('pauseGemeinsam').value;
             const od = document.getElementById('oeffnungGemeinsamDunkel').value;
             const pd = document.getElementById('pauseGemeinsamDunkel').value;
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < BEHAELTER_ANZAHL; i++) {
                 const oEl  = document.getElementById('oeffnung' + i);
                 const pEl  = document.getElementById('pause' + i);
                 const odEl = document.getElementById('oeffnung' + i + 'Dunkel');
@@ -2508,7 +2530,7 @@ R"rawliteral(
             document.getElementById('pauseGemeinsam').value          = s.pause;
             document.getElementById('oeffnungGemeinsamDunkel').value = s.oeffnungDunkel;
             document.getElementById('pauseGemeinsamDunkel').value    = s.pauseDunkel;
-            for (let i = 0; i < 3; i++) {
+            for (let i = 0; i < BEHAELTER_ANZAHL; i++) {
                 const oEl  = document.getElementById('oeffnung' + i);
                 const pEl  = document.getElementById('pause' + i);
                 const odEl = document.getElementById('oeffnung' + i + 'Dunkel');
@@ -2522,11 +2544,9 @@ R"rawliteral(
 
         function saveVentilConfig() {
             const body = {
-                vorlauf_aktiv:  document.getElementById('vorlaufAktiv').checked,
-                vorlaufzeit_s:  parseInt(document.getElementById('vorlaufzeit').value),
                 druckaufbau_s:  parseInt(document.getElementById('druckaufbau').value) || 0,
                 gleiche_zeiten: document.getElementById('gleicheZeiten').checked,
-                behaelter: [0,1,2].map(i => ({
+                behaelter: [...Array(BEHAELTER_ANZAHL).keys()].map(i => ({
                     aktiv:                  document.getElementById('aktiv' + i)?.checked ?? false,
                     oeffnungszeit_s:        parseInt(document.getElementById('oeffnung' + i)?.value ?? 5),
                     pausenzeit_min:         parseInt(document.getElementById('pause' + i)?.value ?? 5),
@@ -2669,101 +2689,24 @@ R"rawliteral(
             }
         }
 
-        // ===== Durchflussmesser-Kalibrierung =====
-        // state: 0=idle 1=Pumpe an (vor Start) 2=zaehlt (Ventil offen) 3=gestoppt (Menge eingeben)
-        function updateFlowCalStatus() {
-            fetch('/api/flowcal/status').then(r => r.json()).then(d => {
-                // Zustaende: 0=idle 1=Pumpe an 2=Entlueften 3=zaehlt 4=gestoppt
-                document.getElementById('flowcalIdle').style.display        = d.state === 0 ? 'block' : 'none';
-                document.getElementById('flowcalRunning').style.display     = (d.state === 1 || d.state === 2 || d.state === 3) ? 'block' : 'none';
-
-                const purgeBtn = document.getElementById('flowcalPurgeBtn');
-                purgeBtn.style.display = (d.state === 1 || d.state === 2) ? 'inline-block' : 'none';
-                if (d.state === 2) {
-                    purgeBtn.style.background = '#dc3545';
-                    purgeBtn.innerHTML = '<span class="de">Stop</span><span class="en">Stop</span>';
-                } else {
-                    purgeBtn.style.background = '#f39c12';
-                    purgeBtn.innerHTML = '<span class="de">Entlüften (Ventil öffnen)</span><span class="en">Purge air (open valve)</span>';
-                }
-
-                const beginBtn = document.getElementById('flowcalBeginBtn');
-                beginBtn.style.display      = d.state === 1 ? 'inline-block' : 'none';
-                beginBtn.disabled           = !d.purged;
-                beginBtn.style.opacity      = d.purged ? '1' : '0.4';
-                beginBtn.style.pointerEvents = d.purged ? 'auto' : 'none';
-
-                document.getElementById('flowcalStopBtn').style.display     = d.state === 3 ? 'inline-block' : 'none';
-                document.getElementById('flowcalVolumeInput').style.display = d.state === 4 ? 'block' : 'none';
-
-                document.getElementById('flowcalDruck').textContent  = d.druckBar;
-                document.getElementById('flowcalPulses').textContent = d.pulses_live;
-                if (d.state === 4) document.getElementById('flowcalPulsesResult').textContent = d.pulses_result;
-
-                const cur = document.getElementById('flowcalCurrent');
-                if (d.pulses_per_liter > 0 && d.state === 0) {
-                    cur.style.display = 'block';
-                    document.getElementById('flowcalCurrentValue').textContent = d.pulses_per_liter;
-                } else {
-                    cur.style.display = 'none';
-                }
-            }).catch(() => {});
-        }
-
-        function flowcalStart() {
-            fetch('/api/flowcal/start', { method: 'POST' }).then(updateFlowCalStatus);
-        }
-        function flowcalPurge() {
-            fetch('/api/flowcal/purge', { method: 'POST' }).then(updateFlowCalStatus);
-        }
-        function flowcalBegin() {
-            fetch('/api/flowcal/begin', { method: 'POST' }).then(updateFlowCalStatus);
-        }
-        function flowcalStop() {
-            fetch('/api/flowcal/stop', { method: 'POST' }).then(updateFlowCalStatus);
-        }
-        function flowcalCalc() {
-            const ml = parseFloat(document.getElementById('flowcalMl').value);
-            if (!ml || ml <= 0) { alert(t('flowcalInvalidVolume')); return; }
-            fetch('/api/flowcal/calc', {
-                method: 'POST',
-                headers: {'Content-Type':'application/json'},
-                body: JSON.stringify({volume_ml: ml})
-            }).then(r => r.json()).then(d => {
-                document.getElementById('flowcalMl').value = '';
-                const resultDiv = document.getElementById('flowcalResult');
-                if (d.success) {
-                    resultDiv.style.display = 'block';
-                    document.getElementById('flowcalResultValue').textContent = d.pulses_per_liter;
-                    setTimeout(() => resultDiv.style.display = 'none', 8000);
-                }
-                updateFlowCalStatus();
-            });
-        }
-        function flowcalCancel() {
-            fetch('/api/flowcal/cancel', { method: 'POST' }).then(updateFlowCalStatus);
-        }
-
         // ===== Duesen-Ueberwachung =====
         let flowmonConfigLoaded = false;
 
         function updateFlowMonStatus() {
             fetch('/api/flowmon').then(r => r.json()).then(d => {
-                document.getElementById('flowmonLast1').textContent  = d.last_cycle_ml[0];
-                document.getElementById('flowmonLast2').textContent  = d.last_cycle_ml[1];
-                document.getElementById('flowmonLast3').textContent  = d.last_cycle_ml[2];
-                document.getElementById('flowmonTotal1').textContent = d.total_ml[0];
-                document.getElementById('flowmonTotal2').textContent = d.total_ml[1];
-                document.getElementById('flowmonTotal3').textContent = d.total_ml[2];
-                document.getElementById('flowmonTotalAll').textContent = d.total_ml_all;
+                for (let i = 0; i < BEHAELTER_ANZAHL; i++) {
+                    const el = document.getElementById('flowmonLast' + (i + 1));
+                    if (el) el.textContent = d.last_cycle_s[i] > 0 ? d.last_cycle_pulses[i] + ' / ' + d.last_cycle_s[i] + ' s' : '--';
+                }
 
                 // Config nur einmal uebernehmen (nicht bei jedem Poll ueberschreiben, sonst
                 // tippt man gegen staendig zurueckgesetzte Eingabefelder)
                 if (!flowmonConfigLoaded) {
                     document.getElementById('flowmonEnabled').checked = d.enabled;
-                    document.getElementById('flowmonSoll1').value     = d.erwarteter_durchfluss_ml_s[0];
-                    document.getElementById('flowmonSoll2').value     = d.erwarteter_durchfluss_ml_s[1];
-                    document.getElementById('flowmonSoll3').value     = d.erwarteter_durchfluss_ml_s[2];
+                    document.getElementById('flowmonSoll1').value     = d.erwartet_impulse_s[0];
+                    document.getElementById('flowmonSoll2').value     = d.erwartet_impulse_s[1];
+                    document.getElementById('flowmonSoll3').value     = d.erwartet_impulse_s[2];
+                    document.getElementById('flowmonSoll4').value     = d.erwartet_impulse_s[3];
                     document.getElementById('flowmonToleranz').value  = d.toleranz_prozent;
                     flowmonConfigLoaded = true;
                 }
@@ -2774,10 +2717,11 @@ R"rawliteral(
             const body = {
                 enabled: document.getElementById('flowmonEnabled').checked,
                 toleranz_prozent: parseInt(document.getElementById('flowmonToleranz').value) || 30,
-                erwarteter_durchfluss_ml_s: [
+                erwartet_impulse_s: [
                     parseFloat(document.getElementById('flowmonSoll1').value) || 0,
                     parseFloat(document.getElementById('flowmonSoll2').value) || 0,
                     parseFloat(document.getElementById('flowmonSoll3').value) || 0,
+                    parseFloat(document.getElementById('flowmonSoll4').value) || 0,
                 ]
             };
             const st = document.getElementById('flowmonSaveStatus');
@@ -2792,7 +2736,7 @@ R"rawliteral(
             }).catch(() => { st.style.color = '#dc3545'; st.textContent = t('connectionError'); });
         }
 
-        // Setzt alle drei Sollwerte auf 0 (= Vergleich fuer den jeweiligen Behaelter deaktiviert)
+        // Setzt alle Sollwerte auf 0 (= Vergleich fuer den jeweiligen Behaelter deaktiviert)
         // und speichert direkt -- praktisch nach dem Duesenreinigen, um spaeter mit frisch
         // ermittelten Werten neu zu kalibrieren statt die alten (jetzt wieder gueltigen) Werte
         // faelschlich als Abweichung zu werten.
@@ -2801,6 +2745,7 @@ R"rawliteral(
             document.getElementById('flowmonSoll1').value = 0;
             document.getElementById('flowmonSoll2').value = 0;
             document.getElementById('flowmonSoll3').value = 0;
+            document.getElementById('flowmonSoll4').value = 0;
             saveFlowMonConfig();
         }
 
@@ -2858,7 +2803,6 @@ R"rawliteral(
                 updateCo2Status();
                 updateHumidStatus();
                 updateFanStatus();
-                updateFlowCalStatus();
                 updateFlowMonStatus();
                 updateOutputStatus();
                 updateSchedManualStatus();
@@ -2880,7 +2824,6 @@ R"rawliteral(
         updateCo2Status();
         updateHumidStatus();
         updateFanStatus();
-        updateFlowCalStatus();
         updateFlowMonStatus();
         updateManualDoseStatus();
         updatePcfStatus();
