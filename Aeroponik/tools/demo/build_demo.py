@@ -47,6 +47,11 @@ def main():
     html = replace_once(html, "<head>", head, "<head>")
     html = replace_once(html, "<title>Aeroponik Steuerung</title>", "<title>Aeroponik Steuerung – Demo</title>", "title")
 
+    # Besucherzaehler (GoatCounter: ohne Cookies, keine personenbezogenen Daten) -- Statistik: growcenter.goatcounter.com
+    html = replace_once(html, "</head>",
+                        '    <script data-goatcounter="https://growcenter.goatcounter.com/count" async '
+                        'src="https://gc.zgo.at/count.js"></script>\n</head>', "</head>")
+
     banner = (
         '<body>\n<div id="demoBanner" style="position:sticky;top:0;z-index:9999;margin:-20px -20px 16px;padding:8px 14px;'
         'background:#fff3cd;border-bottom:2px solid #f0ad4e;color:#664d03;font-size:0.9em;text-align:center;">'
