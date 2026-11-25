@@ -7,7 +7,7 @@
 // ========== Firmware-Version ==========
 // Bei jeder Änderung hochzählen — wird im Webinterface unter System angezeigt,
 // damit erkennbar ist ob ein Upload tatsächlich angekommen ist.
-#define FW_VERSION "1.21.5"
+#define FW_VERSION "1.26.0"
 
 // ========== WiFi Konfiguration ==========
 // SSID/Passwort des Heim-WLANs liegen NICHT mehr im Quellcode — siehe wifictrl.h.
@@ -87,7 +87,7 @@ extern bool USE_ACCESS_POINT;
 //           Aktivierungen [inkl. Lueftermodul] + je min/max fuer Feuchte/Temperatur/Tank)
 //  276:    Lueftermodul (Zeltluefter) Magic Byte
 //  277–284: LueftmodulConfig (8 Bytes)
-#define EEPROM_SIZE             600   // 570 -> 600 (11/2026): Behaelter 4; vorhandene Daten bleiben erhalten
+#define EEPROM_SIZE             640   // 570 -> 600 (11/2026): Behaelter 4; 600 -> 640 (1.23.0): Mengendosierung; vorhandene Daten bleiben erhalten
 #define EEPROM_MAGIC_ADDR        0
 #define EEPROM_MAGIC_NUMBER      0xAE4013AC
 #define EEPROM_BEHAELTER_BASE    4    // je 5 Bytes pro Behälter (1-3; Behälter 4 siehe unten)
@@ -218,7 +218,22 @@ extern bool USE_ACCESS_POINT;
 // VPD-Regelung (seit FW 1.21.0), feldweise gespeichert, siehe vpdctrl.cpp
 #define EEPROM_VPD_MAGIC_ADDR           570
 #define EEPROM_VPD_MAGIC_BYTE           0x56
-#define EEPROM_VPD_BASE                 571   // 13 Bytes (571-583, temp_min seit 1.21.2); 584-599 frei
+#define EEPROM_VPD_BASE                 571   // 15 Bytes (571-585, temp_min seit 1.21.2, Zehntel der Temperaturgrenzen seit 1.21.13)
+#define EEPROM_FAN_ZEHNTEL_BASE         586   // 3 Bytes (586-588): Zehntel zu Abluft temp_min/temp_max/temp_cap_diff
+#define EEPROM_LICHTKOMBI_MAGIC_ADDR    589
+#define EEPROM_LICHTKOMBI_MAGIC_BYTE    0x4B
+#define EEPROM_LICHTKOMBI_BASE          590   // 2 Bytes (590-591): Kombi-Licht max % der Hauptlampe, Lichtx4-Kanalmaske; 592-599 frei
+// Mengendosierung (1.23.0): Ventil schliesst nach einer Soll-Impulszahl statt nach Zeit
+#define EEPROM_MENGE_MAGIC_ADDR         600
+#define EEPROM_MENGE_MAGIC_BYTE         0x6D
+#define EEPROM_MENGE_BASE               601   // 9 Bytes (601-609): nach_menge, Soll-Impulse Licht Beh. 1-4, Dunkel Beh. 1-4; 610-639 frei
+#define VENTIL_MENGE_DEFAULT_IMP        40    // Soll-Impulse je Spruehvorgang (Standard)
+// Sicherheitslimit Ventil-offen-Zeit, falls die Sollmenge nicht erreicht wird (Duese zu,
+// Durchflussmesser defekt): 2x die aus dem gelernten Sollwert (Imp/s) erwartete Laufzeit,
+// mindestens VENTIL_MENGE_LIMIT_MIN_S; ohne gelernten Sollwert VENTIL_MENGE_LIMIT_UNGELERNT_S.
+#define VENTIL_MENGE_LIMIT_MIN_S        5
+#define VENTIL_MENGE_LIMIT_UNGELERNT_S  60
+#define VENTIL_MENGE_LIMIT_MAX_S        120
 
 // Gehaeuseluefter-Config: eigener Magic-Bereich. Magic-Byte geaendert (0x4D -> 0x51), da
 // min_speed mit dem Wechsel von PWM auf reines An/Aus entfallen ist (dieser Lueftertyp

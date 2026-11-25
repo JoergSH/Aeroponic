@@ -3,6 +3,8 @@
 #include "pinout.h"
 #include "dbg.h"
 #include "notify.h"
+#include "flowsensor.h"
+#include "flowmonitor.h"
 #include <EEPROM.h>
 
 VentilConfig     ventilConfig;
@@ -22,8 +24,12 @@ static unsigned long testModeSince = 0;
 // batchPauseStart schon mitinitialisiert (siehe dort); Details/Nutzung siehe loopVentileBatch().
 static int8_t        batchActiveIdx  = -1;    // -1 = gemeinsame Pause-Phase
 static bool          batchInDruckaufbau = false;   // Pumpe laeuft, erstes Ventil noch zu
-static bool          batchInNachlauf    = false;   // Ventil schon zu, Pumpe fuellt Druckspeicher nach
 static unsigned long batchPauseStart = 0;
+
+// Mengendosierung: Impulsstand beim Oeffnen des Ventils (flowsensor_total_pulses() laeuft nur
+// hoch -- unabhaengig vom Messfenster der Flussueberwachung, die ihren Zaehler selbst leert).
+static uint32_t aktivStartPulses[BEHAELTER_ANZAHL] = {};
+static bool     mengeAbbruch[BEHAELTER_ANZAHL]     = {};
 
 // Alle Ausgaenge (Ventile, Pumpe, Umwälzpumpe) sind direkte GPIO, kein I2C-Expander
 // (PCF8574) mehr — siehe OUTPUT_ACTIVE_LOW in pinout.h fuer die Treiber-Polaritaet.
@@ -212,6 +218,52 @@ void setupVentile() {
     dbgPrintln("Ventile bereit (direkte GPIO, kein PCF8574)");
 }
 
+// ========== Mengendosierung ==========
+uint8_t ventilSollImpulse(uint8_t i, bool lichtAn) {
+    if (i >= BEHAELTER_ANZAHL) return VENTIL_MENGE_DEFAULT_IMP;
+    return lichtAn ? ventilConfig.behaelter[i].menge_imp : ventilConfig.behaelter[i].menge_imp_dunkel;
+}
+
+uint32_t ventilMengeLimitMs(uint8_t i, uint8_t sollImp) {
+    float rate = (i < BEHAELTER_ANZAHL) ? flowMonitorConfig.erwartet_impulse_s[i] : 0.0f;
+    float s = (rate > 0.1f) ? 2.0f * sollImp / rate : (float)VENTIL_MENGE_LIMIT_UNGELERNT_S;
+    if (s < VENTIL_MENGE_LIMIT_MIN_S) s = VENTIL_MENGE_LIMIT_MIN_S;
+    if (s > VENTIL_MENGE_LIMIT_MAX_S) s = VENTIL_MENGE_LIMIT_MAX_S;
+    return (uint32_t)(s * 1000.0f);
+}
+
+bool ventilMengeAbgebrochen(uint8_t i) { return i < BEHAELTER_ANZAHL && mengeAbbruch[i]; }
+
+// Duesenventil oeffnen: Zustand, Timer und Impulsstand fuer die Mengendosierung setzen.
+static void ventilAuf(int i, unsigned long now) {
+    BehaelterZustand& bz = behaelterZustand[i];
+    bz.zustand    = V_AKTIV;
+    bz.timerStart = now;
+    aktivStartPulses[i] = flowsensor_total_pulses();
+    mengeAbbruch[i]     = false;
+    setVentil(VENTIL_PIN[i], true);
+}
+
+// true, sobald das offene Ventil wieder schliessen soll: nach Zeit (oeffnungszeit_s) oder --
+// bei Mengendosierung -- sobald die Soll-Impulse erreicht sind bzw. das Sicherheitslimit ablaeuft.
+static bool aktivFertig(int i, unsigned long vergangen, bool lichtAn) {
+    const BehaelterConfig& cfg = ventilConfig.behaelter[i];
+    if (!ventilConfig.nach_menge) {
+        uint8_t oeffnung_s = lichtAn ? cfg.oeffnungszeit_s : cfg.oeffnungszeit_s_dunkel;
+        return vergangen >= (unsigned long)oeffnung_s * 1000UL;
+    }
+    uint8_t  soll = ventilSollImpulse(i, lichtAn);
+    uint32_t ist  = flowsensor_total_pulses() - aktivStartPulses[i];
+    if (ist >= soll) return true;
+    if (vergangen >= ventilMengeLimitMs(i, soll)) {
+        mengeAbbruch[i] = true;
+        dbgPrintf("Behälter %d: Sollmenge %u Imp nicht erreicht (%u Imp in %.1fs) -> Ventil zu\n",
+                  i + 1, soll, (unsigned)ist, vergangen / 1000.0f);
+        return true;
+    }
+    return false;
+}
+
 // ========== Batch-Modus ("Gleiche Zeiten fuer alle") ==========
 // Statt unabhaengiger Timer laeuft hier EIN gemeinsamer Ablauf: alle aktiven Behaelter
 // direkt nacheinander, danach eine gemeinsame Pause, dann
@@ -233,8 +285,7 @@ static void batchStart(unsigned long now) {
         bz.zustand = V_DRUCKAUFBAU;
         dbgPrintf("Behälter %d: Druckaufbau %us (Batch)\n", batchActiveIdx + 1, ventilConfig.druckaufbau_s);
     } else {
-        bz.zustand = V_AKTIV;
-        setVentil(VENTIL_PIN[batchActiveIdx], true);
+        ventilAuf(batchActiveIdx, now);
         dbgPrintf("Behälter %d: Aktiv (Batch)\n", batchActiveIdx + 1);
     }
 }
@@ -275,51 +326,16 @@ static void loopVentileBatch(bool lichtAn) {
     if (batchInDruckaufbau) {
         if (vergangen >= (unsigned long)ventilConfig.druckaufbau_s * 1000UL) {
             batchInDruckaufbau = false;
-            bz.zustand    = V_AKTIV;
-            bz.timerStart = now;
-            setVentil(VENTIL_PIN[batchActiveIdx], true);
+            ventilAuf(batchActiveIdx, now);
             dbgPrintf("Behälter %d: Aktiv (Batch)\n", batchActiveIdx + 1);
         }
         return;
     }
 
-    // Nachlauf: Ventil zu, Pumpe fuellt den Druckspeicher wieder auf (Impulse zaehlen noch zu
-    // diesem Behaelter, siehe flowmonitor.cpp). Danach steht der Druck schon -- der naechste
-    // Behaelter oeffnet direkt, ohne eigenen Druckaufbau.
-    if (batchInNachlauf) {
-        if (vergangen >= (unsigned long)ventilConfig.druckaufbau_s * 1000UL) {
-            batchInNachlauf = false;
-            int8_t next = findNextActive(batchActiveIdx + 1);
-            bz.zustand    = V_PAUSE;
-            bz.timerStart = now;
-            if (next < 0) {
-                batchActiveIdx  = -1;
-                batchPauseStart = now;
-                dbgPrintln("Batch fertig -> gemeinsame Pause");
-            } else {
-                batchActiveIdx = next;
-                BehaelterZustand& nz = behaelterZustand[next];
-                nz.zustand    = V_AKTIV;
-                nz.timerStart = now;
-                setVentil(VENTIL_PIN[next], true);
-                dbgPrintf("Behälter %d: Aktiv (Batch)\n", next + 1);
-            }
-        }
-        return;
-    }
-
     // V_AKTIV
-    uint8_t oeffnung_s = lichtAn ? ventilConfig.behaelter[batchActiveIdx].oeffnungszeit_s
-                                  : ventilConfig.behaelter[batchActiveIdx].oeffnungszeit_s_dunkel;
-    if (vergangen >= (unsigned long)oeffnung_s * 1000UL) {
+    if (aktivFertig(batchActiveIdx, vergangen, lichtAn)) {
+        // Kein Nachlauf mehr: der naechste Behaelter baut in batchStart() selbst Druck auf
         setVentil(VENTIL_PIN[batchActiveIdx], false);
-        if (ventilConfig.druckaufbau_s > 0) {
-            batchInNachlauf = true;
-            bz.zustand    = V_NACHLAUF;
-            bz.timerStart = now;
-            dbgPrintf("Behälter %d: Nachlauf %us (Batch)\n", batchActiveIdx + 1, ventilConfig.druckaufbau_s);
-            return;
-        }
         int8_t next = findNextActive(batchActiveIdx + 1);
         if (next < 0) {
             batchActiveIdx  = -1;
@@ -329,7 +345,7 @@ static void loopVentileBatch(bool lichtAn) {
             bz.zustand     = V_PAUSE;   // vorigen Behaelter abschliessen (sonst bliebe er "Aktiv")
             bz.timerStart  = now;
             batchActiveIdx = next;
-            batchStart(now);   // ohne Druckaufbau: Ventil direkt auf
+            batchStart(now);   // mit Druckaufbau (falls eingestellt), dann Ventil auf
         }
     }
 }
@@ -343,7 +359,6 @@ void resetVentilRuntimeState() {
     }
     batchActiveIdx  = -1;
     batchInDruckaufbau = false;
-    batchInNachlauf    = false;
     batchPauseStart = now;
 }
 
@@ -355,8 +370,7 @@ static void normalStart(int i, unsigned long now) {
         bz.zustand = V_DRUCKAUFBAU;
         dbgPrintf("Behälter %d: Druckaufbau %us\n", i + 1, ventilConfig.druckaufbau_s);
     } else {
-        bz.zustand = V_AKTIV;
-        setVentil(VENTIL_PIN[i], true);
+        ventilAuf(i, now);
         dbgPrintf("Behälter %d: Aktiv\n", i + 1);
     }
 }
@@ -372,7 +386,6 @@ static void loopVentileNormal(bool lichtAn) {
 
         BehaelterZustand& bz  = behaelterZustand[i];
         BehaelterConfig&  cfg = ventilConfig.behaelter[i];
-        uint8_t oeffnung_s  = lichtAn ? cfg.oeffnungszeit_s  : cfg.oeffnungszeit_s_dunkel;
         uint8_t pausen_min  = lichtAn ? cfg.pausenzeit_min   : cfg.pausenzeit_min_dunkel;
         unsigned long vergangen = now - bz.timerStart;
 
@@ -396,33 +409,23 @@ static void loopVentileNormal(bool lichtAn) {
 
             case V_DRUCKAUFBAU:
                 if (vergangen >= (unsigned long)ventilConfig.druckaufbau_s * 1000UL) {
-                    bz.zustand    = V_AKTIV;
-                    bz.timerStart = now;
-                    setVentil(VENTIL_PIN[i], true);
+                    ventilAuf(i, now);
                     dbgPrintf("Behälter %d: Aktiv\n", i + 1);
                 }
                 break;
 
             case V_AKTIV:
-                if (vergangen >= (unsigned long)oeffnung_s * 1000UL) {
+                if (aktivFertig(i, vergangen, lichtAn)) {
                     setVentil(VENTIL_PIN[i], false);
                     bz.timerStart = now;
-                    if (ventilConfig.druckaufbau_s > 0) {
-                        bz.zustand = V_NACHLAUF;   // Pumpe fuellt Druckspeicher nach
-                        dbgPrintf("Behälter %d: Nachlauf %us\n", i + 1, ventilConfig.druckaufbau_s);
-                    } else {
-                        bz.zustand = V_PAUSE;
-                        dbgPrintf("Behälter %d: Pause\n", i + 1);
-                    }
+                    bz.zustand    = V_PAUSE;   // kein Nachlauf mehr
+                    dbgPrintf("Behälter %d: Pause\n", i + 1);
                 }
                 break;
 
-            case V_NACHLAUF:
-                if (vergangen >= (unsigned long)ventilConfig.druckaufbau_s * 1000UL) {
-                    bz.zustand    = V_PAUSE;
-                    bz.timerStart = now;
-                    dbgPrintf("Behälter %d: Pause\n", i + 1);
-                }
+            case V_NACHLAUF:   // wird nicht mehr verwendet -- falls doch: sofort Pause
+                bz.zustand    = V_PAUSE;
+                bz.timerStart = now;
                 break;
         }
     }
@@ -458,17 +461,21 @@ void loopVentile(bool lichtAn) {
     // offen) — unabhaengig vom Zeitmodus (normal oder Batch), da beide behaelterZustand[]
     // konsistent pflegen. Umwaelzpumpe: laeuft, sobald irgendein Behaelter ueberhaupt
     // aktiviert ist (Konfig-Haken), unabhaengig vom aktuellen Bewaesserungstakt.
+    // Mit Druckaufbau laeuft die Pumpe NUR im Druckaufbau (fuellt den Druckspeicher) und ist aus,
+    // solange ein Duesenventil offen ist: springt sie waehrend des Spruehens an, kommen ihre
+    // Impulse in den Durchflusszaehler (Mengendosierung schliesst zu frueh). Ohne Druckaufbau
+    // (0 s) laeuft sie wie frueher waehrend der Ventil-offen-Zeit.
     bool anyAktiv   = false;
+    bool anyDruck   = false;
     bool anyEnabled = false;
     for (int i = 0; i < BEHAELTER_ANZAHL; i++) {
         if (ventilConfig.behaelter[i].aktiv) {
             anyEnabled = true;
-            if (behaelterZustand[i].zustand == V_AKTIV ||
-                behaelterZustand[i].zustand == V_DRUCKAUFBAU ||
-                behaelterZustand[i].zustand == V_NACHLAUF) anyAktiv = true;
+            if (behaelterZustand[i].zustand == V_AKTIV)       anyAktiv = true;
+            if (behaelterZustand[i].zustand == V_DRUCKAUFBAU) anyDruck = true;
         }
     }
-    setPumpeOut(anyAktiv);
+    setPumpeOut(ventilConfig.druckaufbau_s > 0 ? anyDruck : anyAktiv);
     loopUmwaelzpumpe(anyEnabled);
 }
 
@@ -494,6 +501,12 @@ void saveVentilConfig() {
     EEPROM.write(EEPROM_VENTIL_DUNKEL_MAGIC_ADDR, EEPROM_VENTIL_DUNKEL_MAGIC_BYTE);
     EEPROM.write(EEPROM_DRUCKAUFBAU_BASE, ventilConfig.druckaufbau_s);
     EEPROM.write(EEPROM_DRUCKAUFBAU_MAGIC_ADDR, EEPROM_DRUCKAUFBAU_MAGIC_BYTE);
+    EEPROM.write(EEPROM_MENGE_BASE, (uint8_t)ventilConfig.nach_menge);
+    for (int i = 0; i < BEHAELTER_ANZAHL; i++) {
+        EEPROM.write(EEPROM_MENGE_BASE + 1 + i, ventilConfig.behaelter[i].menge_imp);
+        EEPROM.write(EEPROM_MENGE_BASE + 1 + BEHAELTER_ANZAHL + i, ventilConfig.behaelter[i].menge_imp_dunkel);
+    }
+    EEPROM.write(EEPROM_MENGE_MAGIC_ADDR, EEPROM_MENGE_MAGIC_BYTE);
     EEPROM.commit();
     dbgPrintln("Ventilkonfig gespeichert");
 }
@@ -504,11 +517,14 @@ static void behaelterDefaults(int i) {
     ventilConfig.behaelter[i].aktiv                  = false;
     ventilConfig.behaelter[i].oeffnungszeit_s_dunkel = VENTIL_OEFFNUNG_DEFAULT_S;
     ventilConfig.behaelter[i].pausenzeit_min_dunkel  = VENTIL_PAUSE_DEFAULT_MIN;
+    ventilConfig.behaelter[i].menge_imp              = VENTIL_MENGE_DEFAULT_IMP;
+    ventilConfig.behaelter[i].menge_imp_dunkel       = VENTIL_MENGE_DEFAULT_IMP;
 }
 
 void loadVentilConfig() {
     // Vorbelegen: saveVentilConfig() im Standardwerte-Zweig schreibt den Druckaufbau mit.
     ventilConfig.druckaufbau_s = VENTIL_DRUCKAUFBAU_DEFAULT_S;
+    ventilConfig.nach_menge    = false;
     uint32_t magic;
     EEPROM.get(EEPROM_MAGIC_ADDR, magic);
 
@@ -563,6 +579,16 @@ void loadVentilConfig() {
     bool druckOk = EEPROM.read(EEPROM_DRUCKAUFBAU_MAGIC_ADDR) == EEPROM_DRUCKAUFBAU_MAGIC_BYTE;
     if (druckOk) ventilConfig.druckaufbau_s = EEPROM.read(EEPROM_DRUCKAUFBAU_BASE);
 
+    // Mengendosierung (1.23.0) -- Bestandsinstallationen bleiben bei Dosierung nach Zeit.
+    bool mengeOk = EEPROM.read(EEPROM_MENGE_MAGIC_ADDR) == EEPROM_MENGE_MAGIC_BYTE;
+    if (mengeOk) ventilConfig.nach_menge = EEPROM.read(EEPROM_MENGE_BASE) == 1;
+    for (int i = 0; i < BEHAELTER_ANZAHL; i++) {
+        uint8_t l = mengeOk ? EEPROM.read(EEPROM_MENGE_BASE + 1 + i) : 0;
+        uint8_t d = mengeOk ? EEPROM.read(EEPROM_MENGE_BASE + 1 + BEHAELTER_ANZAHL + i) : 0;
+        ventilConfig.behaelter[i].menge_imp        = l ? l : VENTIL_MENGE_DEFAULT_IMP;
+        ventilConfig.behaelter[i].menge_imp_dunkel = d ? d : VENTIL_MENGE_DEFAULT_IMP;
+    }
+
     dbgPrintln("Ventilkonfig geladen");
-    if (!gleichOk || !dunkelOk || !b4Ok || !druckOk) saveVentilConfig();
+    if (!gleichOk || !dunkelOk || !b4Ok || !druckOk || !mengeOk) saveVentilConfig();
 }

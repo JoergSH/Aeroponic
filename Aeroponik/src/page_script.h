@@ -48,6 +48,7 @@ R"rawliteral(
                 doseRunning: (s) => 'Läuft... ' + s + 's',
                 doseWaiting: 'Wartet auf Automatik...',
                 openingLabel: 'Öffnung (s)',
+                mengeLabel: 'Menge (Imp)',
                 pauseLabel: 'Pause (min)',
                 tentValues: 'Zeltwerte',
                 startTest: 'Test starten',
@@ -79,6 +80,9 @@ R"rawliteral(
                 unpairBtn: 'Entkoppeln',
                 unpairConfirm: id => 'Node ' + id + ' entkoppeln? Er wird danach von dieser Steuerung ignoriert und kann an einer anderen gekoppelt werden.',
                 idConflict: 'ID schon vergeben',
+                noNodeId: 'Node ohne ID',
+                pairIdPrompt: 'Node-ID für dieses Gerät (1-254):',
+                pairIdInvalid: 'Node-ID muss 1-254 sein',
                 fanModeManual: 'Manuell',
                 fanModeAutoHum: 'Automatik Feuchte',
                 fanModeAutoTemp: 'Automatik Temperatur',
@@ -155,6 +159,7 @@ R"rawliteral(
                 doseRunning: (s) => 'Running... ' + s + 's',
                 doseWaiting: 'Waiting for automation...',
                 openingLabel: 'Opening (s)',
+                mengeLabel: 'Amount (pulses)',
                 pauseLabel: 'Pause (min)',
                 tentValues: 'Tent Values',
                 startTest: 'Start Test',
@@ -186,6 +191,9 @@ R"rawliteral(
                 unpairBtn: 'Unpair',
                 unpairConfirm: id => 'Unpair node ' + id + '? This controller will ignore it afterwards and it can be paired with another one.',
                 idConflict: 'ID already in use',
+                noNodeId: 'Node without ID',
+                pairIdPrompt: 'Node ID for this device (1-254):',
+                pairIdInvalid: 'Node ID must be 1-254',
                 fanModeManual: 'Manual',
                 fanModeAutoHum: 'Auto Humidity',
                 fanModeAutoTemp: 'Auto Temperature',
@@ -391,7 +399,7 @@ R"rawliteral(
 
         // ===== Nodes =====
         function nodeTypeName(type) {
-            const names = { 1: t('nodeTypeLight'), 2: t('nodeTypeMultisensor'), 3: t('nodeTypeSocket'), 4: t('nodeTypeSpektrum') };
+            const names = { 1: t('nodeTypeLight'), 2: t('nodeTypeMultisensor'), 3: t('nodeTypeSocket'), 4: t('nodeTypeSpektrum'), 6: 'EC-Meter' };
             return names[type];
         }
         const nodesControlBuilt = new Set();
@@ -646,8 +654,8 @@ R"rawliteral(
             for (const n of list) {
                 const typName = nodeTypeName(n.type) || (t('unknown') + ' (0x' + n.type.toString(16) + ')');
                 h += `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #eee;font-size:0.88em;">
-                    <span><strong>Node ${n.id}</strong> · ${typName} · <code>${n.mac}</code>${n.id_conflict ? ' · <span style="color:#dc3545;">' + t('idConflict') + '</span>' : ''}</span>
-                    <button onclick="espnowPair('${n.mac}')" ${n.id_conflict ? 'disabled' : ''}
+                    <span><strong>${n.id ? 'Node ' + n.id : t('noNodeId')}</strong> · ${typName} · <code>${n.mac}</code>${n.id_conflict && !n.can_assign ? ' · <span style="color:#dc3545;">' + t('idConflict') + '</span>' : ''}</span>
+                    <button onclick="espnowPair('${n.mac}', ${n.can_assign ? n.suggest_id : 0})" ${n.id_conflict && !n.can_assign ? 'disabled' : ''}
                         style="background:#27ae60;color:white;border:none;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:0.9em;">${t('pairBtn')}</button>
                 </div>`;
             }
@@ -655,9 +663,17 @@ R"rawliteral(
             box.style.display = 'block';
         }
 
-        function espnowPair(mac) {
+        // suggestId > 0: Node kann eine ID zugewiesen bekommen (NODE_CAP_ID_ASSIGN) -- abfragen
+        function espnowPair(mac, suggestId) {
+            let id = 0;
+            if (suggestId > 0) {
+                const v = prompt(t('pairIdPrompt'), suggestId);
+                if (v === null) return;
+                id = parseInt(v);
+                if (!(id >= 1 && id <= 254)) { alert(t('pairIdInvalid')); return; }
+            }
             fetch('/api/espnow/pair', { method: 'POST', headers: {'Content-Type':'application/json'},
-                                        body: JSON.stringify({ mac: mac }) })
+                                        body: JSON.stringify({ mac: mac, id: id }) })
                 .then(r => r.json()).then(d => {
                     if (!d.success) alert(d.error || t('error'));
                     setTimeout(updateNodes, 600);
@@ -974,6 +990,19 @@ R"rawliteral(
 
         // Spiegelt schedComputeBrightnessPercent() aus scheduler.cpp: stufenlose Rampe
         // 0-100%, genutzt fuer den Chart wenn Licht-Ausgang = Analogmodul (kein n-Kanal-Stufen).
+        // Kombi-Betrieb (Lichtausgang 3/4): Hauptlampe bis kombiMax, Lichtx4-Zusatzkanaele nur im
+        // Tag-Abschnitt -- spiegelt schedComputeKombi() aus scheduler.cpp
+        function schedKombiMax() { return Math.min(100, Math.max(1, parseInt(document.getElementById('schedKombiMax').value) || 100)); }
+        function schedKombiMask() {
+            let m = 0;
+            for (let i = 1; i <= 4; i++) if (document.getElementById('schedKombiK' + i).checked) m |= 1 << (i - 1);
+            return m;
+        }
+        function schedKombiZusatzAn(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
+            const r = schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd);
+            return schedKombiMask() !== 0 && r.t >= r.de && r.t < r.ds;
+        }
+
         function schedComputeBrightnessPercent(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
             const r = schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd);
             if (r.t >= r.dd) return 0;
@@ -1011,9 +1040,11 @@ R"rawliteral(
             const duskEnd   = timeToMin(document.getElementById('schedDuskEnd').value   || '20:00');
             const n = parseInt(document.getElementById('schedNumSsr').value) || 4;
 
+            const kombi = outputLightMode >= 3;
             function stepY(m) {
                 if (outputLightMode >= 1) {
-                    const pct = schedComputeBrightnessPercent(m, dawnStart, dawnEnd, duskStart, duskEnd);
+                    let pct = schedComputeBrightnessPercent(m, dawnStart, dawnEnd, duskStart, duskEnd);
+                    if (kombi) pct = pct * schedKombiMax() / 100;
                     return H - 22 - (pct / 100) * (H - 34);
                 }
                 const active = schedComputeActive(m, n, dawnStart, dawnEnd, duskStart, duskEnd);
@@ -1034,6 +1065,16 @@ R"rawliteral(
                 if (m === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
             }
             ctx.strokeStyle = '#f5b041'; ctx.lineWidth = 2; ctx.stroke();
+
+            // Kombi: Zeitraum mit zugeschaltetem Lichtx4-Zusatzlicht als Band oberhalb der Hauptlampe
+            if (kombi) {
+                ctx.fillStyle = 'rgba(46,204,113,0.35)';
+                for (let m = 0; m < 1440; m++) {
+                    if (!schedKombiZusatzAn(m, dawnStart, dawnEnd, duskStart, duskEnd)) continue;
+                    const y = stepY(m);
+                    ctx.fillRect(mX(m), 12, mX(m + 1) - mX(m) + 0.5, Math.max(0, y - 12));
+                }
+            }
 
             // Stundengitter
             ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
@@ -1079,7 +1120,11 @@ R"rawliteral(
             else if (r.t < r.dd)                { phaseKey = 'phaseDusk'; isTransition = true; }
             el.style.background = isDay ? '#fff3cd' : (isTransition ? '#d4edda' : '#e2e3e5');
             el.style.color = '#333';
-            if (outputLightMode == 1) {
+            if (outputLightMode >= 3) {
+                const pct = Math.round(schedComputeBrightnessPercent(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd) * schedKombiMax() / 100);
+                el.textContent = t(phaseKey) + '  ' + pct + '%' +
+                    (schedKombiZusatzAn(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd) ? ' + Lichtx4' : '');
+            } else if (outputLightMode >= 1) {
                 const pct = schedComputeBrightnessPercent(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd);
                 el.textContent = t(phaseKey) + '  ' + pct + '%';
             } else {
@@ -1108,6 +1153,10 @@ R"rawliteral(
                 document.getElementById('schedDawnEnd').value   = minToTime(d.dawn_end);
                 document.getElementById('schedDuskStart').value = minToTime(d.dusk_start);
                 document.getElementById('schedDuskEnd').value   = minToTime(d.dusk_end);
+                document.getElementById('schedKombiMax').value  = d.kombi_max || 100;
+                const km = (d.kombi_mask === undefined) ? 15 : d.kombi_mask;
+                for (let i = 1; i <= 4; i++)
+                    document.getElementById('schedKombiK' + i).checked = !!(km & (1 << (i - 1)));
                 schedNowMin   = d.now_min || 0;
                 schedAnchorMin = schedNowMin;
                 schedAnchorMs  = Date.now();
@@ -1126,6 +1175,8 @@ R"rawliteral(
                 dawn_end:    timeToMin(document.getElementById('schedDawnEnd').value),
                 dusk_start:  timeToMin(document.getElementById('schedDuskStart').value),
                 dusk_end:    timeToMin(document.getElementById('schedDuskEnd').value),
+                kombi_max:   schedKombiMax(),
+                kombi_mask:  schedKombiMask(),
             };
             const st = document.getElementById('schedSaveStatus');
             fetch('/api/scheduler/save', {
@@ -1837,10 +1888,10 @@ R"rawliteral(
                 manual_percent: parseInt(document.getElementById('fanManualPercent').value),
                 hum_min:        parseInt(document.getElementById('fanHumMin').value),
                 hum_max:        parseInt(document.getElementById('fanHumMax').value),
-                temp_min:       parseInt(document.getElementById('fanTempMin').value),
-                temp_max:       parseInt(document.getElementById('fanTempMax').value),
+                temp_min:       Math.round(parseFloat(document.getElementById('fanTempMin').value) * 10) / 10,
+                temp_max:       Math.round(parseFloat(document.getElementById('fanTempMax').value) * 10) / 10,
                 temp_mode:      parseInt(document.getElementById('fanTempMode').value),
-                temp_cap_diff:  parseInt(document.getElementById('fanTempCapDiff').value),
+                temp_cap_diff:  Math.round(parseFloat(document.getElementById('fanTempCapDiff').value) * 10) / 10,
                 min_speed:      parseInt(document.getElementById('fanMinSpeed').value),
                 max_speed:      parseInt(document.getElementById('fanMaxSpeed').value),
             };
@@ -1860,6 +1911,8 @@ R"rawliteral(
         function updateSchedNumSsrVisibility(lightOutput) {
             const row = document.getElementById('schedNumSsrRow');
             if (row) row.style.display = (lightOutput == 0) ? 'grid' : 'none';
+            const kRow = document.getElementById('schedKombiRow');
+            if (kRow) kRow.style.display = (lightOutput >= 3) ? 'block' : 'none';
         }
 
         // Gemeinsame Auswertung von /api/output: Status-Badges, Analog-Statuszeile und den
@@ -1879,8 +1932,8 @@ R"rawliteral(
             // Fan-Badge bei GP8403 setzt updateFanStatus() selbst (aus /api/fan online).
             const badgeLicht = document.getElementById('badge_licht');
             if (badgeLicht) {
-                if (d.light_output == 1) badgeLicht.style.background = d.analog_online ? '#28a745' : '#dc3545';
-                else if (d.light_output == 2) badgeLicht.style.background = d.gp8403_online ? '#28a745' : '#dc3545';
+                if (d.light_output == 1 || d.light_output == 3) badgeLicht.style.background = d.analog_online ? '#28a745' : '#dc3545';
+                else if (d.light_output == 2 || d.light_output == 4) badgeLicht.style.background = d.gp8403_online ? '#28a745' : '#dc3545';
             }
             const badgeFan = document.getElementById('badge_fan');
             if (badgeFan && d.fan_output == 1) badgeFan.style.background = d.analog_online ? '#28a745' : '#dc3545';
@@ -1888,7 +1941,7 @@ R"rawliteral(
             // Verbindungsart-Suffix: -R fuer RS485 (Lichtx4/MARS/Analogmodul), kein Suffix
             // fuer GP8403 (lokaler I2C-DAC, weder RS485 noch ESP-NOW).
             const lichtSuffix = document.getElementById('badge_licht_suffix');
-            if (lichtSuffix) lichtSuffix.textContent = (d.light_output == 0 || d.light_output == 1) ? '-R' : '';
+            if (lichtSuffix) lichtSuffix.textContent = (d.light_output == 2) ? '' : '-R';   // nur reiner GP8403 ohne RS485
             const fanSuffix = document.getElementById('badge_fan_suffix');
             if (fanSuffix) fanSuffix.textContent = (d.fan_output == 0 || d.fan_output == 1) ? '-R' : '';
 
@@ -2392,6 +2445,7 @@ R"rawliteral(
                 if (!ventilKonfigGeladen) {
                     // Einmalig: Konfig-Karten mit Eingabefeldern aufbauen (Konfiguration-Seite)
                     document.getElementById('druckaufbau').value     = d.druckaufbau_s;
+                    document.getElementById('dosierModus').value     = d.nach_menge ? '1' : '0';
                     document.getElementById('gleicheZeiten').checked = d.gleiche_zeiten;
                     let html = '';
                     for (let i = 0; i < d.behaelter.length; i++) {
@@ -2405,8 +2459,11 @@ R"rawliteral(
                             <div class="behaelter-zeiten-individual" style="margin-top:8px;">
                                 <div style="font-size:0.78em;color:#888;margin-bottom:3px;">☀ <span class="de">Lichtphase</span><span class="en">Light phase</span></div>
                                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;margin-bottom:8px;">
-                                    <label style="font-size:0.9em;">${t('openingLabel')}<br>
+                                    <label class="dos-zeit" style="font-size:0.9em;">${t('openingLabel')}<br>
                                         <input type="number" id="oeffnung${i}" min="1" max="60" value="${b.oeffnungszeit_s}" style="width:100%;padding:4px;">
+                                    </label>
+                                    <label class="dos-menge" style="font-size:0.9em;display:none;">${t('mengeLabel')}<br>
+                                        <input type="number" id="menge${i}" min="1" max="255" value="${b.menge_imp}" style="width:100%;padding:4px;">
                                     </label>
                                     <label style="font-size:0.9em;">${t('pauseLabel')}<br>
                                         <input type="number" id="pause${i}" min="1" max="60" value="${b.pausenzeit_min}" style="width:100%;padding:4px;">
@@ -2414,8 +2471,11 @@ R"rawliteral(
                                 </div>
                                 <div style="font-size:0.78em;color:#888;margin-bottom:3px;">🌙 <span class="de">Dunkelphase</span><span class="en">Dark phase</span></div>
                                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-                                    <label style="font-size:0.9em;">${t('openingLabel')}<br>
+                                    <label class="dos-zeit" style="font-size:0.9em;">${t('openingLabel')}<br>
                                         <input type="number" id="oeffnung${i}Dunkel" min="1" max="60" value="${b.oeffnungszeit_s_dunkel}" style="width:100%;padding:4px;">
+                                    </label>
+                                    <label class="dos-menge" style="font-size:0.9em;display:none;">${t('mengeLabel')}<br>
+                                        <input type="number" id="menge${i}Dunkel" min="1" max="255" value="${b.menge_imp_dunkel}" style="width:100%;padding:4px;">
                                     </label>
                                     <label style="font-size:0.9em;">${t('pauseLabel')}<br>
                                         <input type="number" id="pause${i}Dunkel" min="1" max="60" value="${b.pausenzeit_min_dunkel}" style="width:100%;padding:4px;">
@@ -2430,8 +2490,11 @@ R"rawliteral(
                         document.getElementById('pauseGemeinsam').value          = d.behaelter[0].pausenzeit_min;
                         document.getElementById('oeffnungGemeinsamDunkel').value = d.behaelter[0].oeffnungszeit_s_dunkel;
                         document.getElementById('pauseGemeinsamDunkel').value    = d.behaelter[0].pausenzeit_min_dunkel;
+                        document.getElementById('mengeGemeinsam').value          = d.behaelter[0].menge_imp;
+                        document.getElementById('mengeGemeinsamDunkel').value    = d.behaelter[0].menge_imp_dunkel;
                     }
                     updateGleicheZeitenVisibility();
+                    updateDosierModus();
                     ventilKonfigGeladen = true;
                 }
             }).catch(() => {});
@@ -2478,7 +2541,23 @@ R"rawliteral(
             });
         }
 
+        // Dosierung nach Zeit/Menge: zeigt je nach Modus die Oeffnungszeit- oder die Impulsfelder
+        // (beide Werte bleiben gespeichert, umschalten verliert nichts).
+        function updateDosierModus() {
+            const menge = document.getElementById('dosierModus')?.value === '1';
+            document.querySelectorAll('.dos-zeit').forEach(el => el.style.display = menge ? 'none' : '');
+            document.querySelectorAll('.dos-menge').forEach(el => el.style.display = menge ? '' : 'none');
+        }
+
         function applyGleicheZeiten() {
+            const m  = document.getElementById('mengeGemeinsam').value;
+            const md = document.getElementById('mengeGemeinsamDunkel').value;
+            for (let i = 0; i < BEHAELTER_ANZAHL; i++) {
+                const mEl  = document.getElementById('menge' + i);
+                const mdEl = document.getElementById('menge' + i + 'Dunkel');
+                if (mEl  && m)  mEl.value  = m;
+                if (mdEl && md) mdEl.value = md;
+            }
             const o  = document.getElementById('oeffnungGemeinsam').value;
             const p  = document.getElementById('pauseGemeinsam').value;
             const od = document.getElementById('oeffnungGemeinsamDunkel').value;
@@ -2508,6 +2587,10 @@ R"rawliteral(
                 if (p)  document.getElementById('pauseGemeinsam').value          = p;
                 if (od) document.getElementById('oeffnungGemeinsamDunkel').value = od;
                 if (pd) document.getElementById('pauseGemeinsamDunkel').value    = pd;
+                const m  = document.getElementById('menge0')?.value;
+                const md = document.getElementById('menge0Dunkel')?.value;
+                if (m)  document.getElementById('mengeGemeinsam').value          = m;
+                if (md) document.getElementById('mengeGemeinsamDunkel').value    = md;
                 applyGleicheZeiten();
             } else {
                 saveVentilConfig();
@@ -2546,12 +2629,15 @@ R"rawliteral(
             const body = {
                 druckaufbau_s:  parseInt(document.getElementById('druckaufbau').value) || 0,
                 gleiche_zeiten: document.getElementById('gleicheZeiten').checked,
+                nach_menge:     document.getElementById('dosierModus').value === '1',
                 behaelter: [...Array(BEHAELTER_ANZAHL).keys()].map(i => ({
                     aktiv:                  document.getElementById('aktiv' + i)?.checked ?? false,
                     oeffnungszeit_s:        parseInt(document.getElementById('oeffnung' + i)?.value ?? 5),
                     pausenzeit_min:         parseInt(document.getElementById('pause' + i)?.value ?? 5),
                     oeffnungszeit_s_dunkel: parseInt(document.getElementById('oeffnung' + i + 'Dunkel')?.value ?? 5),
-                    pausenzeit_min_dunkel:  parseInt(document.getElementById('pause' + i + 'Dunkel')?.value ?? 5)
+                    pausenzeit_min_dunkel:  parseInt(document.getElementById('pause' + i + 'Dunkel')?.value ?? 5),
+                    menge_imp:              parseInt(document.getElementById('menge' + i)?.value ?? 40),
+                    menge_imp_dunkel:       parseInt(document.getElementById('menge' + i + 'Dunkel')?.value ?? 40)
                 }))
             };
             fetch('/api/ventile/config', {

@@ -10,4 +10,8 @@
 // zurueck (atomar, siehe Implementierung in main.cpp).
 uint32_t flowsensor_take_pulses();
 
+// Gesamtzahl aller Impulse seit dem Start (wird nie zurueckgesetzt) -- fuer die Diagnose-Spur
+// in flowmonitor.cpp, die unabhaengig vom Messfenster zeigt, wann wirklich Impulse kommen.
+uint32_t flowsensor_total_pulses();
+
 #endif

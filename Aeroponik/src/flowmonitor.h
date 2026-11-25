@@ -6,7 +6,7 @@
 #include "valves.h"   // BEHAELTER_ANZAHL
 
 // Duesen-Ueberwachung: beobachtet behaelterZustand[] (valves.h) selbststaendig von aussen --
-// sobald ein Behaelter von/zu V_AKTIV wechselt (inkl. folgendem V_NACHLAUF), wird die gezaehlte
+// sobald ein Behaelter von/zu V_AKTIV wechselt, wird die gezaehlte
 // Impulszahl des Durchflussmessers (siehe flowsensor.h) erfasst -- roh, ohne Umrechnung in ml.
 // Da laut loopVentile() immer nur ein Behaelter gleichzeitig giesst, reicht der eine
 // gemeinsame Sensor in der Zulaufleitung vor dem Ventil-Verteiler.

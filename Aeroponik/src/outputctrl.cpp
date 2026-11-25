@@ -7,6 +7,7 @@ OutputConfig outputConfig;
 void loadOutputConfig() {
     if (EEPROM.read(EEPROM_OUTPUT_MAGIC_ADDR) == EEPROM_OUTPUT_MAGIC_BYTE) {
         EEPROM.get(EEPROM_OUTPUT_BASE, outputConfig);
+        if (outputConfig.light_output > LIGHT_OUTPUT_MAX) outputConfig.light_output = LIGHT_OUTPUT_LICHTX4;
     } else {
         outputConfig.fan_output   = FAN_OUTPUT_MARS;
         outputConfig.light_output = LIGHT_OUTPUT_LICHTX4;

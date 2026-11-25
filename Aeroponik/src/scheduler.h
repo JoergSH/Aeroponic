@@ -16,6 +16,21 @@ struct LightScheduleConfig {
 
 extern LightScheduleConfig schedConfig;
 
+// Kombi-Licht (Hauptlampe 0-10V + Lichtx4-Zusatzkanaele, siehe LIGHT_OUTPUT_KOMBI_* in outputctrl.h)
+struct LichtKombiConfig {
+    uint8_t max_pct;   // 1-100: Hoechstwert der Hauptlampe (Tag), die Rampen laufen 0 -> max_pct
+    uint8_t mask;      // Bits 0-3 = Lichtx4-Kanaele 1-4, die tagsueber zugeschaltet werden
+};
+extern LichtKombiConfig kombiConfig;
+void saveKombiConfig();
+
+// Kombi-Betrieb: analogPct = Hauptlampe (0..max_pct), mask = Lichtx4-Zusatzkanaele -- nur im
+// Tag-Abschnitt (Ende Aufgang bis Beginn Untergang) an, waehrend der Rampen aus.
+void schedComputeKombi(uint16_t now_min, uint8_t& analogPct, uint8_t& mask);
+// Wie oben fuer die manuelle Vorgabe (Zeitplan aus): 0-100 % -> Hauptlampe 0..max_pct,
+// Zusatzkanaele erst bei 100 %.
+void schedComputeKombiManual(uint8_t manualPct, uint8_t& analogPct, uint8_t& mask);
+
 void    loadScheduleConfig();
 void    saveScheduleConfig();
 

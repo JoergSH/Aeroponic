@@ -104,8 +104,17 @@ R"rawliteral(
             <h3 class="section-heading">🚿 <span class="de">Ventile-Konfiguration</span><span class="en">Valve Configuration</span></h3>
             <div style="margin-bottom:15px; padding:12px; background:#f0f8ff; border-radius:8px; border-left:4px solid #17a2b8;">
                 <div>
-                    <label><span class="de">Druckaufbau / Nachlauf</span><span class="en">Pressure build-up / refill</span>: <input type="number" id="druckaufbau" min="0" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
-                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Pumpe läuft so lange bei geschlossenem Düsenventil, bevor es öffnet — gleichbleibender Druck beim Sprühen — und nach dem Schließen weiter, damit ein Druckspeicher wieder voll ist (wird noch mitgezählt). Im Batch ersetzt der Nachlauf den Druckaufbau des nächsten Behälters. 0 = aus.</span><span class="en">Pump runs this long with the nozzle valve closed before it opens — constant pressure while spraying — and again after it closes so a pressure accumulator is refilled (still counted). In batch mode the refill replaces the next reservoir's build-up. 0 = off.</span></div>
+                    <label><span class="de">Druckaufbau (Vorlauf)</span><span class="en">Pressure build-up</span>: <input type="number" id="druckaufbau" min="0" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
+                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Pumpe läuft so lange bei geschlossenem Düsenventil und füllt den Druckspeicher. Beim Öffnen geht sie aus — gesprüht wird aus dem Speicher, und das Anlaufen der Pumpe kann die Durchfluss-Impulse nicht verfälschen. Gezählt wird nur, solange das Ventil offen ist. 0 = kein Druckaufbau, Pumpe läuft dann während des Sprühens.</span><span class="en">Pump runs this long with the nozzle valve closed and fills the pressure accumulator. It switches off when the valve opens — spraying comes from the accumulator, so the pump starting cannot distort the flow pulses. Pulses are only counted while the valve is open. 0 = no build-up, the pump then runs while spraying.</span></div>
+                </div>
+                <div style="margin-top:12px;">
+                    <label><span class="de">Dosierung</span><span class="en">Dosing</span>:
+                        <select id="dosierModus" onchange="updateDosierModus();saveVentilConfig()" style="padding:4px;">
+                            <option value="0" class="i18n-opt" data-de="nach Zeit (Öffnungszeit)" data-en="by time (opening time)">nach Zeit (Öffnungszeit)</option>
+                            <option value="1" class="i18n-opt" data-de="nach Menge (Durchfluss-Impulse)" data-en="by amount (flow pulses)">nach Menge (Durchfluss-Impulse)</option>
+                        </select>
+                    </label>
+                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Nach Menge: das Düsenventil schließt, sobald die eingestellte Impulszahl durch den Durchflussmesser gelaufen ist — alle Behälter bekommen so dieselbe Menge, egal wie stark die Düse sprüht. Die dafür gebrauchte Laufzeit überwacht die Düsen-Überwachung (länger = Düse setzt zu). Sicherheitslimit: doppelte erwartete Laufzeit (ohne gelernten Sollwert 60 s), dann schließt das Ventil und es kommt eine Meldung.</span><span class="en">By amount: the nozzle valve closes as soon as the set number of pulses has passed the flow meter — every reservoir gets the same amount regardless of nozzle throughput. The nozzle monitor watches the runtime this takes (longer = nozzle clogging). Safety limit: twice the expected runtime (60 s without a learned reference), then the valve closes and a notification is sent.</span></div>
                 </div>
             </div>
 
@@ -135,8 +144,11 @@ R"rawliteral(
                 <div id="gleicheZeitenFields" style="display:none;margin-top:10px;">
                     <div style="font-size:0.82em;color:#888;margin-bottom:4px;"><span class="de">☀ Lichtphase</span><span class="en">☀ Light phase</span></div>
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:400px;margin-bottom:10px;">
-                        <label style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
+                        <label class="dos-zeit" style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
                             <input type="number" id="oeffnungGemeinsam" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
+                        </label>
+                        <label class="dos-menge" style="font-size:0.9em;display:none;"><span class="de">Menge (Impulse)</span><span class="en">Amount (pulses)</span><br>
+                            <input type="number" id="mengeGemeinsam" min="1" max="255" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
                         </label>
                         <label style="font-size:0.9em;"><span class="de">Pausenzeit (min)</span><span class="en">Pause time (min)</span><br>
                             <input type="number" id="pauseGemeinsam" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
@@ -144,8 +156,11 @@ R"rawliteral(
                     </div>
                     <div style="font-size:0.82em;color:#888;margin-bottom:4px;"><span class="de">🌙 Dunkelphase</span><span class="en">🌙 Dark phase</span></div>
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:400px;">
-                        <label style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
+                        <label class="dos-zeit" style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
                             <input type="number" id="oeffnungGemeinsamDunkel" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
+                        </label>
+                        <label class="dos-menge" style="font-size:0.9em;display:none;"><span class="de">Menge (Impulse)</span><span class="en">Amount (pulses)</span><br>
+                            <input type="number" id="mengeGemeinsamDunkel" min="1" max="255" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
                         </label>
                         <label style="font-size:0.9em;"><span class="de">Pausenzeit (min)</span><span class="en">Pause time (min)</span><br>
                             <input type="number" id="pauseGemeinsamDunkel" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">

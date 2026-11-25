@@ -28,7 +28,14 @@ struct FanConfig {
 };
 
 extern FanConfig fanConfig;
-extern uint8_t   fanMaxSpeed;   // 0-100, Hoechstdrehzahl fuer beide Automodi (eigener EEPROM-Block)
+extern uint8_t   fanMaxSpeed;
+// Zehntelgrad zu temp_min / temp_max / temp_cap_diff (0-9, eigener EEPROM-Block seit 1.21.13;
+// FanConfig selbst bleibt unveraendert, aeltere Firmware liest dort weiter ganze Grad).
+extern uint8_t   fanTempZehntel[3];
+float fanTempMinC();
+float fanTempMaxC();
+float fanTempCapDiffC();
+void  fanSetTemps(float tMin, float tMax, float capDiff);   // setzt ganze Grad + Zehntel (ohne Speichern)   // 0-100, Hoechstdrehzahl fuer beide Automodi (eigener EEPROM-Block)
 
 void loadFanConfig();
 void saveFanConfig();

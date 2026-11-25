@@ -2,7 +2,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <script>window.DEMO_FW = '1.21.5';</script>
+    <script>window.DEMO_FW = '1.26.0';</script>
     <script>
 // mock.js - Demo-Modus fuer die Aeroponik-Weboberflaeche (GitHub Pages)
 // Ersetzt window.fetch fuer alle /api/...-Aufrufe durch eine Simulation im Browser.
@@ -50,10 +50,11 @@
         output: { fan_output: 0, light_output: 0 },
         tank: { hoehe_mm: 400, radius_unten_mm: 170, radius_oben_mm: 190, leer_abstand_mm: 430, min_mm: 60, max_mm: 360,
                 offset_mm: 0, sensor_type: 0, druck_null_raw: 0, druck_counts_pro_mm: 0 },
-        flowmon: { enabled: true, toleranz_prozent: 30, erwartet_impulse_s: [41.5, 40.8, 42.1, 39.7] },
-        ventile: { druckaufbau_s: 8, gleiche_zeiten: true,
-                   behaelter: [0, 1, 2, 3].map(() => ({ aktiv: true, oeffnungszeit_s: 5, pausenzeit_min: 5,
-                                                        oeffnungszeit_s_dunkel: 4, pausenzeit_min_dunkel: 10 })) },
+        flowmon: { enabled: true, toleranz_prozent: 10, erwartet_impulse_s: [3.5, 3.1, 3.9, 3.2] },
+        ventile: { druckaufbau_s: 8, gleiche_zeiten: true, nach_menge: true,
+                   behaelter: [0, 1, 2, 3].map(i => ({ aktiv: true, oeffnungszeit_s: 12, pausenzeit_min: 5,
+                                                        oeffnungszeit_s_dunkel: 10, pausenzeit_min_dunkel: 10,
+                                                        menge_imp: i === 1 ? 50 : 40, menge_imp_dunkel: i === 1 ? 50 : 40 })) },
         notify: { global_enabled: true, phone: '', has_apikey: false, netzausfall_enabled: true, sensorausfall_enabled: true,
                   feuchte_enabled: true, feuchte_min: 40, feuchte_max: 80, temperatur_enabled: true, temperatur_min: 16,
                   temperatur_max: 30, tank_enabled: true, tank_min_prozent: 20, lueftmodul_enabled: true,
@@ -143,7 +144,7 @@
     function ventilState(ts, lightOn) {
         const v = cfg.ventile, sec = Math.floor(ts / 1000);
         return v.behaelter.map((b, i) => {
-            const open = lightOn ? b.oeffnungszeit_s : b.oeffnungszeit_s_dunkel;
+            const open = openSec(b, i, lightOn);
             const per = (lightOn ? b.pausenzeit_min : b.pausenzeit_min_dunkel) * 60 + open + v.druckaufbau_s;
             const ph = (sec + i * Math.floor(per / 4)) % per;
             let z = 'Pause', timer = ph - open - v.druckaufbau_s;
@@ -154,6 +155,12 @@
     }
 
     // ---------------- Log-Dateien (CSV wie storage.cpp) ----------------
+    // Ventil-offen-Zeit in s: nach Zeit = Oeffnungszeit, nach Menge = Impulse / gelernte Rate
+    function openSec(b, i, lightOn) {
+        if (!cfg.ventile.nach_menge) return lightOn ? b.oeffnungszeit_s : b.oeffnungszeit_s_dunkel;
+        const imp = lightOn ? b.menge_imp : b.menge_imp_dunkel;
+        return Math.round(imp / (cfg.flowmon.erwartet_impulse_s[i] || 3.5));
+    }
     const CSV_HEAD = 'Zeit,TempVorrat_C,TempPflanze_C,Druck_bar,Fuellstand_%,Volumen_L,' +
         'RaumTemp_C,RaumFeuchte_%,ZeltTemp_C,ZeltFeuchte_%,ZeltCO2_ppm,ZeltVPD_kPa,ZeltPPFD_umol,' +
         'LichtMaske,LuefterLeistung_%,LuefterRPM,CO2Ausgang,HumidAusgang,' +
@@ -169,10 +176,48 @@
             const d = new Date(today.getTime() - k * 86400000);
             out.push({ name: '/' + dayName(d) + '.csv', size: k === 0 ? Math.round(410 * (Date.now() - d) / 60000) : 590000 });
         }
+        out.push({ name: '/EC-Messungen.csv', size: 1900 }, { name: '/Ruecklauf.csv', size: 4100 });
         return out;
     }
     const csvCache = {};
+    // Rücklauf (Füllstand-Modul): etwa alle 2,5 h ein Abpump-Zyklus mit 2,4 l, nachts seltener
+    function ruecklaufCsv() {
+        const rows = ['Datum,Zeit,Dauer_s,BisMIN_s,Art,Volumen_ml'];
+        const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+        for (let t = t0.getTime() - (LOG_DAYS - 1) * 86400000; t < Date.now(); ) {
+            const d = new Date(t), h = d.getHours(), night = h < 6;
+            t += (night ? 3.4 : 2.3) * 3600000 * (0.85 + 0.3 * hash(t));
+            if (t >= Date.now()) break;
+            const e = new Date(t), dur = Math.round(105 + 15 * hash(t + 1));
+            rows.push(dayName(e) + ',' + pad(e.getHours()) + ':' + pad(e.getMinutes()) + ':' + pad(e.getSeconds()) +
+                      ',' + dur + ',' + (dur - 34) + ',auto,2400');
+        }
+        return rows.join('\n') + '\n';
+    }
+    // EC-Messungen (EC-Handmessgerät): täglich Nährlösung + Rücklauf, gelegentlich Roh-/VE-Wasser
+    function ecCsv() {
+        const rows = ['Datum,Zeit,Kategorie,EC25_uS,EC25_mS,Temp_C,EC_roh_uS,Hinweis'];
+        const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+        for (let k = LOG_DAYS - 1; k >= 0; k--) {
+            const day = new Date(t0.getTime() - k * 86400000), dn = dayName(day);
+            const add = (hh, mm, kat, ec) => {
+                if (day.getTime() + (hh * 60 + mm) * 60000 > Date.now()) return;
+                const temp = r1(19.5 + 1.5 * hash(day.getTime() + hh));
+                rows.push(dn + ',' + pad(hh) + ':' + pad(mm) + ':00,' + kat + ',' + ec + ',' + (ec / 1000).toFixed(2) + ',' +
+                          temp + ',' + Math.round(ec * (1 + 0.027 * (temp - 25))) + ',');
+            };
+            const n = Math.round(1350 + 120 * Math.sin(k / 2) + 40 * hash(k));
+            add(9, 12, 'Naehrloesung', n);
+            add(9, 15, 'Ruecklauf', Math.round(n * (1.08 + 0.05 * hash(k + 7))));
+            if (k % 4 === 0) add(9, 20, 'Rohwasser', Math.round(480 + 30 * hash(k + 3)));
+            if (k % 7 === 2) add(9, 22, 'VE-Wasser', Math.round(8 + 6 * hash(k + 5)));
+            if (k % 5 === 1) add(9, 25, 'Cal-Mag', Math.round(420 + 40 * hash(k + 9)));
+        }
+        return rows.join('\n') + '\n';
+    }
     function csvFor(name) {
+        if (/Ruecklauf\.csv$/.test(name)) return ruecklaufCsv();
+        if (/EC-Messungen\.csv$/.test(name)) return ecCsv();
         const m = /(\d{4})-(\d{2})-(\d{2})/.exec(name);
         if (!m) return null;
         const start = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
@@ -185,11 +230,15 @@
             const s = sim(ts), d = new Date(ts), sec0 = Math.floor(ts / 1000);
             // Ein Eintrag je Behaelter, wenn in dieser Minute ein Giesszyklus begann (Takt wie ventilState)
             const fl = cfg.ventile.behaelter.map((b, i) => {
-                const open = s.lightOn ? b.oeffnungszeit_s : b.oeffnungszeit_s_dunkel;
+                const open = openSec(b, i, s.lightOn);
                 const per = (s.lightOn ? b.pausenzeit_min : b.pausenzeit_min_dunkel) * 60 + open + cfg.ventile.druckaufbau_s;
                 const off = i * Math.floor(per / 4), k = sec0 + ((per - (sec0 + off) % per) % per);
                 if (!b.aktiv || k >= sec0 + 60) return ['', ''];
                 const ips = cfg.flowmon.erwartet_impulse_s[i] * (1 + 0.03 * (hash(k + i) - 0.5));
+                if (cfg.ventile.nach_menge) {
+                    const imp = s.lightOn ? b.menge_imp : b.menge_imp_dunkel;
+                    return [imp, (imp / ips).toFixed(1)];
+                }
                 return [Math.round(ips * open), open.toFixed(1)];
             });
             rows.push([pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()),
@@ -251,7 +300,8 @@
             return {
                 behaelter: cfg.ventile.behaelter.map((b, i) => Object.assign({}, b, vs[i])),
                 druckaufbau_s: cfg.ventile.druckaufbau_s, gleiche_zeiten: cfg.ventile.gleiche_zeiten,
-                pumpe_aktiv: vs.some(v => v.zustand !== 'Pause'), umwaelzpumpe_aktiv: umwaelzOn(), licht_an: s.lightOn,
+                nach_menge: cfg.ventile.nach_menge,
+                pumpe_aktiv: vs.some(v => v.zustand === 'Druckaufbau'), umwaelzpumpe_aktiv: umwaelzOn(), licht_an: s.lightOn,
             };
         },
         '/api/output/test': () => ({ state: testState, testmode: testMode, pending: false,
@@ -338,7 +388,7 @@
         }
         switch (path) {
             case '/api/ventile/config':
-                for (const k of ['druckaufbau_s', 'gleiche_zeiten']) if (k in b) cfg.ventile[k] = b[k];
+                for (const k of ['druckaufbau_s', 'gleiche_zeiten', 'nach_menge']) if (k in b) cfg.ventile[k] = b[k];
                 if (Array.isArray(b.behaelter)) b.behaelter.forEach((x, i) => Object.assign(cfg.ventile.behaelter[i], x));
                 return { success: true };
             case '/api/espnow/relay': { const n = nodes.find(x => x.id === b.node_id); if (n) n.relay_mask = b.mask; return { success: true }; }
@@ -623,7 +673,7 @@
     <script data-goatcounter="https://growcenter.goatcounter.com/count" async src="https://gc.zgo.at/count.js"></script>
 </head>
 <body>
-<div id="demoBanner" style="position:sticky;top:0;z-index:9999;margin:-20px -20px 16px;padding:8px 14px;background:#fff3cd;border-bottom:2px solid #f0ad4e;color:#664d03;font-size:0.9em;text-align:center;"><b>DEMO</b> &ndash; <span class="de">simulierte Werte, keine echte Anlage. Änderungen gelten nur in diesem Tab und sind nach dem Neuladen weg.</span><span class="en">simulated values, no real system. Changes only apply in this tab and are gone after reloading.</span> &middot; Firmware 1.21.5</div>
+<div id="demoBanner" style="position:sticky;top:0;z-index:9999;margin:-20px -20px 16px;padding:8px 14px;background:#fff3cd;border-bottom:2px solid #f0ad4e;color:#664d03;font-size:0.9em;text-align:center;"><b>DEMO</b> &ndash; <span class="de">simulierte Werte, keine echte Anlage. Änderungen gelten nur in diesem Tab und sind nach dem Neuladen weg.</span><span class="en">simulated values, no real system. Changes only apply in this tab and are gone after reloading.</span> &middot; Firmware 1.26.0</div>
 
     <div class="container">
         <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:14px;margin-bottom:10px;">
@@ -1307,8 +1357,17 @@
             <h3 class="section-heading">🚿 <span class="de">Ventile-Konfiguration</span><span class="en">Valve Configuration</span></h3>
             <div style="margin-bottom:15px; padding:12px; background:#f0f8ff; border-radius:8px; border-left:4px solid #17a2b8;">
                 <div>
-                    <label><span class="de">Druckaufbau / Nachlauf</span><span class="en">Pressure build-up / refill</span>: <input type="number" id="druckaufbau" min="0" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
-                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Pumpe läuft so lange bei geschlossenem Düsenventil, bevor es öffnet — gleichbleibender Druck beim Sprühen — und nach dem Schließen weiter, damit ein Druckspeicher wieder voll ist (wird noch mitgezählt). Im Batch ersetzt der Nachlauf den Druckaufbau des nächsten Behälters. 0 = aus.</span><span class="en">Pump runs this long with the nozzle valve closed before it opens — constant pressure while spraying — and again after it closes so a pressure accumulator is refilled (still counted). In batch mode the refill replaces the next reservoir's build-up. 0 = off.</span></div>
+                    <label><span class="de">Druckaufbau (Vorlauf)</span><span class="en">Pressure build-up</span>: <input type="number" id="druckaufbau" min="0" max="30" style="width:55px;" onchange="saveVentilConfig()"> s</label>
+                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Pumpe läuft so lange bei geschlossenem Düsenventil und füllt den Druckspeicher. Beim Öffnen geht sie aus — gesprüht wird aus dem Speicher, und das Anlaufen der Pumpe kann die Durchfluss-Impulse nicht verfälschen. Gezählt wird nur, solange das Ventil offen ist. 0 = kein Druckaufbau, Pumpe läuft dann während des Sprühens.</span><span class="en">Pump runs this long with the nozzle valve closed and fills the pressure accumulator. It switches off when the valve opens — spraying comes from the accumulator, so the pump starting cannot distort the flow pulses. Pulses are only counted while the valve is open. 0 = no build-up, the pump then runs while spraying.</span></div>
+                </div>
+                <div style="margin-top:12px;">
+                    <label><span class="de">Dosierung</span><span class="en">Dosing</span>:
+                        <select id="dosierModus" onchange="updateDosierModus();saveVentilConfig()" style="padding:4px;">
+                            <option value="0" class="i18n-opt" data-de="nach Zeit (Öffnungszeit)" data-en="by time (opening time)">nach Zeit (Öffnungszeit)</option>
+                            <option value="1" class="i18n-opt" data-de="nach Menge (Durchfluss-Impulse)" data-en="by amount (flow pulses)">nach Menge (Durchfluss-Impulse)</option>
+                        </select>
+                    </label>
+                    <div style="font-size:0.8em;color:#6c757d;margin-top:2px;"><span class="de">Nach Menge: das Düsenventil schließt, sobald die eingestellte Impulszahl durch den Durchflussmesser gelaufen ist — alle Behälter bekommen so dieselbe Menge, egal wie stark die Düse sprüht. Die dafür gebrauchte Laufzeit überwacht die Düsen-Überwachung (länger = Düse setzt zu). Sicherheitslimit: doppelte erwartete Laufzeit (ohne gelernten Sollwert 60 s), dann schließt das Ventil und es kommt eine Meldung.</span><span class="en">By amount: the nozzle valve closes as soon as the set number of pulses has passed the flow meter — every reservoir gets the same amount regardless of nozzle throughput. The nozzle monitor watches the runtime this takes (longer = nozzle clogging). Safety limit: twice the expected runtime (60 s without a learned reference), then the valve closes and a notification is sent.</span></div>
                 </div>
             </div>
 
@@ -1338,8 +1397,11 @@
                 <div id="gleicheZeitenFields" style="display:none;margin-top:10px;">
                     <div style="font-size:0.82em;color:#888;margin-bottom:4px;"><span class="de">☀ Lichtphase</span><span class="en">☀ Light phase</span></div>
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:400px;margin-bottom:10px;">
-                        <label style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
+                        <label class="dos-zeit" style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
                             <input type="number" id="oeffnungGemeinsam" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
+                        </label>
+                        <label class="dos-menge" style="font-size:0.9em;display:none;"><span class="de">Menge (Impulse)</span><span class="en">Amount (pulses)</span><br>
+                            <input type="number" id="mengeGemeinsam" min="1" max="255" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
                         </label>
                         <label style="font-size:0.9em;"><span class="de">Pausenzeit (min)</span><span class="en">Pause time (min)</span><br>
                             <input type="number" id="pauseGemeinsam" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
@@ -1347,8 +1409,11 @@
                     </div>
                     <div style="font-size:0.82em;color:#888;margin-bottom:4px;"><span class="de">🌙 Dunkelphase</span><span class="en">🌙 Dark phase</span></div>
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:400px;">
-                        <label style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
+                        <label class="dos-zeit" style="font-size:0.9em;"><span class="de">Öffnungszeit (s)</span><span class="en">Opening time (s)</span><br>
                             <input type="number" id="oeffnungGemeinsamDunkel" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
+                        </label>
+                        <label class="dos-menge" style="font-size:0.9em;display:none;"><span class="de">Menge (Impulse)</span><span class="en">Amount (pulses)</span><br>
+                            <input type="number" id="mengeGemeinsamDunkel" min="1" max="255" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
                         </label>
                         <label style="font-size:0.9em;"><span class="de">Pausenzeit (min)</span><span class="en">Pause time (min)</span><br>
                             <input type="number" id="pauseGemeinsamDunkel" min="1" max="60" style="width:100%;padding:4px;" onchange="applyGleicheZeiten()">
@@ -1514,6 +1579,8 @@
                             <option value="0" class="i18n-opt" data-de="Lichtx4 (Relais)" data-en="Lichtx4 (Relay)">Lichtx4 (Relais)</option>
                             <option value="1" class="i18n-opt" data-de="RS485-Analogmodul (0-10V)" data-en="RS485 analog module (0-10V)">RS485-Analogmodul (0-10V)</option>
                             <option value="2" class="i18n-opt" data-de="GP8403 I2C-DAC (0-10V)" data-en="GP8403 I2C DAC (0-10V)">GP8403 I2C-DAC (0-10V)</option>
+                            <option value="3" class="i18n-opt" data-de="Kombi: Analogmodul (0-10V) + Lichtx4" data-en="Combined: analog module (0-10V) + Lichtx4">Kombi: Analogmodul (0-10V) + Lichtx4</option>
+                            <option value="4" class="i18n-opt" data-de="Kombi: GP8403 (0-10V) + Lichtx4" data-en="Combined: GP8403 (0-10V) + Lichtx4">Kombi: GP8403 (0-10V) + Lichtx4</option>
                         </select>
                     </div>
                     <div>
@@ -1560,6 +1627,31 @@
                         <input type="number" id="schedNumSsr" min="1" max="4" value="4"
                             oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Anzahl SSR-Ausgänge (1–4)</span><span class="en">Number of SSR outputs (1–4)</span></div>
+                    </div>
+                </div>
+
+                <div id="schedKombiRow" style="display:none;margin-bottom:16px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div>
+                            <div class="status-label"><span class="de">Hauptlampe max (%)</span><span class="en">Main lamp max (%)</span></div>
+                            <input type="number" id="schedKombiMax" min="1" max="100" step="1" value="100"
+                                oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Helligkeit des 0-10V-Ausgangs am Tag</span><span class="en">0-10V output brightness during the day</span></div>
+                        </div>
+                        <div>
+                            <div class="status-label"><span class="de">Zusatzlicht Lichtx4</span><span class="en">Extra light Lichtx4</span></div>
+                            <div style="display:flex;gap:12px;padding:7px 0;flex-wrap:wrap;">
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK1" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K1</label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK2" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K2</label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK3" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K3</label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK4" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K4</label>
+                            </div>
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Kanäle, die tagsüber dazukommen</span><span class="en">Channels added during the day</span></div>
+                        </div>
+                    </div>
+                    <div style="font-size:0.78em;color:#888;margin-top:8px;">
+                        <span class="de">Morgens dimmt die Hauptlampe im Sonnenaufgang bis zu ihrem Max-Wert hoch, danach werden die Lichtx4-Kanäle zugeschaltet. Abends gehen die Lichtx4-Kanäle mit Beginn des Sonnenuntergangs aus, dann dimmt die Hauptlampe herunter.</span>
+                        <span class="en">In the morning the main lamp ramps up to its max during sunrise, then the Lichtx4 channels are switched on. In the evening the Lichtx4 channels switch off at the start of sunset, then the main lamp dims down.</span>
                     </div>
                 </div>
 
@@ -1833,8 +1925,8 @@
                     </div>
                 </div>
                 <div class="vpd-grid">
-                    <div><div class="status-label"><span class="de">Temperatur min (°C)</span><span class="en">Temperature min (°C)</span></div><input type="number" id="vpdTempMin" class="vpd-in" min="5" max="30" step="1"><div class="vpd-hint"><span class="de">Darunter wird die Abluft für den VPD nicht weiter erhöht, sondern langsam zurückgenommen (kühlt sonst nachts aus).</span><span class="en">Below this, exhaust is not increased for VPD but slowly reduced (would otherwise cool the tent at night).</span></div></div>
-                    <div><div class="status-label"><span class="de">Temperatur max (°C)</span><span class="en">Temperature max (°C)</span></div><input type="number" id="vpdTempMax" class="vpd-in" min="18" max="40" step="1"><div class="vpd-hint"><span class="de">Ab 1 °C darunter fährt der Lüfter hoch – hat Vorrang.</span><span class="en">From 1 °C below the fan ramps up – takes priority.</span></div></div>
+                    <div><div class="status-label"><span class="de">Temperatur min (°C)</span><span class="en">Temperature min (°C)</span></div><input type="number" id="vpdTempMin" class="vpd-in" min="5" max="30" step="0.1"><div class="vpd-hint"><span class="de">Darunter wird die Abluft für den VPD nicht weiter erhöht, sondern langsam zurückgenommen (kühlt sonst nachts aus).</span><span class="en">Below this, exhaust is not increased for VPD but slowly reduced (would otherwise cool the tent at night).</span></div></div>
+                    <div><div class="status-label"><span class="de">Temperatur max (°C)</span><span class="en">Temperature max (°C)</span></div><input type="number" id="vpdTempMax" class="vpd-in" min="18" max="40" step="0.1"><div class="vpd-hint"><span class="de">Ab 1 °C darunter fährt der Lüfter hoch – hat Vorrang.</span><span class="en">From 1 °C below the fan ramps up – takes priority.</span></div></div>
                     <div><div class="status-label"><span class="de">Feuchte max (%)</span><span class="en">Humidity max (%)</span></div><input type="number" id="vpdHumMax" class="vpd-in" min="40" max="95" step="1"><div class="vpd-hint"><span class="de">Darüber Befeuchter aus und Lüfter hoch (Schimmelschutz) – hat Vorrang.</span><span class="en">Above: humidifier off and fan up (mould protection) – takes priority.</span></div></div>
                     <div><div class="status-label"><span class="de">Alarm nach (min)</span><span class="en">Alarm after (min)</span></div><input type="number" id="vpdAlarmMin" class="vpd-in" min="0" max="240" step="5"><div class="vpd-hint"><span class="de">So lange außerhalb des Zielbereichs → Benachrichtigung. 0 = aus.</span><span class="en">Out of range this long → notification. 0 = off.</span></div></div>
                 </div>
@@ -1948,8 +2040,8 @@
                             night_min: Math.round(n('vpdNightMin') * 100), night_max: Math.round(n('vpdNightMax') * 100),
                             leaf_offset: Math.round(n('vpdLeafOffset') * 10),
                             use_humid: $('vpdUseHumid').checked, use_fan: $('vpdUseFan').checked,
-                            temp_max: Math.round(n('vpdTempMax')), hum_max: Math.round(n('vpdHumMax')), alarm_min: Math.round(n('vpdAlarmMin')),
-                            temp_min: Math.round(n('vpdTempMin'))
+                            temp_max: Math.round(n('vpdTempMax') * 10) / 10, hum_max: Math.round(n('vpdHumMax')), alarm_min: Math.round(n('vpdAlarmMin')),
+                            temp_min: Math.round(n('vpdTempMin') * 10) / 10
                         };
                         const st = $('vpdSaveStatus');
                         fetch('/api/vpd/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -2065,17 +2157,17 @@
                     </div>
                     <div>
                         <div class="status-label" id="fanTempMinLabel"><span class="de">Temperatur Min (°C)</span><span class="en">Temperature Min (°C)</span></div>
-                        <input type="number" id="fanTempMin" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <input type="number" id="fanTempMin" min="0" max="60" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Mindestdrehzahl</span><span class="en">Below: minimum speed</span></div>
                     </div>
                     <div>
                         <div class="status-label" id="fanTempMaxLabel"><span class="de">Temperatur Max (°C)</span><span class="en">Temperature Max (°C)</span></div>
-                        <input type="number" id="fanTempMax" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <input type="number" id="fanTempMax" min="0" max="60" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Höchstdrehzahl</span><span class="en">Above: maximum speed</span></div>
                     </div>
                     <div id="fanTempCapSection" style="grid-column:1/-1;">
                         <div class="status-label"><span class="de">Differenz-Bremse (°C, 0 = aus)</span><span class="en">Differential Cap (°C, 0 = off)</span></div>
-                        <input type="number" id="fanTempCapDiff" min="0" max="30" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <input type="number" id="fanTempCapDiff" min="0" max="30" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;">
                             <span class="de">Ist die Differenz Zelt−Raum kleiner als dieser Wert, läuft der Lüfter trotz obiger Rampe nur mit Mindestdrehzahl.</span>
                             <span class="en">If the tent−room difference is below this value, the fan runs at minimum speed regardless of the ramp above.</span>
@@ -2297,6 +2389,7 @@
                 <span id="chNozToggles" style="display:flex;flex-wrap:wrap;gap:4px 14px;"></span>
                 <label><span class="de">Anzeige</span><span class="en">Show</span>
                     <select id="chNozMode">
+                        <option class="i18n-opt" value="dur" data-de="Laufzeit je Zyklus (s)" data-en="Run time per cycle (s)">Laufzeit je Zyklus (s)</option>
                         <option class="i18n-opt" value="rate" data-de="Impulse pro Sekunde" data-en="Pulses per second">Impulse pro Sekunde</option>
                         <option class="i18n-opt" value="cyc" data-de="Impulse je Zyklus" data-en="Pulses per cycle">Impulse je Zyklus</option>
                     </select></label>
@@ -2304,8 +2397,8 @@
             <div id="chNozzleWrap"></div>
             <div id="chNozCards" class="ch-cards"></div>
             <div class="ch-hint">
-                <span class="de">Punkte = einzelne Gießzyklen, Linie = gleitender Median über 9 Zyklen, roter Ring = Ausreißer (&gt;15 % vom Median). „Impulse pro Sekunde“ bleibt vergleichbar, auch wenn die Öffnungszeit geändert wurde. Die Bewertung bezieht sich auf den Ausschnitt oben: Trend = letztes gegen erstes Drittel der Zyklen, Streuung = Standardabweichung in %.</span>
-                <span class="en">Dots = single watering cycles, line = rolling median over 9 cycles, red ring = outlier (&gt;15 % from the median). "Pulses per second" stays comparable even if the open time was changed. The rating refers to the window above: trend = last vs. first third of cycles, spread = standard deviation in %.</span>
+                <span class="de">Punkte = einzelne Gießzyklen, Linie = gleitender Median über 9 Zyklen, roter Ring = Ausreißer (&gt;15 % vom Median). „Laufzeit je Zyklus“ passt zur Dosierung nach Menge: Das Ventil schließt nach der eingestellten Impulszahl, eine Düse, die zusetzt, braucht dafür länger (Trend steigt). „Impulse pro Sekunde“ bleibt vergleichbar, auch wenn Öffnungszeit oder Menge geändert wurden. Die Bewertung bezieht sich auf den Ausschnitt oben: Trend = letztes gegen erstes Drittel der Zyklen, Streuung = Standardabweichung in %.</span>
+                <span class="en">Dots = single watering cycles, line = rolling median over 9 cycles, red ring = outlier (&gt;15 % from the median). "Run time per cycle" fits dosing by amount: the valve closes after the set pulse count, a clogging nozzle needs longer (trend rising). "Pulses per second" stays comparable even if the open time or amount was changed. The rating refers to the window above: trend = last vs. first third of cycles, spread = standard deviation in %.</span>
             </div>
 
             <script>
@@ -2353,7 +2446,7 @@
                 const S = {
                     inited: false, files: [], cache: {}, t: [], cols: {}, marks: [], nights: [], noz: [],
                     d0: 0, d1: 0, v0: 0, v1: 0, hoverT: null, range: 1, on: {},
-                    nozOn: [true, true, true, true], nozMode: 'rate',
+                    nozOn: [true, true, true, true], nozMode: 'dur',
                     loading: false, statsKey: '', drag: null, pinch: null, raf: false
                 };
 
@@ -2378,12 +2471,13 @@
                         const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
                         if (p.on) Object.keys(p.on).forEach(k => { if (k in S.on) S.on[k] = !!p.on[k]; });
                         if (Array.isArray(p.nozOn)) for (let k = 0; k < 4; k++) if (typeof p.nozOn[k] === 'boolean') S.nozOn[k] = p.nozOn[k];
-                        if (p.nozMode === 'cyc' || p.nozMode === 'rate') S.nozMode = p.nozMode;
+                        // nozV 2: "Laufzeit je Zyklus" ist neu und Standard -- aeltere gespeicherte Auswahl nicht uebernehmen
+                        if (p.nozV === 2 && (p.nozMode === 'cyc' || p.nozMode === 'rate' || p.nozMode === 'dur')) S.nozMode = p.nozMode;
                         if (p.range === 7) S.range = 7;
                     } catch (e) {}
                 }
                 function savePrefs() {
-                    try { localStorage.setItem(PREF_KEY, JSON.stringify({ on: S.on, nozOn: S.nozOn, nozMode: S.nozMode, range: S.range })); } catch (e) {}
+                    try { localStorage.setItem(PREF_KEY, JSON.stringify({ on: S.on, nozOn: S.nozOn, nozMode: S.nozMode, nozV: 2, range: S.range })); } catch (e) {}
                 }
 
                 // ---------- DOM ----------
@@ -2675,6 +2769,7 @@
                             const w = a.slice(Math.max(0, i - 4), Math.min(a.length, i + 5));
                             a[i].mr = median(w.map(x => x.r));
                             a[i].mp = median(w.map(x => x.p));
+                            a[i].md = median(w.map(x => x.d));
                         }
                         S.noz.push(a);
                     }
@@ -2921,8 +3016,11 @@
                     }).join('');
                 }
 
-                const nozVal = c => S.nozMode === 'rate' ? c.r : c.p;
-                const nozMed = c => S.nozMode === 'rate' ? c.mr : c.mp;
+                const nozVal = c => S.nozMode === 'rate' ? c.r : S.nozMode === 'dur' ? c.d : c.p;
+                const nozMed = c => S.nozMode === 'rate' ? c.mr : S.nozMode === 'dur' ? c.md : c.mp;
+                const nozDec = () => S.nozMode === 'cyc' ? 0 : 1;
+                const nozUnitLong = () => S.nozMode === 'rate' ? L('Impulse/s', 'pulses/s') : S.nozMode === 'dur' ? L('Laufzeit je Zyklus (s)', 'run time per cycle (s)') : L('Impulse je Zyklus', 'pulses per cycle');
+                const nozUnit = () => S.nozMode === 'rate' ? L('Imp/s', 'p/s') : S.nozMode === 'dur' ? L('s/Zyklus', 's/cycle') : L('Imp/Zyklus', 'p/cycle');
                 function nearestCycle(a, t) {
                     if (!a.length) return -1;
                     let i = lowerBoundT(a, t); if (i >= a.length) i = a.length - 1;
@@ -2943,7 +3041,7 @@
                         vis.push({ k, a, i0, i1 });
                         for (let i = i0; i <= i1; i++) { const v = nozVal(a[i]); if (v < lo) lo = v; if (v > hi) hi = v; }
                     });
-                    const dec = S.nozMode === 'rate' ? 1 : 0;
+                    const dec = nozDec();
                     if (lo === Infinity) {
                         ctx.fillStyle = '#aaa'; ctx.textAlign = 'center'; ctx.font = '12px Arial';
                         ctx.fillText(L('Keine Gießzyklen im Ausschnitt', 'No watering cycles in this window'), PL + pw / 2, (PT + bottom) / 2);
@@ -2983,7 +3081,7 @@
                     }
                     drawMarks(g, X); drawHover(g, X);
 
-                    p.leg.innerHTML = '<span class="ch-li" style="color:#888;">' + (S.nozMode === 'rate' ? L('Impulse/s', 'pulses/s') : L('Impulse je Zyklus', 'pulses per cycle')) + '</span>' +
+                    p.leg.innerHTML = '<span class="ch-li" style="color:#888;">' + nozUnitLong() + '</span>' +
                         vis.map(({ k, a }) => {
                             const i = S.hoverT !== null ? nearestCycle(a, S.hoverT) : lowerBoundT(a, S.v1) - 1;
                             const c = i >= 0 ? a[i] : null;
@@ -3129,8 +3227,10 @@
                     });
                     const allMean = meds.length ? meds.reduce((x, y) => x + y, 0) / meds.length : NaN;
                     const maxMed = Math.max(0, ...meds);
-                    const dec = S.nozMode === 'rate' ? 1 : 0;
-                    const unit = S.nozMode === 'rate' ? L('Imp/s', 'p/s') : L('Imp/Zyklus', 'p/cycle');
+                    const dec = nozDec();
+                    const unit = nozUnit();
+                    // Bei der Laufzeit bedeutet "steigt" weniger Durchfluss (Duese setzt zu), sonst umgekehrt
+                    const inv = S.nozMode === 'dur';
                     box.innerHTML = data.map(({ k, vs, outl }) => {
                         const col = NOZ_COLORS[k], n = vs.length;
                         const head = '<div class="ch-c-title">' + L('Behälter ', 'Reservoir ') + (k + 1);
@@ -3143,8 +3243,8 @@
                         const dev = allMean > 0 ? (med - allMean) / allMean * 100 : NaN;
                         let amp = '🟢', txt = L('stabil', 'stable');
                         if (n < 6) { amp = '⚪'; txt = L('zu wenige Zyklen für eine Bewertung', 'too few cycles to rate'); }
-                        else if (trend <= -10) { amp = '🟠'; txt = L('fällt – Düse/Filter prüfen', 'dropping – check nozzle/filter'); }
-                        else if (trend >= 10) { amp = '🟠'; txt = L('steigt – Leck oder lose Düse?', 'rising – leak or loose nozzle?'); }
+                        else if (inv ? trend >= 10 : trend <= -10) { amp = '🟠'; txt = inv ? L('steigt – Düse/Filter prüfen', 'rising – check nozzle/filter') : L('fällt – Düse/Filter prüfen', 'dropping – check nozzle/filter'); }
+                        else if (inv ? trend <= -10 : trend >= 10) { amp = '🟠'; txt = inv ? L('fällt – Leck oder lose Düse?', 'dropping – leak or loose nozzle?') : L('steigt – Leck oder lose Düse?', 'rising – leak or loose nozzle?'); }
                         else if (cv > 15) { amp = '🟡'; txt = L('unruhig – Luft oder Schmutz?', 'erratic – air or dirt?'); }
                         return '<div class="ch-card" style="border-left-color:' + col + ';">' + head + ' <span style="float:right;">' + amp + '</span></div>' +
                                '<div class="ch-c-main">' + fmt(med, dec) + ' <small>' + unit + ' (Median)</small></div>' +
@@ -3169,6 +3269,509 @@
                 window.chartsOnLangChange = function () {
                     if (!S.inited) return;
                     buildToggles(); buildWindowSelect(); renderDays(); S.statsKey = ''; redraw();
+                };
+            })();
+            </script>
+
+            <!-- ============ EC-Messungen (EC-Meter, Datei EC-Messungen.csv) ============ -->
+            <h3 class="section-heading">🧪 <span class="de">EC-Messungen</span><span class="en">EC measurements</span></h3>
+            <div class="status-box-info ch-toolbar">
+                <label><span class="de">Zeitraum</span><span class="en">Period</span>
+                    <select id="ecRange">
+                        <option class="i18n-opt" value="30" data-de="30 Tage" data-en="30 days">30 Tage</option>
+                        <option class="i18n-opt" value="90" data-de="90 Tage" data-en="90 days">90 Tage</option>
+                        <option class="i18n-opt" value="0" data-de="Alles" data-en="All">Alles</option>
+                    </select></label>
+                <button id="ecReloadBtn" class="ch-btn">🔄 <span class="de">Neu laden</span><span class="en">Reload</span></button>
+                <a class="ch-btn" style="text-decoration:none;" href="/api/logs/download?file=EC-Messungen.csv">⬇ CSV</a>
+                <button id="ecUploadBtn" class="ch-btn">⬆ <span class="de">CSV hochladen</span><span class="en">Upload CSV</span></button>
+                <input type="file" id="ecUploadFile" accept=".csv,text/csv" style="display:none;">
+                <span id="ecStatus" class="ch-status"></span>
+            </div>
+            <div class="ch-panel">
+                <div class="ch-head" id="ecLegend"></div>
+                <canvas id="ecCanvas" class="ch-cv" style="height:220px;"></canvas>
+            </div>
+            <div class="ch-hoverbar"><span id="ecHover"></span></div>
+            <div id="ecCards" class="ch-cards"></div>
+            <div style="overflow-x:auto;margin-top:10px;"><table id="ecTable" class="ch-days"></table></div>
+            <div class="ch-hint">
+                <span class="de">Werte vom EC-Meter (LOG 2 s halten, dann Kategorie wählen), auf 25 °C kompensiert. Die Datei EC-Messungen.csv auf der SD-Karte sammelt alle Messungen tagesübergreifend; zusätzlich stehen sie in den Tageslogs (Spalten EC_…). Roter Ring = über Messbereich, hohler Punkt = ohne Temperaturfühler gemessen.</span>
+                <span class="en">Values from the EC meter (hold LOG for 2 s, then pick a category), compensated to 25 °C. The file EC-Messungen.csv on the SD card collects all measurements across days; they are also in the daily logs (EC_… columns). Red ring = over range, hollow dot = measured without temperature probe.</span>
+            </div>
+
+            <script>
+            (function () {
+                'use strict';
+                const FILE = 'EC-Messungen.csv', DAY = 86400000;
+                const KAT = [
+                    { key: 'Naehrloesung', de: 'Nährlösung', en: 'Nutrient solution', color: '#27ae60' },
+                    { key: 'Ruecklauf',    de: 'Rücklauf',   en: 'Return',            color: '#2e86de' },
+                    { key: 'Cal-Mag',      de: 'Cal-Mag',    en: 'Cal-Mag',           color: '#e67e22' },
+                    { key: 'Rohwasser',    de: 'Rohwasser',  en: 'Tap water',         color: '#8e44ad' },
+                    { key: 'VE-Wasser',    de: 'VE-Wasser',  en: 'Demineralized water', color: '#7f8c8d' },
+                ];
+                const E = { rows: [], loaded: false, wired: false, pts: [] };
+                const $ = id => document.getElementById(id);
+                function L(de, en) { return (typeof currentLang !== 'undefined' && currentLang === 'en') ? en : de; }
+                const p2 = n => String(n).padStart(2, '0');
+                const fDate = t => { const d = new Date(t); return p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + '.' + d.getFullYear(); };
+                const fTime = t => { const d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+                const fMs = v => (v / 1000).toFixed(2);
+                const sgn = v => (v >= 0 ? '+' : '') + v;
+
+                function parse(txt) {
+                    const lines = txt.split(/\r?\n/), h = (lines[0] || '').split(',');
+                    const di = h.indexOf('Datum'), zi = h.indexOf('Zeit'), ki = h.indexOf('Kategorie'),
+                          ei = h.indexOf('EC25_uS'), ti = h.indexOf('Temp_C'), hi = h.indexOf('Hinweis');
+                    if (di < 0 || ki < 0 || ei < 0) return [];
+                    const out = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        if (!lines[i]) continue;
+                        const c = lines[i].split(','), d = (c[di] || '').split('-').map(Number), z = (c[zi] || '').split(':').map(Number);
+                        if (d.length < 3 || !d[0]) continue;
+                        const k = KAT.findIndex(x => x.key === c[ki]); if (k < 0) continue;
+                        const ec = parseFloat(c[ei]); if (!isFinite(ec)) continue;
+                        const tp = parseFloat(c[ti]), note = hi >= 0 ? (c[hi] || '') : '';
+                        out.push({ t: new Date(d[0], d[1] - 1, d[2], z[0] || 0, z[1] || 0, z[2] || 0).getTime(), k, ec,
+                                   temp: isFinite(tp) ? tp : NaN, over: /Messbereich/.test(note), noTemp: /Temperatur/.test(note) });
+                    }
+                    return out.sort((a, b) => a.t - b.t);
+                }
+
+                // Bearbeitete EC-Messungen.csv wieder auf die Steuerung laden. Vorher normalisieren:
+                // Excel speichert oft mit Semikolon + Dezimalkomma und deutschem Datum, Kategorien
+                // werden ggf. frei geschrieben ("Nährlösung", "VE Wasser") -> auf die festen Namen.
+                function katKey(s) {
+                    const n = s.trim().toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/[\s_\-]/g, '');
+                    const map = { naehrloesung: 'Naehrloesung', ruecklauf: 'Ruecklauf', calmag: 'Cal-Mag', nurcalmag: 'Cal-Mag',
+                                  rohwasser: 'Rohwasser', vewasser: 'VE-Wasser' };
+                    return map[n] || s.trim();
+                }
+                function normalize(txt) {
+                    txt = txt.replace(/^\uFEFF/, '');
+                    let lines = txt.split(/\r?\n/).filter(l => l.trim() !== '');
+                    if ((lines[0] || '').indexOf(';') >= 0)   // Excel: ; als Trenner, , als Dezimalzeichen
+                        lines = lines.map(l => l.replace(/,/g, '.').replace(/;/g, ','));
+                    const h = (lines[0] || '').split(',').map(x => x.trim().replace(/^"|"$/g, ''));
+                    const ki = h.indexOf('Kategorie'), di = h.indexOf('Datum'), zi = h.indexOf('Zeit');
+                    const out = [h.join(',')];
+                    for (let i = 1; i < lines.length; i++) {
+                        const c = lines[i].split(',').map(x => x.trim().replace(/^"|"$/g, ''));
+                        if (ki >= 0 && c[ki] !== undefined) c[ki] = katKey(c[ki]);
+                        if (di >= 0 && /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(c[di] || '')) {
+                            const [d, mo, y] = c[di].split('.');
+                            c[di] = y + '-' + p2(+mo) + '-' + p2(+d);
+                        }
+                        if (zi >= 0 && /^\d{1,2}:\d{2}$/.test(c[zi] || '')) c[zi] += ':00';
+                        if (zi >= 0 && /^\d:/.test(c[zi] || '')) c[zi] = '0' + c[zi];
+                        out.push(c.join(','));
+                    }
+                    return out.join('\n') + '\n';
+                }
+                async function upload(file) {
+                    const txt = normalize(await file.text());
+                    const lines = txt.split('\n').filter(l => l);
+                    const rows = parse(txt);
+                    if (!rows.length) {
+                        alert(L('Keine gültigen Messungen erkannt – Kopfzeile muss Datum, Zeit, Kategorie, EC25_uS enthalten.',
+                                'No valid measurements found – header must contain Datum, Zeit, Kategorie, EC25_uS.'));
+                        return;
+                    }
+                    const ki = lines[0].split(',').indexOf('Kategorie');
+                    const unbekannt = [...new Set(lines.slice(1).map(l => l.split(',')[ki])
+                                       .filter(k => k && !KAT.some(x => x.key === k)))];
+                    const skip = lines.length - 1 - rows.length;
+                    let msg = L(rows.length + ' Messungen erkannt', rows.length + ' measurements recognized');
+                    if (skip > 0) msg += L(', ' + skip + ' Zeilen werden in der Auswertung ignoriert', ', ' + skip + ' rows will be ignored');
+                    if (unbekannt.length) msg += L(' (unbekannte Kategorie: ', ' (unknown category: ') + unbekannt.join(', ') + ')';
+                    msg += L('.\n\nEC-Messungen.csv auf der Steuerung ersetzen? Die bisherige Datei bleibt als EC-Messungen_vorher.csv erhalten.',
+                             '.\n\nReplace EC-Messungen.csv on the controller? The previous file is kept as EC-Messungen_vorher.csv.');
+                    if (!confirm(msg)) return;
+                    $('ecStatus').textContent = L('Lade hoch …', 'Uploading …');
+                    const fd = new FormData();
+                    fd.append('file', new Blob([txt], { type: 'text/csv' }), FILE);
+                    try {
+                        const r = await fetch('/api/logs/upload-ec', { method: 'POST', body: fd });
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok || !d.ok) { $('ecStatus').textContent = L('Upload fehlgeschlagen: ', 'Upload failed: ') + (d.error || r.status); return; }
+                        await load();
+                    } catch (e) {
+                        $('ecStatus').textContent = L('Upload fehlgeschlagen: ', 'Upload failed: ') + e;
+                    }
+                }
+
+                async function load() {
+                    $('ecStatus').textContent = L('Lade …', 'Loading …');
+                    try {
+                        const r = await fetch('/api/logs/download?file=' + encodeURIComponent(FILE));
+                        E.rows = r.ok ? parse(await r.text()) : [];
+                        E.loaded = true;
+                        render();
+                    } catch (e) {
+                        $('ecStatus').textContent = L('Fehler beim Laden: ', 'Load error: ') + e;
+                    }
+                }
+
+                function visible() {
+                    const days = parseInt($('ecRange').value) || 0;
+                    if (!days) return E.rows;
+                    const from = Date.now() - days * DAY;
+                    return E.rows.filter(r => r.t >= from);
+                }
+
+                function render() {
+                    const rows = visible();
+                    $('ecStatus').textContent = E.rows.length
+                        ? rows.length + L(' von ', ' of ') + E.rows.length + L(' Messungen', ' measurements')
+                        : L('Noch keine EC-Messungen gespeichert.', 'No EC measurements stored yet.');
+                    $('ecLegend').innerHTML = '<span class="ch-title">EC 25 °C (mS/cm)</span>' + KAT.map((k, i) =>
+                        '<span class="ch-li"><span class="ch-sw" style="background:' + k.color + ';"></span>' + L(k.de, k.en) +
+                        ' (' + rows.filter(r => r.k === i).length + ')</span>').join('');
+                    drawChart(rows);
+                    renderCards();
+                    renderTable(rows);
+                }
+
+                function drawChart(rows) {
+                    const cv = $('ecCanvas'), dpr = window.devicePixelRatio || 1;
+                    const W = cv.clientWidth || 600, H = cv.clientHeight || 220;
+                    cv.width = W * dpr; cv.height = H * dpr;
+                    const ctx = cv.getContext('2d');
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    ctx.clearRect(0, 0, W, H);
+                    E.pts = [];
+                    const PL = 46, PR = 14, PT = 10, PB = 24, pw = W - PL - PR, ph = H - PT - PB;
+                    ctx.font = '11px sans-serif'; ctx.fillStyle = '#888';
+                    if (!rows.length) { ctx.fillText(L('Keine Messungen im Zeitraum', 'No measurements in this period'), PL, PT + ph / 2); return; }
+                    let t0 = rows[0].t, t1 = rows[rows.length - 1].t;
+                    if (t1 - t0 < DAY) { t0 -= DAY / 2; t1 += DAY / 2; }
+                    const pad = (t1 - t0) * 0.03; t0 -= pad; t1 += pad;
+                    const yMax = Math.max(0.5, Math.ceil(Math.max(...rows.map(r => r.ec / 1000)) * 1.1 * 4) / 4);
+                    const X = t => PL + (t - t0) / (t1 - t0) * pw, Y = v => PT + ph - v / yMax * ph;
+                    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1; ctx.textAlign = 'right';
+                    for (let i = 0; i <= 5; i++) {
+                        const v = yMax * i / 5, y = Y(v);
+                        ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + pw, y); ctx.stroke();
+                        ctx.fillText(v.toFixed(2), PL - 5, y + 4);
+                    }
+                    ctx.textAlign = 'center';
+                    const nx = Math.max(2, Math.min(7, Math.floor(pw / 90)));
+                    for (let i = 0; i <= nx; i++) {
+                        const t = t0 + (t1 - t0) * i / nx, d = new Date(t);
+                        ctx.fillText(p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + '.', X(t), H - 6);
+                    }
+                    KAT.forEach((kat, k) => {
+                        const rs = rows.filter(r => r.k === k); if (!rs.length) return;
+                        ctx.strokeStyle = kat.color; ctx.lineWidth = 1.5; ctx.beginPath();
+                        rs.forEach((r, i) => { const x = X(r.t), y = Y(r.ec / 1000); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+                        ctx.stroke();
+                        rs.forEach(r => {
+                            const x = X(r.t), y = Y(r.ec / 1000);
+                            ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI);
+                            if (r.noTemp) { ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = kat.color; ctx.lineWidth = 1.5; ctx.stroke(); }
+                            else { ctx.fillStyle = kat.color; ctx.fill(); }
+                            if (r.over) { ctx.beginPath(); ctx.arc(x, y, 7, 0, 2 * Math.PI); ctx.strokeStyle = '#e74c3c'; ctx.lineWidth = 1.5; ctx.stroke(); }
+                            E.pts.push({ x, y, r });
+                        });
+                    });
+                }
+
+                function hoverText(r) {
+                    return fDate(r.t) + ' ' + fTime(r.t) + ' · ' + L(KAT[r.k].de, KAT[r.k].en) + ' · ' + fMs(r.ec) + ' mS/cm' +
+                           (isFinite(r.temp) ? ' · ' + r.temp.toFixed(1) + ' °C' : '') +
+                           (r.over ? L(' · über Messbereich', ' · over range') : '') + (r.noTemp ? L(' · ohne Temperaturfühler', ' · no temperature probe') : '');
+                }
+
+                function renderCards() {
+                    const lastOf = k => { for (let i = E.rows.length - 1; i >= 0; i--) if (E.rows[i].k === k) return i; return -1; };
+                    const prevOf = (k, before) => { for (let i = before - 1; i >= 0; i--) if (E.rows[i].k === k) return E.rows[i]; return null; };
+                    $('ecCards').innerHTML = KAT.map((kat, k) => {
+                        const head = '<div class="ch-c-title">' + L(kat.de, kat.en) + '</div>';
+                        const li = lastOf(k);
+                        if (li < 0) return '<div class="ch-card" style="border-left-color:' + kat.color + ';">' + head + '<div class="ch-c-sub">' + L('Noch keine Messung', 'No measurement yet') + '</div></div>';
+                        const r = E.rows[li], p = prevOf(k, li);
+                        const sub = fDate(r.t) + ' ' + fTime(r.t) + (isFinite(r.temp) ? ' · ' + r.temp.toFixed(1) + ' °C' : '');
+                        let delta = '';
+                        if (p) {
+                            const d = (r.ec - p.ec) / 1000, pc = p.ec > 0 ? (r.ec - p.ec) / p.ec * 100 : 0;
+                            delta = L('zur vorigen', 'vs. previous') + ' (' + fDate(p.t) + '): ' + sgn(d.toFixed(2)) + ' mS/cm (' + sgn(pc.toFixed(0)) + ' %)';
+                        }
+                        let extra = '';
+                        if (k === 1) {   // Ruecklauf: Unterschied zur letzten Naehrloesung -- zeigt, was die Pflanzen aufnehmen
+                            const ni = lastOf(0);
+                            if (ni >= 0) {
+                                const n = E.rows[ni], d = (r.ec - n.ec) / 1000;
+                                extra = '<div class="ch-c-sub">' + L('zur Nährlösung', 'vs. nutrient solution') + ' (' + fDate(n.t) + '): ' + sgn(d.toFixed(2)) + ' mS/cm</div>';
+                            }
+                        }
+                        return '<div class="ch-card" style="border-left-color:' + kat.color + ';">' + head +
+                               '<div class="ch-c-main">' + fMs(r.ec) + ' <small>mS/cm</small></div>' +
+                               '<div class="ch-c-sub">' + sub + (r.over ? ' · <b style="color:#e74c3c;">' + L('über Messbereich', 'over range') + '</b>' : '') + '</div>' +
+                               (delta ? '<div class="ch-c-sub">' + delta + '</div>' : '') + extra + '</div>';
+                    }).join('');
+                }
+
+                function renderTable(rows) {
+                    const last = rows.slice(-50).reverse();
+                    if (!last.length) { $('ecTable').innerHTML = ''; return; }
+                    $('ecTable').innerHTML = '<tr><th>' + L('Datum', 'Date') + '</th><th>' + L('Zeit', 'Time') + '</th><th style="text-align:left;">' +
+                        L('Kategorie', 'Category') + '</th><th>mS/cm</th><th>µS/cm</th><th>°C</th><th style="text-align:left;">' + L('Hinweis', 'Note') + '</th></tr>' +
+                        last.map(r => '<tr><td>' + fDate(r.t) + '</td><td>' + fTime(r.t) + '</td><td style="text-align:left;"><span class="ch-sw" style="background:' +
+                            KAT[r.k].color + ';"></span>' + L(KAT[r.k].de, KAT[r.k].en) + '</td><td><b>' + fMs(r.ec) + '</b></td><td>' + Math.round(r.ec) +
+                            '</td><td>' + (isFinite(r.temp) ? r.temp.toFixed(1) : '–') + '</td><td style="text-align:left;">' +
+                            (r.over ? L('über Messbereich', 'over range') : r.noTemp ? L('ohne Temperaturfühler', 'no temperature probe') : '') + '</td></tr>').join('') +
+                        (rows.length > 50 ? '<tr><td colspan="7" style="text-align:left;color:#999;">' + L('… ältere Messungen in der CSV-Datei', '… older measurements in the CSV file') + '</td></tr>' : '');
+                }
+
+                function wire() {
+                    E.wired = true;
+                    $('ecReloadBtn').addEventListener('click', load);
+                    $('ecUploadBtn').addEventListener('click', () => $('ecUploadFile').click());
+                    $('ecUploadFile').addEventListener('change', ev => {
+                        const f = ev.target.files[0]; ev.target.value = '';
+                        if (f) upload(f);
+                    });
+                    $('ecRange').addEventListener('change', () => { if (E.loaded) render(); });
+                    const cv = $('ecCanvas');
+                    cv.addEventListener('mousemove', ev => {
+                        const b = cv.getBoundingClientRect(), mx = ev.clientX - b.left, my = ev.clientY - b.top;
+                        let best = null, bd = 144;
+                        E.pts.forEach(p => { const d = (p.x - mx) ** 2 + (p.y - my) ** 2; if (d < bd) { bd = d; best = p; } });
+                        $('ecHover').textContent = best ? hoverText(best.r) : '';
+                    });
+                    cv.addEventListener('mouseleave', () => { $('ecHover').textContent = ''; });
+                    window.addEventListener('resize', () => { if (E.loaded && $('chartsTab').classList.contains('active')) render(); });
+                }
+
+                const prevShow = window.chartsOnShow, prevLang = window.chartsOnLangChange;
+                window.chartsOnShow = function () {
+                    if (typeof prevShow === 'function') prevShow();
+                    if (!E.wired) wire();
+                    if (!E.loaded) load(); else render();
+                };
+                window.chartsOnLangChange = function () {
+                    if (typeof prevLang === 'function') prevLang();
+                    if (E.loaded) render();
+                };
+            })();
+            </script>
+
+            <!-- ============ Rücklauf (Füllstand-Modul, Datei Ruecklauf.csv) ============ -->
+            <h3 class="section-heading">♻️ <span class="de">Rücklauf</span><span class="en">Return flow</span></h3>
+            <div class="status-box-info ch-toolbar">
+                <label><span class="de">Zeitraum</span><span class="en">Period</span>
+                    <select id="rlRange">
+                        <option class="i18n-opt" value="14" data-de="14 Tage" data-en="14 days">14 Tage</option>
+                        <option class="i18n-opt" value="30" data-de="30 Tage" data-en="30 days">30 Tage</option>
+                        <option class="i18n-opt" value="90" data-de="90 Tage" data-en="90 days">90 Tage</option>
+                        <option class="i18n-opt" value="0" data-de="Alles" data-en="All">Alles</option>
+                    </select></label>
+                <button id="rlReloadBtn" class="ch-btn">🔄 <span class="de">Neu laden</span><span class="en">Reload</span></button>
+                <a class="ch-btn" style="text-decoration:none;" href="/api/logs/download?file=Ruecklauf.csv">⬇ CSV</a>
+                <span id="rlStatus" class="ch-status"></span>
+            </div>
+            <div class="ch-panel">
+                <div class="ch-head"><span class="ch-title"><span class="de">Rücklauf pro Tag (Liter)</span><span class="en">Return per day (litres)</span></span></div>
+                <canvas id="rlCanvas" class="ch-cv" style="height:200px;"></canvas>
+            </div>
+            <div class="ch-hoverbar"><span id="rlHover"></span></div>
+            <div id="rlCards" class="ch-cards"></div>
+            <div style="overflow-x:auto;margin-top:10px;"><table id="rlDays" class="ch-days"></table></div>
+            <div style="overflow-x:auto;margin-top:10px;"><table id="rlLast" class="ch-days"></table></div>
+            <div class="ch-hint">
+                <span class="de">Das Füllstand-Modul meldet jeden Pumpzyklus per WLAN. Liter = vollständige automatische Zyklen × Volumen zwischen den Schwimmern (am Modul eingestellt). „Bis MIN“ = Pumpzeit bis der untere Schwimmer frei ist, „Abstand“ = Zeit seit dem vorigen Zyklus (kürzer = mehr Rücklauf).</span>
+                <span class="en">The level module reports every pump cycle via WiFi. Litres = complete automatic cycles × volume between the floats (set on the module). "To MIN" = pumping time until the lower float is free, "Gap" = time since the previous cycle (shorter = more return flow).</span>
+            </div>
+
+            <script>
+            (function () {
+                'use strict';
+                const FILE = 'Ruecklauf.csv', DAY = 86400000;
+                const R = { rows: [], loaded: false, wired: false, bars: [] };
+                const $ = id => document.getElementById(id);
+                function L(de, en) { return (typeof currentLang !== 'undefined' && currentLang === 'en') ? en : de; }
+                const p2 = n => String(n).padStart(2, '0');
+                const fDate = t => { const d = new Date(t); return p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + '.' + d.getFullYear(); };
+                const fTime = t => { const d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+                const dayKey = t => { const d = new Date(t); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
+                function fDur(s) {
+                    s = Math.round(s);
+                    if (s >= 3600) return Math.floor(s / 3600) + ' h ' + p2(Math.floor(s / 60) % 60) + ' min';
+                    if (s >= 60) return Math.floor(s / 60) + ' min ' + p2(s % 60) + ' s';
+                    return s + ' s';
+                }
+                const ART = { auto: ['auto', 'auto'], manuell: ['manuell', 'manual'], stopp: ['abgebrochen', 'stopped'], alarm: ['Alarm', 'alarm'] };
+                const artTxt = a => ART[a] ? L(ART[a][0], ART[a][1]) : a;
+
+                function parse(txt) {
+                    const lines = txt.split(/\r?\n/), h = (lines[0] || '').split(',');
+                    const di = h.indexOf('Datum'), zi = h.indexOf('Zeit'), du = h.indexOf('Dauer_s'), bm = h.indexOf('BisMIN_s'),
+                          ai = h.indexOf('Art'), vi = h.indexOf('Volumen_ml');
+                    if (di < 0 || zi < 0 || du < 0) return [];
+                    const out = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        if (!lines[i]) continue;
+                        const c = lines[i].split(','), d = (c[di] || '').split('-').map(Number), z = (c[zi] || '').split(':').map(Number);
+                        if (d.length < 3 || !d[0]) continue;
+                        out.push({ t: new Date(d[0], d[1] - 1, d[2], z[0] || 0, z[1] || 0, z[2] || 0).getTime(),
+                                   dur: +c[du] || 0, toMin: bm >= 0 ? (+c[bm] || 0) : 0, art: ai >= 0 ? c[ai] : 'auto',
+                                   ml: vi >= 0 ? (+c[vi] || 0) : 0 });
+                    }
+                    out.sort((a, b) => a.t - b.t);
+                    out.forEach((r, i) => { r.gap = i ? (r.t - out[i - 1].t) / 1000 : NaN; });
+                    return out;
+                }
+
+                async function load() {
+                    $('rlStatus').textContent = L('Lade …', 'Loading …');
+                    try {
+                        const r = await fetch('/api/logs/download?file=' + encodeURIComponent(FILE));
+                        R.rows = r.ok ? parse(await r.text()) : [];
+                        R.loaded = true;
+                        render();
+                    } catch (e) {
+                        $('rlStatus').textContent = L('Fehler beim Laden: ', 'Load error: ') + e;
+                    }
+                }
+
+                // Tage im Zeitraum (auch Tage ohne Zyklus, damit Luecken sichtbar sind)
+                function days() {
+                    const n = parseInt($('rlRange').value) || 0;
+                    const map = {};
+                    for (const r of R.rows) {
+                        const k = dayKey(r.t);
+                        const o = map[k] || (map[k] = { k, t: new Date(new Date(r.t).setHours(0, 0, 0, 0)).getTime(), n: 0, ml: 0, s: 0, toMin: 0, nAuto: 0, gS: 0, gN: 0 });
+                        if (isFinite(r.gap)) { o.gS += r.gap; o.gN++; }
+                        if (r.art === 'auto' || r.art === 'manuell') o.n++;
+                        if (r.art === 'auto') { o.nAuto++; o.toMin += r.toMin; }
+                        o.ml += r.ml; o.s += r.dur;
+                    }
+                    let first = R.rows.length ? new Date(R.rows[0].t).setHours(0, 0, 0, 0) : Date.now();
+                    const today = new Date().setHours(0, 0, 0, 0);
+                    if (n) first = Math.max(first, today - (n - 1) * DAY);
+                    const out = [];
+                    for (let t = first; t <= today; t = new Date(t + DAY * 1.5).setHours(0, 0, 0, 0)) {
+                        const k = dayKey(t);
+                        out.push(map[k] || { k, t, n: 0, ml: 0, s: 0, toMin: 0, nAuto: 0, gS: 0, gN: 0 });
+                    }
+                    return out;
+                }
+
+                function render() {
+                    const ds = days();
+                    const inRange = ds.length ? R.rows.filter(r => r.t >= ds[0].t) : [];
+                    $('rlStatus').textContent = R.rows.length ? inRange.length + L(' von ', ' of ') + R.rows.length + L(' Zyklen', ' cycles')
+                                                              : L('Noch keine Meldungen vom Füllstand-Modul.', 'No reports from the level module yet.');
+                    drawChart(ds);
+                    renderCards(ds);
+                    renderDays(ds);
+                    renderLast();
+                }
+
+                function drawChart(ds) {
+                    const cv = $('rlCanvas'), dpr = window.devicePixelRatio || 1;
+                    const W = cv.clientWidth || 600, H = cv.clientHeight || 200;
+                    cv.width = W * dpr; cv.height = H * dpr;
+                    const ctx = cv.getContext('2d');
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    ctx.clearRect(0, 0, W, H);
+                    R.bars = [];
+                    const PL = 40, PR = 10, PT = 10, PB = 24, pw = W - PL - PR, ph = H - PT - PB;
+                    ctx.font = '11px sans-serif'; ctx.fillStyle = '#888';
+                    if (!ds.length || !R.rows.length) { ctx.fillText(L('Keine Daten', 'No data'), PL, PT + ph / 2); return; }
+                    const maxL = Math.max(1, ...ds.map(d => d.ml / 1000));
+                    const yMax = Math.ceil(maxL * 1.15);
+                    const Y = v => PT + ph - v / yMax * ph;
+                    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1; ctx.textAlign = 'right';
+                    for (let i = 0; i <= 4; i++) {
+                        const v = yMax * i / 4, y = Y(v);
+                        ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + pw, y); ctx.stroke();
+                        ctx.fillText(v.toFixed(v < 10 ? 1 : 0), PL - 5, y + 4);
+                    }
+                    const bw = pw / ds.length, step = Math.max(1, Math.ceil(ds.length / Math.floor(pw / 45)));
+                    ctx.textAlign = 'center';
+                    ds.forEach((d, i) => {
+                        const x = PL + i * bw, v = d.ml / 1000, y = Y(v);
+                        ctx.fillStyle = '#2e86de';
+                        if (v > 0) ctx.fillRect(x + bw * 0.15, y, bw * 0.7, PT + ph - y);
+                        R.bars.push({ x0: x, x1: x + bw, d });
+                        if (i % step === 0) {
+                            const dt = new Date(d.t);
+                            ctx.fillStyle = '#888';
+                            ctx.fillText(p2(dt.getDate()) + '.' + p2(dt.getMonth() + 1) + '.', x + bw / 2, H - 6);
+                        }
+                    });
+                }
+
+                function card(title, main, sub, color) {
+                    return '<div class="ch-card" style="border-left-color:' + (color || '#2e86de') + ';"><div class="ch-c-title">' + title +
+                           '</div><div class="ch-c-main">' + main + '</div>' + (sub ? '<div class="ch-c-sub">' + sub + '</div>' : '') + '</div>';
+                }
+
+                function renderCards(ds) {
+                    if (!R.rows.length) { $('rlCards').innerHTML = ''; return; }
+                    const today = ds[ds.length - 1], yest = ds.length > 1 ? ds[ds.length - 2] : null;
+                    // Mittel ueber die letzten 7 vollstaendigen Tage (ohne heute)
+                    const full = ds.slice(0, -1).slice(-7);
+                    const avg = full.length ? full.reduce((a, d) => a + d.ml, 0) / full.length / 1000 : NaN;
+                    const last = R.rows[R.rows.length - 1];
+                    $('rlCards').innerHTML =
+                        card(L('Heute', 'Today'), (today.ml / 1000).toFixed(1) + ' <small>l</small>', today.n + L(' Zyklen', ' cycles')) +
+                        (yest ? card(L('Gestern', 'Yesterday'), (yest.ml / 1000).toFixed(1) + ' <small>l</small>', yest.n + L(' Zyklen', ' cycles')) : '') +
+                        (isFinite(avg) ? card(L('Ø pro Tag', 'Avg per day'), avg.toFixed(1) + ' <small>l</small>', L('letzte ', 'last ') + full.length + L(' Tage (ohne heute)', ' days (excl. today)')) : '') +
+                        card(L('Letzter Zyklus', 'Last cycle'), fTime(last.t), fDate(last.t) + ' · ' + artTxt(last.art) +
+                             (isFinite(last.gap) ? ' · ' + L('Abstand ', 'gap ') + fDur(last.gap) : ''),
+                             last.art === 'alarm' ? '#e74c3c' : '#2e86de');
+                }
+
+                function renderDays(ds) {
+                    const rows = ds.slice().reverse();
+                    if (!R.rows.length) { $('rlDays').innerHTML = ''; return; }
+                    $('rlDays').innerHTML = '<tr><th style="text-align:left;">' + L('Tag', 'Day') + '</th><th>' + L('Zyklen', 'Cycles') + '</th><th>' +
+                        L('Liter', 'Litres') + '</th><th>' + L('Pumpzeit', 'Pump time') + '</th><th>' + L('Ø bis MIN', 'Avg to MIN') + '</th><th>' +
+                        L('Ø Abstand', 'Avg gap') + '</th></tr>' +
+                        rows.map(d => {
+                            const gap = d.gN ? fDur(d.gS / d.gN) : '–';
+                            return '<tr><td style="text-align:left;">' + fDate(d.t) + '</td><td>' + d.n + '</td><td><b>' + (d.ml / 1000).toFixed(1) +
+                                   '</b></td><td>' + (d.s ? fDur(d.s) : '–') + '</td><td>' + (d.nAuto ? fDur(d.toMin / d.nAuto) : '–') + '</td><td>' + gap + '</td></tr>';
+                        }).join('');
+                }
+
+                function renderLast() {
+                    const last = R.rows.slice(-30).reverse();
+                    if (!last.length) { $('rlLast').innerHTML = ''; return; }
+                    $('rlLast').innerHTML = '<tr><th style="text-align:left;">' + L('Start', 'Start') + '</th><th>' + L('Abstand', 'Gap') + '</th><th>' +
+                        L('Bis MIN', 'To MIN') + '</th><th>' + L('Dauer', 'Duration') + '</th><th>' + L('Liter', 'Litres') + '</th><th style="text-align:left;">' +
+                        L('Art', 'Type') + '</th></tr>' +
+                        last.map(r => '<tr><td style="text-align:left;">' + fDate(r.t) + ' ' + fTime(r.t) + '</td><td>' + (isFinite(r.gap) ? fDur(r.gap) : '–') +
+                            '</td><td>' + fDur(r.toMin) + '</td><td>' + fDur(r.dur) + '</td><td>' + (r.ml ? (r.ml / 1000).toFixed(1) : '–') +
+                            '</td><td style="text-align:left;' + (r.art === 'alarm' ? 'color:#e74c3c;' : '') + '">' + artTxt(r.art) + '</td></tr>').join('');
+                }
+
+                function wire() {
+                    R.wired = true;
+                    $('rlReloadBtn').addEventListener('click', load);
+                    $('rlRange').addEventListener('change', () => { if (R.loaded) render(); });
+                    const cv = $('rlCanvas');
+                    cv.addEventListener('mousemove', ev => {
+                        const b = cv.getBoundingClientRect(), mx = ev.clientX - b.left;
+                        const hit = R.bars.find(p => mx >= p.x0 && mx < p.x1);
+                        $('rlHover').textContent = hit ? fDate(hit.d.t) + ' · ' + (hit.d.ml / 1000).toFixed(1) + ' l · ' + hit.d.n + L(' Zyklen', ' cycles') : '';
+                    });
+                    cv.addEventListener('mouseleave', () => { $('rlHover').textContent = ''; });
+                    window.addEventListener('resize', () => { if (R.loaded && $('chartsTab').classList.contains('active')) render(); });
+                }
+
+                const prevShow = window.chartsOnShow, prevLang = window.chartsOnLangChange;
+                window.chartsOnShow = function () {
+                    if (typeof prevShow === 'function') prevShow();
+                    if (!R.wired) wire();
+                    if (!R.loaded) load(); else render();
+                };
+                window.chartsOnLangChange = function () {
+                    if (typeof prevLang === 'function') prevLang();
+                    if (R.loaded) render();
                 };
             })();
             </script>
@@ -3234,6 +3837,7 @@
                 doseRunning: (s) => 'Läuft... ' + s + 's',
                 doseWaiting: 'Wartet auf Automatik...',
                 openingLabel: 'Öffnung (s)',
+                mengeLabel: 'Menge (Imp)',
                 pauseLabel: 'Pause (min)',
                 tentValues: 'Zeltwerte',
                 startTest: 'Test starten',
@@ -3265,6 +3869,9 @@
                 unpairBtn: 'Entkoppeln',
                 unpairConfirm: id => 'Node ' + id + ' entkoppeln? Er wird danach von dieser Steuerung ignoriert und kann an einer anderen gekoppelt werden.',
                 idConflict: 'ID schon vergeben',
+                noNodeId: 'Node ohne ID',
+                pairIdPrompt: 'Node-ID für dieses Gerät (1-254):',
+                pairIdInvalid: 'Node-ID muss 1-254 sein',
                 fanModeManual: 'Manuell',
                 fanModeAutoHum: 'Automatik Feuchte',
                 fanModeAutoTemp: 'Automatik Temperatur',
@@ -3341,6 +3948,7 @@
                 doseRunning: (s) => 'Running... ' + s + 's',
                 doseWaiting: 'Waiting for automation...',
                 openingLabel: 'Opening (s)',
+                mengeLabel: 'Amount (pulses)',
                 pauseLabel: 'Pause (min)',
                 tentValues: 'Tent Values',
                 startTest: 'Start Test',
@@ -3372,6 +3980,9 @@
                 unpairBtn: 'Unpair',
                 unpairConfirm: id => 'Unpair node ' + id + '? This controller will ignore it afterwards and it can be paired with another one.',
                 idConflict: 'ID already in use',
+                noNodeId: 'Node without ID',
+                pairIdPrompt: 'Node ID for this device (1-254):',
+                pairIdInvalid: 'Node ID must be 1-254',
                 fanModeManual: 'Manual',
                 fanModeAutoHum: 'Auto Humidity',
                 fanModeAutoTemp: 'Auto Temperature',
@@ -3577,7 +4188,7 @@
 
         // ===== Nodes =====
         function nodeTypeName(type) {
-            const names = { 1: t('nodeTypeLight'), 2: t('nodeTypeMultisensor'), 3: t('nodeTypeSocket'), 4: t('nodeTypeSpektrum') };
+            const names = { 1: t('nodeTypeLight'), 2: t('nodeTypeMultisensor'), 3: t('nodeTypeSocket'), 4: t('nodeTypeSpektrum'), 6: 'EC-Meter' };
             return names[type];
         }
         const nodesControlBuilt = new Set();
@@ -3832,8 +4443,8 @@
             for (const n of list) {
                 const typName = nodeTypeName(n.type) || (t('unknown') + ' (0x' + n.type.toString(16) + ')');
                 h += `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #eee;font-size:0.88em;">
-                    <span><strong>Node ${n.id}</strong> · ${typName} · <code>${n.mac}</code>${n.id_conflict ? ' · <span style="color:#dc3545;">' + t('idConflict') + '</span>' : ''}</span>
-                    <button onclick="espnowPair('${n.mac}')" ${n.id_conflict ? 'disabled' : ''}
+                    <span><strong>${n.id ? 'Node ' + n.id : t('noNodeId')}</strong> · ${typName} · <code>${n.mac}</code>${n.id_conflict && !n.can_assign ? ' · <span style="color:#dc3545;">' + t('idConflict') + '</span>' : ''}</span>
+                    <button onclick="espnowPair('${n.mac}', ${n.can_assign ? n.suggest_id : 0})" ${n.id_conflict && !n.can_assign ? 'disabled' : ''}
                         style="background:#27ae60;color:white;border:none;padding:5px 14px;border-radius:4px;cursor:pointer;font-size:0.9em;">${t('pairBtn')}</button>
                 </div>`;
             }
@@ -3841,9 +4452,17 @@
             box.style.display = 'block';
         }
 
-        function espnowPair(mac) {
+        // suggestId > 0: Node kann eine ID zugewiesen bekommen (NODE_CAP_ID_ASSIGN) -- abfragen
+        function espnowPair(mac, suggestId) {
+            let id = 0;
+            if (suggestId > 0) {
+                const v = prompt(t('pairIdPrompt'), suggestId);
+                if (v === null) return;
+                id = parseInt(v);
+                if (!(id >= 1 && id <= 254)) { alert(t('pairIdInvalid')); return; }
+            }
             fetch('/api/espnow/pair', { method: 'POST', headers: {'Content-Type':'application/json'},
-                                        body: JSON.stringify({ mac: mac }) })
+                                        body: JSON.stringify({ mac: mac, id: id }) })
                 .then(r => r.json()).then(d => {
                     if (!d.success) alert(d.error || t('error'));
                     setTimeout(updateNodes, 600);
@@ -4160,6 +4779,19 @@
 
         // Spiegelt schedComputeBrightnessPercent() aus scheduler.cpp: stufenlose Rampe
         // 0-100%, genutzt fuer den Chart wenn Licht-Ausgang = Analogmodul (kein n-Kanal-Stufen).
+        // Kombi-Betrieb (Lichtausgang 3/4): Hauptlampe bis kombiMax, Lichtx4-Zusatzkanaele nur im
+        // Tag-Abschnitt -- spiegelt schedComputeKombi() aus scheduler.cpp
+        function schedKombiMax() { return Math.min(100, Math.max(1, parseInt(document.getElementById('schedKombiMax').value) || 100)); }
+        function schedKombiMask() {
+            let m = 0;
+            for (let i = 1; i <= 4; i++) if (document.getElementById('schedKombiK' + i).checked) m |= 1 << (i - 1);
+            return m;
+        }
+        function schedKombiZusatzAn(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
+            const r = schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd);
+            return schedKombiMask() !== 0 && r.t >= r.de && r.t < r.ds;
+        }
+
         function schedComputeBrightnessPercent(nowMin, dawnStart, dawnEnd, duskStart, duskEnd) {
             const r = schedRel(nowMin, dawnStart, dawnEnd, duskStart, duskEnd);
             if (r.t >= r.dd) return 0;
@@ -4197,9 +4829,11 @@
             const duskEnd   = timeToMin(document.getElementById('schedDuskEnd').value   || '20:00');
             const n = parseInt(document.getElementById('schedNumSsr').value) || 4;
 
+            const kombi = outputLightMode >= 3;
             function stepY(m) {
                 if (outputLightMode >= 1) {
-                    const pct = schedComputeBrightnessPercent(m, dawnStart, dawnEnd, duskStart, duskEnd);
+                    let pct = schedComputeBrightnessPercent(m, dawnStart, dawnEnd, duskStart, duskEnd);
+                    if (kombi) pct = pct * schedKombiMax() / 100;
                     return H - 22 - (pct / 100) * (H - 34);
                 }
                 const active = schedComputeActive(m, n, dawnStart, dawnEnd, duskStart, duskEnd);
@@ -4220,6 +4854,16 @@
                 if (m === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
             }
             ctx.strokeStyle = '#f5b041'; ctx.lineWidth = 2; ctx.stroke();
+
+            // Kombi: Zeitraum mit zugeschaltetem Lichtx4-Zusatzlicht als Band oberhalb der Hauptlampe
+            if (kombi) {
+                ctx.fillStyle = 'rgba(46,204,113,0.35)';
+                for (let m = 0; m < 1440; m++) {
+                    if (!schedKombiZusatzAn(m, dawnStart, dawnEnd, duskStart, duskEnd)) continue;
+                    const y = stepY(m);
+                    ctx.fillRect(mX(m), 12, mX(m + 1) - mX(m) + 0.5, Math.max(0, y - 12));
+                }
+            }
 
             // Stundengitter
             ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
@@ -4265,7 +4909,11 @@
             else if (r.t < r.dd)                { phaseKey = 'phaseDusk'; isTransition = true; }
             el.style.background = isDay ? '#fff3cd' : (isTransition ? '#d4edda' : '#e2e3e5');
             el.style.color = '#333';
-            if (outputLightMode == 1) {
+            if (outputLightMode >= 3) {
+                const pct = Math.round(schedComputeBrightnessPercent(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd) * schedKombiMax() / 100);
+                el.textContent = t(phaseKey) + '  ' + pct + '%' +
+                    (schedKombiZusatzAn(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd) ? ' + Lichtx4' : '');
+            } else if (outputLightMode >= 1) {
                 const pct = schedComputeBrightnessPercent(schedNowMin, dawnStart, dawnEnd, duskStart, duskEnd);
                 el.textContent = t(phaseKey) + '  ' + pct + '%';
             } else {
@@ -4294,6 +4942,10 @@
                 document.getElementById('schedDawnEnd').value   = minToTime(d.dawn_end);
                 document.getElementById('schedDuskStart').value = minToTime(d.dusk_start);
                 document.getElementById('schedDuskEnd').value   = minToTime(d.dusk_end);
+                document.getElementById('schedKombiMax').value  = d.kombi_max || 100;
+                const km = (d.kombi_mask === undefined) ? 15 : d.kombi_mask;
+                for (let i = 1; i <= 4; i++)
+                    document.getElementById('schedKombiK' + i).checked = !!(km & (1 << (i - 1)));
                 schedNowMin   = d.now_min || 0;
                 schedAnchorMin = schedNowMin;
                 schedAnchorMs  = Date.now();
@@ -4312,6 +4964,8 @@
                 dawn_end:    timeToMin(document.getElementById('schedDawnEnd').value),
                 dusk_start:  timeToMin(document.getElementById('schedDuskStart').value),
                 dusk_end:    timeToMin(document.getElementById('schedDuskEnd').value),
+                kombi_max:   schedKombiMax(),
+                kombi_mask:  schedKombiMask(),
             };
             const st = document.getElementById('schedSaveStatus');
             fetch('/api/scheduler/save', {
@@ -5023,10 +5677,10 @@
                 manual_percent: parseInt(document.getElementById('fanManualPercent').value),
                 hum_min:        parseInt(document.getElementById('fanHumMin').value),
                 hum_max:        parseInt(document.getElementById('fanHumMax').value),
-                temp_min:       parseInt(document.getElementById('fanTempMin').value),
-                temp_max:       parseInt(document.getElementById('fanTempMax').value),
+                temp_min:       Math.round(parseFloat(document.getElementById('fanTempMin').value) * 10) / 10,
+                temp_max:       Math.round(parseFloat(document.getElementById('fanTempMax').value) * 10) / 10,
                 temp_mode:      parseInt(document.getElementById('fanTempMode').value),
-                temp_cap_diff:  parseInt(document.getElementById('fanTempCapDiff').value),
+                temp_cap_diff:  Math.round(parseFloat(document.getElementById('fanTempCapDiff').value) * 10) / 10,
                 min_speed:      parseInt(document.getElementById('fanMinSpeed').value),
                 max_speed:      parseInt(document.getElementById('fanMaxSpeed').value),
             };
@@ -5046,6 +5700,8 @@
         function updateSchedNumSsrVisibility(lightOutput) {
             const row = document.getElementById('schedNumSsrRow');
             if (row) row.style.display = (lightOutput == 0) ? 'grid' : 'none';
+            const kRow = document.getElementById('schedKombiRow');
+            if (kRow) kRow.style.display = (lightOutput >= 3) ? 'block' : 'none';
         }
 
         // Gemeinsame Auswertung von /api/output: Status-Badges, Analog-Statuszeile und den
@@ -5065,8 +5721,8 @@
             // Fan-Badge bei GP8403 setzt updateFanStatus() selbst (aus /api/fan online).
             const badgeLicht = document.getElementById('badge_licht');
             if (badgeLicht) {
-                if (d.light_output == 1) badgeLicht.style.background = d.analog_online ? '#28a745' : '#dc3545';
-                else if (d.light_output == 2) badgeLicht.style.background = d.gp8403_online ? '#28a745' : '#dc3545';
+                if (d.light_output == 1 || d.light_output == 3) badgeLicht.style.background = d.analog_online ? '#28a745' : '#dc3545';
+                else if (d.light_output == 2 || d.light_output == 4) badgeLicht.style.background = d.gp8403_online ? '#28a745' : '#dc3545';
             }
             const badgeFan = document.getElementById('badge_fan');
             if (badgeFan && d.fan_output == 1) badgeFan.style.background = d.analog_online ? '#28a745' : '#dc3545';
@@ -5074,7 +5730,7 @@
             // Verbindungsart-Suffix: -R fuer RS485 (Lichtx4/MARS/Analogmodul), kein Suffix
             // fuer GP8403 (lokaler I2C-DAC, weder RS485 noch ESP-NOW).
             const lichtSuffix = document.getElementById('badge_licht_suffix');
-            if (lichtSuffix) lichtSuffix.textContent = (d.light_output == 0 || d.light_output == 1) ? '-R' : '';
+            if (lichtSuffix) lichtSuffix.textContent = (d.light_output == 2) ? '' : '-R';   // nur reiner GP8403 ohne RS485
             const fanSuffix = document.getElementById('badge_fan_suffix');
             if (fanSuffix) fanSuffix.textContent = (d.fan_output == 0 || d.fan_output == 1) ? '-R' : '';
 
@@ -5578,6 +6234,7 @@
                 if (!ventilKonfigGeladen) {
                     // Einmalig: Konfig-Karten mit Eingabefeldern aufbauen (Konfiguration-Seite)
                     document.getElementById('druckaufbau').value     = d.druckaufbau_s;
+                    document.getElementById('dosierModus').value     = d.nach_menge ? '1' : '0';
                     document.getElementById('gleicheZeiten').checked = d.gleiche_zeiten;
                     let html = '';
                     for (let i = 0; i < d.behaelter.length; i++) {
@@ -5591,8 +6248,11 @@
                             <div class="behaelter-zeiten-individual" style="margin-top:8px;">
                                 <div style="font-size:0.78em;color:#888;margin-bottom:3px;">☀ <span class="de">Lichtphase</span><span class="en">Light phase</span></div>
                                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;margin-bottom:8px;">
-                                    <label style="font-size:0.9em;">${t('openingLabel')}<br>
+                                    <label class="dos-zeit" style="font-size:0.9em;">${t('openingLabel')}<br>
                                         <input type="number" id="oeffnung${i}" min="1" max="60" value="${b.oeffnungszeit_s}" style="width:100%;padding:4px;">
+                                    </label>
+                                    <label class="dos-menge" style="font-size:0.9em;display:none;">${t('mengeLabel')}<br>
+                                        <input type="number" id="menge${i}" min="1" max="255" value="${b.menge_imp}" style="width:100%;padding:4px;">
                                     </label>
                                     <label style="font-size:0.9em;">${t('pauseLabel')}<br>
                                         <input type="number" id="pause${i}" min="1" max="60" value="${b.pausenzeit_min}" style="width:100%;padding:4px;">
@@ -5600,8 +6260,11 @@
                                 </div>
                                 <div style="font-size:0.78em;color:#888;margin-bottom:3px;">🌙 <span class="de">Dunkelphase</span><span class="en">Dark phase</span></div>
                                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-                                    <label style="font-size:0.9em;">${t('openingLabel')}<br>
+                                    <label class="dos-zeit" style="font-size:0.9em;">${t('openingLabel')}<br>
                                         <input type="number" id="oeffnung${i}Dunkel" min="1" max="60" value="${b.oeffnungszeit_s_dunkel}" style="width:100%;padding:4px;">
+                                    </label>
+                                    <label class="dos-menge" style="font-size:0.9em;display:none;">${t('mengeLabel')}<br>
+                                        <input type="number" id="menge${i}Dunkel" min="1" max="255" value="${b.menge_imp_dunkel}" style="width:100%;padding:4px;">
                                     </label>
                                     <label style="font-size:0.9em;">${t('pauseLabel')}<br>
                                         <input type="number" id="pause${i}Dunkel" min="1" max="60" value="${b.pausenzeit_min_dunkel}" style="width:100%;padding:4px;">
@@ -5616,8 +6279,11 @@
                         document.getElementById('pauseGemeinsam').value          = d.behaelter[0].pausenzeit_min;
                         document.getElementById('oeffnungGemeinsamDunkel').value = d.behaelter[0].oeffnungszeit_s_dunkel;
                         document.getElementById('pauseGemeinsamDunkel').value    = d.behaelter[0].pausenzeit_min_dunkel;
+                        document.getElementById('mengeGemeinsam').value          = d.behaelter[0].menge_imp;
+                        document.getElementById('mengeGemeinsamDunkel').value    = d.behaelter[0].menge_imp_dunkel;
                     }
                     updateGleicheZeitenVisibility();
+                    updateDosierModus();
                     ventilKonfigGeladen = true;
                 }
             }).catch(() => {});
@@ -5664,7 +6330,23 @@
             });
         }
 
+        // Dosierung nach Zeit/Menge: zeigt je nach Modus die Oeffnungszeit- oder die Impulsfelder
+        // (beide Werte bleiben gespeichert, umschalten verliert nichts).
+        function updateDosierModus() {
+            const menge = document.getElementById('dosierModus')?.value === '1';
+            document.querySelectorAll('.dos-zeit').forEach(el => el.style.display = menge ? 'none' : '');
+            document.querySelectorAll('.dos-menge').forEach(el => el.style.display = menge ? '' : 'none');
+        }
+
         function applyGleicheZeiten() {
+            const m  = document.getElementById('mengeGemeinsam').value;
+            const md = document.getElementById('mengeGemeinsamDunkel').value;
+            for (let i = 0; i < BEHAELTER_ANZAHL; i++) {
+                const mEl  = document.getElementById('menge' + i);
+                const mdEl = document.getElementById('menge' + i + 'Dunkel');
+                if (mEl  && m)  mEl.value  = m;
+                if (mdEl && md) mdEl.value = md;
+            }
             const o  = document.getElementById('oeffnungGemeinsam').value;
             const p  = document.getElementById('pauseGemeinsam').value;
             const od = document.getElementById('oeffnungGemeinsamDunkel').value;
@@ -5694,6 +6376,10 @@
                 if (p)  document.getElementById('pauseGemeinsam').value          = p;
                 if (od) document.getElementById('oeffnungGemeinsamDunkel').value = od;
                 if (pd) document.getElementById('pauseGemeinsamDunkel').value    = pd;
+                const m  = document.getElementById('menge0')?.value;
+                const md = document.getElementById('menge0Dunkel')?.value;
+                if (m)  document.getElementById('mengeGemeinsam').value          = m;
+                if (md) document.getElementById('mengeGemeinsamDunkel').value    = md;
                 applyGleicheZeiten();
             } else {
                 saveVentilConfig();
@@ -5732,12 +6418,15 @@
             const body = {
                 druckaufbau_s:  parseInt(document.getElementById('druckaufbau').value) || 0,
                 gleiche_zeiten: document.getElementById('gleicheZeiten').checked,
+                nach_menge:     document.getElementById('dosierModus').value === '1',
                 behaelter: [...Array(BEHAELTER_ANZAHL).keys()].map(i => ({
                     aktiv:                  document.getElementById('aktiv' + i)?.checked ?? false,
                     oeffnungszeit_s:        parseInt(document.getElementById('oeffnung' + i)?.value ?? 5),
                     pausenzeit_min:         parseInt(document.getElementById('pause' + i)?.value ?? 5),
                     oeffnungszeit_s_dunkel: parseInt(document.getElementById('oeffnung' + i + 'Dunkel')?.value ?? 5),
-                    pausenzeit_min_dunkel:  parseInt(document.getElementById('pause' + i + 'Dunkel')?.value ?? 5)
+                    pausenzeit_min_dunkel:  parseInt(document.getElementById('pause' + i + 'Dunkel')?.value ?? 5),
+                    menge_imp:              parseInt(document.getElementById('menge' + i)?.value ?? 40),
+                    menge_imp_dunkel:       parseInt(document.getElementById('menge' + i + 'Dunkel')?.value ?? 40)
                 }))
             };
             fetch('/api/ventile/config', {

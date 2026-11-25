@@ -170,7 +170,7 @@ static espnow_node_t* pair_node(const uint8_t* mac, uint8_t node_id, uint8_t nod
 
 // Unbekannter Node hat sich gemeldet: nur merken (fuer "Neu gefunden" im Webinterface),
 // nicht antworten.
-static void note_discovered(const uint8_t* mac, uint8_t node_id, uint8_t node_type) {
+static void note_discovered(const uint8_t* mac, uint8_t node_id, uint8_t node_type, uint8_t caps) {
     espnow_discovered_t* slot = nullptr;
     for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
         if (espnow_discovered[i].valid && memcmp(espnow_discovered[i].mac, mac, 6) == 0) { slot = &espnow_discovered[i]; break; }
@@ -184,22 +184,25 @@ static void note_discovered(const uint8_t* mac, uint8_t node_id, uint8_t node_ty
     memcpy(slot->mac, mac, 6);
     slot->node_id      = node_id;
     slot->node_type    = node_type;
+    slot->caps         = caps;
     slot->last_seen_ms = millis();
     slot->valid        = true;
 }
 
 // Liefert den gekoppelten Node zu dieser MAC, sonst nullptr (Node nur als "neu gefunden" vermerkt).
-static espnow_node_t* paired_or_discover(const uint8_t* mac, uint8_t node_id, uint8_t node_type) {
+static espnow_node_t* paired_or_discover(const uint8_t* mac, uint8_t node_id, uint8_t node_type,
+                                         uint8_t caps = 0) {
     espnow_node_t* node = find_by_mac(mac);
     if (node) return node;
-    note_discovered(mac, node_id, node_type);
+    note_discovered(mac, node_id, node_type, caps);
     return nullptr;
 }
 
 // ========== Paketverarbeitung (loop-Kontext) ==========
 
 static void handle_register(const uint8_t* mac, const espnow_packet_t& pkt) {
-    espnow_node_t* node = paired_or_discover(mac, pkt.node_id, pkt.payload_len > 0 ? pkt.payload[0] : 0);
+    espnow_node_t* node = paired_or_discover(mac, pkt.node_id, pkt.payload_len > 0 ? pkt.payload[0] : 0,
+                                             pkt.payload_len > 1 ? pkt.payload[1] : 0);
     if (!node) return;
     if (pkt.payload_len > 0 && pkt.payload[0] != node->node_type) {
         node->node_type = pkt.payload[0];   // z. B. Steckdose per NODECLEAR auf Licht-SSR umgestellt
@@ -213,8 +216,15 @@ static void handle_register(const uint8_t* mac, const espnow_packet_t& pkt) {
     ack.node_id     = 0;
     ack.msg_type    = MSG_REGISTER_ACK;
     ack.seq         = master_seq++;
-    ack.payload_len = 1;
-    ack.payload[0]  = pkt.node_id;
+    // Die gespeicherte ID (Zuordnung per MAC) -- ein Node mit NODE_CAP_ID_ASSIGN uebernimmt
+    // sie, aeltere Nodes pruefen nur, ob sie ihrer eigenen entspricht (beim Koppeln
+    // sichergestellt, siehe espnow_pair()).
+    ack.payload_len = 2;
+    ack.payload[0]  = node->node_id;
+    ack.payload[1]  = ACK_FLAG_ID_ASSIGN;
+    if (pkt.node_id != node->node_id)
+        dbgPrintf("[ESP-NOW] Node %u meldet sich mit ID %u -- bekommt ID %u\n",
+                  node->node_id, pkt.node_id, node->node_id);
     send_pkt(mac, &ack);
 }
 
@@ -239,6 +249,7 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
     if (pkt.payload_len > 0) {
         if (pkt.payload[0] == SUBTYPE_RELAY_STATUS)    inferred = NODE_TYPE_SOCKET;
         else if (pkt.payload[0] == SUBTYPE_PWM_STATUS) inferred = NODE_TYPE_LIGHT;
+        else if (pkt.payload[0] == SUBTYPE_EC_MEASUREMENT) inferred = NODE_TYPE_EC_METER;
     }
     espnow_node_t* node = paired_or_discover(mac, pkt.node_id, inferred);
     if (!node) return;
@@ -281,7 +292,7 @@ static void handle_sensor_data(const uint8_t* mac, const espnow_packet_t& pkt) {
 #endif
 
     if (sensor_cb)
-        sensor_cb(pkt.node_id, node->node_type, pkt.payload, pkt.payload_len);
+        sensor_cb(node->node_id, node->node_type, pkt.payload, pkt.payload_len);
 }
 
 static void process(const recv_evt_t& evt) {
@@ -379,15 +390,31 @@ void loopEspNow() {
     }
 }
 
-const char* espnow_pair(const uint8_t* mac) {
+bool espnow_id_in_use(uint8_t node_id) { return find_by_id(node_id) != nullptr; }
+
+uint8_t espnow_suggest_id(const espnow_discovered_t& d) {
+    if (d.node_id != NODE_ID_UNASSIGNED && d.node_id != 0xFF && !find_by_id(d.node_id)) return d.node_id;
+    for (int id = 1; id < 255; id++)
+        if (!find_by_id((uint8_t)id)) return (uint8_t)id;
+    return 0;
+}
+
+const char* espnow_pair(const uint8_t* mac, uint8_t node_id) {
     espnow_discovered_t* d = nullptr;
     for (int i = 0; i < ESPNOW_MAX_DISCOVERED; i++)
         if (espnow_discovered[i].valid && memcmp(espnow_discovered[i].mac, mac, 6) == 0) { d = &espnow_discovered[i]; break; }
     if (!d)                    return "Node nicht (mehr) in der Liste";
     if (find_by_mac(mac))      return "Node ist bereits gekoppelt";
-    if (find_by_id(d->node_id)) return "Node-ID ist schon an einen anderen Node vergeben (am Node per NODECLEAR aendern)";
-    if (!pair_node(mac, d->node_id, d->node_type)) return "Knotenliste voll";
-    return nullptr;   // Node meldet sich mit dem naechsten REGISTER (alle 3-30 s) und bekommt dann ein ACK
+    bool canAssign = d->caps & NODE_CAP_ID_ASSIGN;
+    if (node_id == 0) node_id = d->node_id;
+    if (!canAssign && node_id != d->node_id)
+        return "Node-Firmware zu alt fuer ID-Vergabe -- Node erst aktualisieren";
+    if (node_id == NODE_ID_UNASSIGNED || node_id == 0xFF) return "Node-ID muss 1..254 sein";
+    if (find_by_id(node_id))
+        return canAssign ? "Node-ID ist schon an einen anderen Node vergeben -- andere waehlen"
+                         : "Node-ID ist schon an einen anderen Node vergeben (Node-Firmware zu alt fuer ID-Vergabe)";
+    if (!pair_node(mac, node_id, d->node_type)) return "Knotenliste voll";
+    return nullptr;   // Node meldet sich mit dem naechsten REGISTER (alle 1-30 s), bekommt ACK + ID
 }
 
 int espnow_unpair(uint8_t node_id) {

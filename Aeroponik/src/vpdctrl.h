@@ -28,10 +28,10 @@ struct VpdConfig {
     int8_t  leaf_offset;    // Zehntel °C, Blatt = Luft + Offset (bei Licht an), z.B. -15 = -1,5 °C
     bool    use_humid;      // Befeuchter folgt der VPD-Regelung
     bool    use_fan;        // Abluftluefter folgt der VPD-Regelung
-    uint8_t temp_max;       // °C -- darueber Luefter hoch, egal was der VPD sagt
+    float   temp_max;       // °C (0,1 °C Schritte) -- darueber Luefter hoch, egal was der VPD sagt
     uint8_t hum_max;        // %rH -- darueber Befeuchter aus + Luefter hoch (Schimmelschutz)
     uint8_t alarm_min;      // Minuten ausserhalb des Zielbereichs bis zur Benachrichtigung, 0 = aus
-    uint8_t temp_min;       // °C -- darunter wird die Abluft fuer den VPD nicht weiter hochgefahren
+    float   temp_min;       // °C (0,1 °C Schritte) -- darunter wird die Abluft fuer den VPD nicht weiter hochgefahren
                             // (kuehlt sonst nachts aus), Feuchtegrenze hat weiter Vorrang
 };
 

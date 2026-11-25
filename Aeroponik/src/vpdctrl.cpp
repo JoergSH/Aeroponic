@@ -39,10 +39,16 @@ void saveVpdConfig() {
     EEPROM.write(b + 6,  (uint8_t)vpdConfig.leaf_offset);
     EEPROM.write(b + 7,  vpdConfig.use_humid ? 1 : 0);
     EEPROM.write(b + 8,  vpdConfig.use_fan ? 1 : 0);
-    EEPROM.write(b + 9,  vpdConfig.temp_max);
+    // Temperaturgrenzen: ganze Grad an den alten Adressen (b+9, b+12 -- aeltere Firmware liest
+    // dort weiter einen gueltigen, abgerundeten Wert), Zehntel seit 1.21.13 in b+13 / b+14.
+    const int tmax10 = (int)lroundf(vpdConfig.temp_max * 10.0f);
+    const int tmin10 = (int)lroundf(vpdConfig.temp_min * 10.0f);
+    EEPROM.write(b + 9,  tmax10 / 10);
     EEPROM.write(b + 10, vpdConfig.hum_max);
     EEPROM.write(b + 11, vpdConfig.alarm_min);
-    EEPROM.write(b + 12, vpdConfig.temp_min);
+    EEPROM.write(b + 12, tmin10 / 10);
+    EEPROM.write(b + 13, tmax10 % 10);
+    EEPROM.write(b + 14, tmin10 % 10);
     EEPROM.write(EEPROM_VPD_MAGIC_ADDR, EEPROM_VPD_MAGIC_BYTE);
     EEPROM.commit();
 }
@@ -59,12 +65,16 @@ void loadVpdConfig() {
         vpdConfig.leaf_offset = (int8_t)EEPROM.read(b + 6);
         vpdConfig.use_humid   = EEPROM.read(b + 7) == 1;
         vpdConfig.use_fan     = EEPROM.read(b + 8) == 1;
-        vpdConfig.temp_max    = EEPROM.read(b + 9);
+        uint8_t tmaxZ = EEPROM.read(b + 13), tminZ = EEPROM.read(b + 14);   // vor 1.21.13 unbeschrieben (0xFF)
+        if (tmaxZ > 9) tmaxZ = 0;
+        if (tminZ > 9) tminZ = 0;
+        vpdConfig.temp_max    = EEPROM.read(b + 9) + tmaxZ / 10.0f;
         vpdConfig.hum_max     = EEPROM.read(b + 10);
         vpdConfig.alarm_min   = EEPROM.read(b + 11);
-        vpdConfig.temp_min    = EEPROM.read(b + 12);   // kam in 1.21.2 dazu, vorher 0xFF
+        vpdConfig.temp_min    = EEPROM.read(b + 12) + tminZ / 10.0f;   // kam in 1.21.2 dazu, vorher 0xFF
         if (vpdConfig.phase >= VPD_PHASE_COUNT) vpdConfig.phase = VPD_PHASE_WACHSTUM;
         if (vpdConfig.temp_min < 5 || vpdConfig.temp_min > 30) { vpdConfig.temp_min = 18; saveVpdConfig(); }
+        if (vpdConfig.temp_max < 18 || vpdConfig.temp_max > 40) { vpdConfig.temp_max = 28; saveVpdConfig(); }
     } else {
         vpdConfig.enabled     = false;
         vpdConfig.phase       = VPD_PHASE_WACHSTUM;

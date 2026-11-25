@@ -20,6 +20,48 @@ bool storage_init(SPIClass &spi) {
 
 bool storage_is_ok() { return sdOk; }
 
+void storage_log_ec(time_t ts, const char* kategorie, uint16_t ec25, bool tempOk, float temp,
+                    uint16_t ecRaw, bool overrange) {
+    if (!sdOk) return;
+    struct tm t;
+    gmtime_r(&ts, &t);   // RTC laeuft auf Ortszeit, siehe storage_log()
+    const char* path = "/" EC_LOG_NAME;
+    bool isNew = !SD.exists(path);
+    File f = SD.open(path, FILE_APPEND);
+    if (!f) {
+        dbgPrintf("[SD] Öffnen fehlgeschlagen: %s\n", path);
+        return;
+    }
+    if (isNew) f.println("Datum,Zeit,Kategorie,EC25_uS,EC25_mS,Temp_C,EC_roh_uS,Hinweis");
+    char line[128];
+    const char* hinweis = overrange ? "ueber Messbereich" : (!tempOk ? "ohne Temperaturfuehler" : "");
+    char tempTxt[8] = "";
+    if (tempOk) snprintf(tempTxt, sizeof(tempTxt), "%.1f", temp);
+    snprintf(line, sizeof(line), "%04d-%02d-%02d,%02d:%02d:%02d,%s,%u,%.2f,%s,%u,%s",
+             t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec,
+             kategorie, ec25, ec25 / 1000.0f, tempTxt, ecRaw, hinweis);
+    f.println(line);
+    f.close();
+}
+
+void storage_log_ruecklauf(const char* datum, const char* zeit, uint32_t dauer_s, uint32_t bisMin_s,
+                           const char* art, uint32_t volumen_ml) {
+    if (!sdOk) return;
+    const char* path = "/" RUECKLAUF_LOG_NAME;
+    bool isNew = !SD.exists(path);
+    File f = SD.open(path, FILE_APPEND);
+    if (!f) {
+        dbgPrintf("[SD] Öffnen fehlgeschlagen: %s\n", path);
+        return;
+    }
+    if (isNew) f.println("Datum,Zeit,Dauer_s,BisMIN_s,Art,Volumen_ml");
+    char line[96];
+    snprintf(line, sizeof(line), "%s,%s,%lu,%lu,%s,%lu", datum, zeit, (unsigned long)dauer_s,
+             (unsigned long)bisMin_s, art, (unsigned long)volumen_ml);
+    f.println(line);
+    f.close();
+}
+
 void storage_log(time_t ts, const LogEntry &e) {
     if (!sdOk) return;
     // ts kommt aus rtc.now().unixtime() und ist bereits Lokalzeit (die RTC laeuft auf Ortszeit,
@@ -36,13 +78,13 @@ void storage_log(time_t ts, const LogEntry &e) {
         // Bereits vorhandene Tagesdatei kann noch das alte, kuerzere Spaltenformat haben
         // (vor Erweiterung um Raum/Zelt/Luefter/CO2/Luftbefeuchtung/Duesen-Durchfluss). In dem
         // Fall beiseitelegen statt Zeilen mit unterschiedlicher Spaltenzahl zu mischen. Pruefung
-        // auf ein Merkmal des neuesten Formats (aktuell die VPD-Regelungsspalten) faengt
+        // auf ein Merkmal des neuesten Formats (aktuell die EC-Meter-Spalten) faengt
         // automatisch auch alle aelteren Formate.
         File check = SD.open(filename, FILE_READ);
         if (check) {
             String firstLine = check.readStringUntil('\n');
             check.close();
-            if (firstLine.indexOf("VPD_Soll_max") < 0) {
+            if (firstLine.indexOf("EC_VE_Temp_C") < 0) {
                 // Mehrere Formatwechsel am selben Tag (mehrere Updates): nie ein vorhandenes
                 // _alt ueberschreiben, sondern _alt2, _alt3 ... verwenden (sonst Datenverlust).
                 char oldName[32];
@@ -69,7 +111,9 @@ void storage_log(time_t ts, const LogEntry &e) {
                    "ImpulseBehaelter1,DauerBehaelter1_s,ImpulseBehaelter2,DauerBehaelter2_s,"
                    "ImpulseBehaelter3,DauerBehaelter3_s,ImpulseBehaelter4,DauerBehaelter4_s,Laufzeit_min,NeustartGrund,Lichtx4Starts,Lichtx4Grund,Netzaussetzer,NetzaussetzerMax_ms,"
                    "CO2Steckdose,HumidSteckdose,WLAN_dBm,WLAN_Abbrueche,EspNow_online,HeapMin_kB,"
-                   "MS2_Abfragen,MS2_Timeouts,VPD_Blatt_kPa,VPD_Soll_min,VPD_Soll_max");
+                   "MS2_Abfragen,MS2_Timeouts,VPD_Blatt_kPa,VPD_Soll_min,VPD_Soll_max,"
+                   "EC_Naehr_uS,EC_Naehr_Temp_C,EC_Rueck_uS,EC_Rueck_Temp_C,EC_CalMag_uS,EC_CalMag_Temp_C,"
+                   "EC_Roh_uS,EC_Roh_Temp_C,EC_VE_uS,EC_VE_Temp_C");
     }
 
     char zeit[9];
@@ -109,6 +153,10 @@ void storage_log(time_t ts, const LogEntry &e) {
     line += "," + (e.vpdOk ? String(e.vpdBlatt, 2)   : String("")) +
             "," + (e.vpdOk ? String(e.vpdSollMin, 2) : String("")) +
             "," + (e.vpdOk ? String(e.vpdSollMax, 2) : String(""));
+    for (uint8_t k = 0; k < EC_LOG_KATS; k++) {
+        line += "," + (e.ecValid[k] ? String(e.ecUs[k]) : String("")) +
+                "," + (e.ecValid[k] && e.ecTempOk[k] ? String(e.ecTemp[k], 1) : String(""));
+    }
 
     f.println(line);
     f.close();
@@ -130,6 +178,71 @@ void storage_list_logs(void (*cb)(const char *name, size_t size, void *ctx), voi
         file = root.openNextFile();
     }
     root.close();
+}
+
+// ---------- Upload EC-Messungen.csv ----------
+static const char* EC_TMP_PATH = "/EC-Messungen.tmp";
+static File   ecUpFile;
+static size_t ecUpBytes = 0;
+static bool   ecUpTooBig = false;
+
+bool storage_ec_upload_begin() {
+    if (!sdOk) return false;
+    if (ecUpFile) ecUpFile.close();
+    if (SD.exists(EC_TMP_PATH)) SD.remove(EC_TMP_PATH);
+    ecUpFile   = SD.open(EC_TMP_PATH, FILE_WRITE);
+    ecUpBytes  = 0;
+    ecUpTooBig = false;
+    return (bool)ecUpFile;
+}
+
+bool storage_ec_upload_write(const uint8_t* buf, size_t len) {
+    if (!ecUpFile || ecUpTooBig) return false;
+    if (ecUpBytes + len > EC_UPLOAD_MAX_BYTES) { ecUpTooBig = true; return false; }
+    size_t w = ecUpFile.write(buf, len);
+    ecUpBytes += w;
+    return w == len;
+}
+
+void storage_ec_upload_abort() {
+    if (ecUpFile) ecUpFile.close();
+    if (sdOk && SD.exists(EC_TMP_PATH)) SD.remove(EC_TMP_PATH);
+    ecUpBytes = 0;
+}
+
+bool storage_ec_upload_finish(char* err, size_t errLen) {
+    if (!ecUpFile) { snprintf(err, errLen, "Kein Upload aktiv / SD fehlt"); return false; }
+    ecUpFile.close();
+    if (ecUpTooBig) { storage_ec_upload_abort(); snprintf(err, errLen, "Datei zu gross (max. 2 MB)"); return false; }
+    if (ecUpBytes == 0) { storage_ec_upload_abort(); snprintf(err, errLen, "Datei leer"); return false; }
+
+    // Kopfzeile pruefen -- dieselben Pflichtspalten, die die Auswertung braucht
+    File chk = SD.open(EC_TMP_PATH, FILE_READ);
+    String head = chk ? chk.readStringUntil('\n') : String();
+    if (chk) chk.close();
+    head.trim();
+    if (head.indexOf("Datum") < 0 || head.indexOf("Kategorie") < 0 || head.indexOf("EC25_uS") < 0 ||
+        head.indexOf(';') >= 0) {
+        storage_ec_upload_abort();
+        snprintf(err, errLen, "Kopfzeile passt nicht (erwartet Datum,Zeit,Kategorie,EC25_uS,... mit Komma getrennt)");
+        return false;
+    }
+
+    const char* path = "/" EC_LOG_NAME;
+    const char* bak  = "/" EC_BACKUP_NAME;
+    if (SD.exists(path)) {
+        if (SD.exists(bak)) SD.remove(bak);
+        if (!SD.rename(path, bak)) { storage_ec_upload_abort(); snprintf(err, errLen, "Sicherung der alten Datei fehlgeschlagen"); return false; }
+    }
+    if (!SD.rename(EC_TMP_PATH, path)) {
+        if (SD.exists(bak)) SD.rename(bak, path);   // alte Datei zurueck
+        storage_ec_upload_abort();
+        snprintf(err, errLen, "Ersetzen fehlgeschlagen -- alte Datei unveraendert");
+        return false;
+    }
+    dbgPrintf("[SD] %s ersetzt (%u Bytes hochgeladen, alte Datei als %s)\n", EC_LOG_NAME, (unsigned)ecUpBytes, EC_BACKUP_NAME);
+    ecUpBytes = 0;
+    return true;
 }
 
 File storage_open_log(const char *name) {

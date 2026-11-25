@@ -4,6 +4,25 @@
 #include <math.h>
 
 LightScheduleConfig schedConfig;
+LichtKombiConfig    kombiConfig = { 100, 0x0F };
+
+static void loadKombiConfig() {
+    if (EEPROM.read(EEPROM_LICHTKOMBI_MAGIC_ADDR) == EEPROM_LICHTKOMBI_MAGIC_BYTE) {
+        kombiConfig.max_pct = EEPROM.read(EEPROM_LICHTKOMBI_BASE);
+        kombiConfig.mask    = EEPROM.read(EEPROM_LICHTKOMBI_BASE + 1) & 0x0F;
+        if (kombiConfig.max_pct < 1 || kombiConfig.max_pct > 100) kombiConfig.max_pct = 100;
+    } else {
+        kombiConfig = { 100, 0x0F };
+        saveKombiConfig();
+    }
+}
+
+void saveKombiConfig() {
+    EEPROM.write(EEPROM_LICHTKOMBI_BASE,     kombiConfig.max_pct);
+    EEPROM.write(EEPROM_LICHTKOMBI_BASE + 1, kombiConfig.mask);
+    EEPROM.write(EEPROM_LICHTKOMBI_MAGIC_ADDR, EEPROM_LICHTKOMBI_MAGIC_BYTE);
+    EEPROM.commit();
+}
 
 void loadScheduleConfig() {
     if (EEPROM.read(EEPROM_SCHED_MAGIC_ADDR) == EEPROM_SCHED_MAGIC_BYTE) {
@@ -18,6 +37,7 @@ void loadScheduleConfig() {
         schedConfig.num_ssr     = SCHED_DEFAULT_NUM_SSR;
         saveScheduleConfig();
     }
+    loadKombiConfig();
 }
 
 void saveScheduleConfig() {
@@ -98,6 +118,19 @@ uint8_t schedComputeBrightnessPercent(uint16_t now_min) {
     if (frac < 0.0f) frac = 0.0f;
     if (frac > 1.0f) frac = 1.0f;
     return (uint8_t)roundf(frac * 100.0f);
+}
+
+void schedComputeKombi(uint16_t now_min, uint8_t& analogPct, uint8_t& mask) {
+    analogPct = (uint8_t)roundf(schedComputeBrightnessPercent(now_min) * kombiConfig.max_pct / 100.0f);
+    SchedRel r = schedRel(now_min);
+    // Zusatzkanaele nur im Tag-Abschnitt: morgens erst, wenn die Hauptlampe ihr Max erreicht hat,
+    // abends sofort mit Beginn des Untergangs aus (danach dimmt die Hauptlampe herunter).
+    mask = (r.t >= r.de && r.t < r.ds) ? kombiConfig.mask : 0x00;
+}
+
+void schedComputeKombiManual(uint8_t manualPct, uint8_t& analogPct, uint8_t& mask) {
+    analogPct = (uint8_t)roundf(manualPct * kombiConfig.max_pct / 100.0f);
+    mask = (manualPct >= 100) ? kombiConfig.mask : 0x00;
 }
 
 bool schedLichtIstAn(uint16_t now_min) {

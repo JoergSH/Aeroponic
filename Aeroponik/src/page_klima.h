@@ -14,6 +14,8 @@ R"rawliteral(
                             <option value="0" class="i18n-opt" data-de="Lichtx4 (Relais)" data-en="Lichtx4 (Relay)">Lichtx4 (Relais)</option>
                             <option value="1" class="i18n-opt" data-de="RS485-Analogmodul (0-10V)" data-en="RS485 analog module (0-10V)">RS485-Analogmodul (0-10V)</option>
                             <option value="2" class="i18n-opt" data-de="GP8403 I2C-DAC (0-10V)" data-en="GP8403 I2C DAC (0-10V)">GP8403 I2C-DAC (0-10V)</option>
+                            <option value="3" class="i18n-opt" data-de="Kombi: Analogmodul (0-10V) + Lichtx4" data-en="Combined: analog module (0-10V) + Lichtx4">Kombi: Analogmodul (0-10V) + Lichtx4</option>
+                            <option value="4" class="i18n-opt" data-de="Kombi: GP8403 (0-10V) + Lichtx4" data-en="Combined: GP8403 (0-10V) + Lichtx4">Kombi: GP8403 (0-10V) + Lichtx4</option>
                         </select>
                     </div>
                     <div>
@@ -60,6 +62,31 @@ R"rawliteral(
                         <input type="number" id="schedNumSsr" min="1" max="4" value="4"
                             oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Anzahl SSR-Ausgänge (1–4)</span><span class="en">Number of SSR outputs (1–4)</span></div>
+                    </div>
+                </div>
+
+                <div id="schedKombiRow" style="display:none;margin-bottom:16px;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                        <div>
+                            <div class="status-label"><span class="de">Hauptlampe max (%)</span><span class="en">Main lamp max (%)</span></div>
+                            <input type="number" id="schedKombiMax" min="1" max="100" step="1" value="100"
+                                oninput="schedDirty();drawSchedChart();updateSchedPhase()" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Helligkeit des 0-10V-Ausgangs am Tag</span><span class="en">0-10V output brightness during the day</span></div>
+                        </div>
+                        <div>
+                            <div class="status-label"><span class="de">Zusatzlicht Lichtx4</span><span class="en">Extra light Lichtx4</span></div>
+                            <div style="display:flex;gap:12px;padding:7px 0;flex-wrap:wrap;">
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK1" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K1</label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK2" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K2</label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK3" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K3</label>
+                                <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="schedKombiK4" onchange="schedDirty();drawSchedChart();updateSchedPhase()" style="width:16px;height:16px;">K4</label>
+                            </div>
+                            <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Kanäle, die tagsüber dazukommen</span><span class="en">Channels added during the day</span></div>
+                        </div>
+                    </div>
+                    <div style="font-size:0.78em;color:#888;margin-top:8px;">
+                        <span class="de">Morgens dimmt die Hauptlampe im Sonnenaufgang bis zu ihrem Max-Wert hoch, danach werden die Lichtx4-Kanäle zugeschaltet. Abends gehen die Lichtx4-Kanäle mit Beginn des Sonnenuntergangs aus, dann dimmt die Hauptlampe herunter.</span>
+                        <span class="en">In the morning the main lamp ramps up to its max during sunrise, then the Lichtx4 channels are switched on. In the evening the Lichtx4 channels switch off at the start of sunset, then the main lamp dims down.</span>
                     </div>
                 </div>
 
@@ -333,8 +360,8 @@ R"rawliteral(
                     </div>
                 </div>
                 <div class="vpd-grid">
-                    <div><div class="status-label"><span class="de">Temperatur min (°C)</span><span class="en">Temperature min (°C)</span></div><input type="number" id="vpdTempMin" class="vpd-in" min="5" max="30" step="1"><div class="vpd-hint"><span class="de">Darunter wird die Abluft für den VPD nicht weiter erhöht, sondern langsam zurückgenommen (kühlt sonst nachts aus).</span><span class="en">Below this, exhaust is not increased for VPD but slowly reduced (would otherwise cool the tent at night).</span></div></div>
-                    <div><div class="status-label"><span class="de">Temperatur max (°C)</span><span class="en">Temperature max (°C)</span></div><input type="number" id="vpdTempMax" class="vpd-in" min="18" max="40" step="1"><div class="vpd-hint"><span class="de">Ab 1 °C darunter fährt der Lüfter hoch – hat Vorrang.</span><span class="en">From 1 °C below the fan ramps up – takes priority.</span></div></div>
+                    <div><div class="status-label"><span class="de">Temperatur min (°C)</span><span class="en">Temperature min (°C)</span></div><input type="number" id="vpdTempMin" class="vpd-in" min="5" max="30" step="0.1"><div class="vpd-hint"><span class="de">Darunter wird die Abluft für den VPD nicht weiter erhöht, sondern langsam zurückgenommen (kühlt sonst nachts aus).</span><span class="en">Below this, exhaust is not increased for VPD but slowly reduced (would otherwise cool the tent at night).</span></div></div>
+                    <div><div class="status-label"><span class="de">Temperatur max (°C)</span><span class="en">Temperature max (°C)</span></div><input type="number" id="vpdTempMax" class="vpd-in" min="18" max="40" step="0.1"><div class="vpd-hint"><span class="de">Ab 1 °C darunter fährt der Lüfter hoch – hat Vorrang.</span><span class="en">From 1 °C below the fan ramps up – takes priority.</span></div></div>
                     <div><div class="status-label"><span class="de">Feuchte max (%)</span><span class="en">Humidity max (%)</span></div><input type="number" id="vpdHumMax" class="vpd-in" min="40" max="95" step="1"><div class="vpd-hint"><span class="de">Darüber Befeuchter aus und Lüfter hoch (Schimmelschutz) – hat Vorrang.</span><span class="en">Above: humidifier off and fan up (mould protection) – takes priority.</span></div></div>
                     <div><div class="status-label"><span class="de">Alarm nach (min)</span><span class="en">Alarm after (min)</span></div><input type="number" id="vpdAlarmMin" class="vpd-in" min="0" max="240" step="5"><div class="vpd-hint"><span class="de">So lange außerhalb des Zielbereichs → Benachrichtigung. 0 = aus.</span><span class="en">Out of range this long → notification. 0 = off.</span></div></div>
                 </div>
@@ -448,8 +475,8 @@ R"rawliteral(
                             night_min: Math.round(n('vpdNightMin') * 100), night_max: Math.round(n('vpdNightMax') * 100),
                             leaf_offset: Math.round(n('vpdLeafOffset') * 10),
                             use_humid: $('vpdUseHumid').checked, use_fan: $('vpdUseFan').checked,
-                            temp_max: Math.round(n('vpdTempMax')), hum_max: Math.round(n('vpdHumMax')), alarm_min: Math.round(n('vpdAlarmMin')),
-                            temp_min: Math.round(n('vpdTempMin'))
+                            temp_max: Math.round(n('vpdTempMax') * 10) / 10, hum_max: Math.round(n('vpdHumMax')), alarm_min: Math.round(n('vpdAlarmMin')),
+                            temp_min: Math.round(n('vpdTempMin') * 10) / 10
                         };
                         const st = $('vpdSaveStatus');
                         fetch('/api/vpd/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -565,17 +592,17 @@ R"rawliteral(
                     </div>
                     <div>
                         <div class="status-label" id="fanTempMinLabel"><span class="de">Temperatur Min (°C)</span><span class="en">Temperature Min (°C)</span></div>
-                        <input type="number" id="fanTempMin" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <input type="number" id="fanTempMin" min="0" max="60" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darunter: Mindestdrehzahl</span><span class="en">Below: minimum speed</span></div>
                     </div>
                     <div>
                         <div class="status-label" id="fanTempMaxLabel"><span class="de">Temperatur Max (°C)</span><span class="en">Temperature Max (°C)</span></div>
-                        <input type="number" id="fanTempMax" min="0" max="60" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <input type="number" id="fanTempMax" min="0" max="60" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;"><span class="de">Darüber: Höchstdrehzahl</span><span class="en">Above: maximum speed</span></div>
                     </div>
                     <div id="fanTempCapSection" style="grid-column:1/-1;">
                         <div class="status-label"><span class="de">Differenz-Bremse (°C, 0 = aus)</span><span class="en">Differential Cap (°C, 0 = off)</span></div>
-                        <input type="number" id="fanTempCapDiff" min="0" max="30" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
+                        <input type="number" id="fanTempCapDiff" min="0" max="30" step="0.1" style="width:100%;padding:7px;border:1px solid #ddd;border-radius:4px;">
                         <div style="font-size:0.78em;color:#888;margin-top:3px;">
                             <span class="de">Ist die Differenz Zelt−Raum kleiner als dieser Wert, läuft der Lüfter trotz obiger Rampe nur mit Mindestdrehzahl.</span>
                             <span class="en">If the tent−room difference is below this value, the fan runs at minimum speed regardless of the ramp above.</span>

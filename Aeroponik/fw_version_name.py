@@ -33,6 +33,11 @@ def copy_versioned(source, target, env):
     dst = os.path.join(out_dir, name)
     shutil.copyfile(src, dst)
     print("fw_version_name: " + dst)
+    # Passende .elf mit ablegen -- nur damit lassen sich Backtraces aus einem Watchdog-/Panic-
+    # Log (USB-Logger) spaeter Funktionen zuordnen (xtensa-esp32s3-elf-addr2line -e <elf> 0x...)
+    elf = os.path.splitext(src)[0] + ".elf"
+    if os.path.exists(elf):
+        shutil.copyfile(elf, os.path.join(out_dir, name[:-4] + ".elf"))
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", copy_versioned)

@@ -31,13 +31,20 @@ typedef struct {
     uint8_t  mac[6];
     uint8_t  node_id;
     uint8_t  node_type;
+    uint8_t  caps;           // NODE_CAP_* aus dem REGISTER (0 = aeltere Firmware)
     uint32_t last_seen_ms;
     bool     valid;
 } espnow_discovered_t;
 extern espnow_discovered_t espnow_discovered[ESPNOW_MAX_DISCOVERED];
 
-// Koppelt einen Node aus espnow_discovered[] fest. Rueckgabe nullptr = ok, sonst Fehlertext.
-const char* espnow_pair(const uint8_t* mac);
+// Koppelt einen Node aus espnow_discovered[] fest. node_id = gewuenschte ID (0 = die, mit der
+// sich der Node meldet; nur Nodes mit NODE_CAP_ID_ASSIGN koennen eine andere bekommen).
+// Rueckgabe nullptr = ok, sonst Fehlertext.
+const char* espnow_pair(const uint8_t* mac, uint8_t node_id);
+// Vorschlag fuer "Koppeln": die eigene ID des Nodes, falls frei und gueltig, sonst die
+// kleinste freie ab 1.
+uint8_t espnow_suggest_id(const espnow_discovered_t& d);
+bool    espnow_id_in_use(uint8_t node_id);
 // Loest die Kopplung (Node bekommt MSG_UNPAIR und vergisst den Master). Rueckgabe: frei
 // gewordener Index in espnow_nodes[] (fuer zugehoerige Daten des Aufrufers), -1 = unbekannt.
 int espnow_unpair(uint8_t node_id);

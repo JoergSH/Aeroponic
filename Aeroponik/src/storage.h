@@ -6,6 +6,8 @@
 #include <SD.h>
 #include "valves.h"   // BEHAELTER_ANZAHL
 
+#define EC_LOG_KATS 5   // = EC_KAT_ANZAHL (espnow_protocol.h), Reihenfolge der CSV-Spalten
+
 struct LogEntry {
     float    tempVorrat, tempPflanze;
     float    druckBar;
@@ -60,7 +62,26 @@ struct LogEntry {
     uint16_t ms2Timeouts;   // davon unbeantwortet
     bool     vpdOk;         // VPD-Regelung aktiv mit gueltigen Werten (sonst leere Spalten)
     float    vpdBlatt, vpdSollMin, vpdSollMax;   // kPa
+    // EC-Meter (Handgeraet): Messung je Kategorie seit der vorigen Zeile, Index = EC_KAT_* - 1:
+    // 0 = Naehrloesung, 1 = Ruecklauf, 2 = Cal-Mag, 3 = Rohwasser, 4 = VE-Wasser
+    // (ecValid=false -> leere Zellen)
+    bool     ecValid[EC_LOG_KATS];
+    uint16_t ecUs[EC_LOG_KATS];       // uS/cm bei 25 °C
+    bool     ecTempOk[EC_LOG_KATS];   // false -> ohne Temperaturfuehler gemessen, Temperaturzelle leer
+    float    ecTemp[EC_LOG_KATS];
 };
+
+// Eigene, tagesuebergreifende Datei fuer die EC-Messungen vom EC-Meter (eine Zeile je Messung).
+// Liegt neben den Tageslogs, ist daher auch ueber /api/logs/download abrufbar.
+#define EC_LOG_NAME "EC-Messungen.csv"
+void storage_log_ec(time_t ts, const char* kategorie, uint16_t ec25, bool tempOk, float temp,
+                    uint16_t ecRaw, bool overrange);
+
+// Ruecklauf vom Fuellstand-Modul (Abpumpe, meldet jeden Pumpzyklus per WLAN, /api/ruecklauf).
+// Eigene, tagesuebergreifende Datei, eine Zeile je Zyklus.
+#define RUECKLAUF_LOG_NAME "Ruecklauf.csv"
+void storage_log_ruecklauf(const char* datum, const char* zeit, uint32_t dauer_s, uint32_t bisMin_s,
+                           const char* art, uint32_t volumen_ml);
 
 bool storage_init(SPIClass &spi);
 bool storage_is_ok();
@@ -77,5 +98,15 @@ bool storage_delete_log(const char *name);
 
 // Loescht alle *.csv/*.txt-Dateien im Root der SD-Karte. Rueckgabe: Anzahl geloeschter Dateien.
 uint32_t storage_delete_all_logs();
+
+// Upload einer bearbeiteten EC-Messungen.csv: wird erst in eine Temp-Datei geschrieben und
+// erst nach erfolgreicher Pruefung (Kopfzeile) gegen die bestehende Datei getauscht -- die
+// bisherige bleibt als EC_BACKUP_NAME erhalten. finish() liefert false + Fehlertext.
+#define EC_BACKUP_NAME "EC-Messungen_vorher.csv"
+#define EC_UPLOAD_MAX_BYTES (2UL * 1024UL * 1024UL)
+bool storage_ec_upload_begin();
+bool storage_ec_upload_write(const uint8_t* buf, size_t len);
+bool storage_ec_upload_finish(char* err, size_t errLen);
+void storage_ec_upload_abort();
 
 #endif

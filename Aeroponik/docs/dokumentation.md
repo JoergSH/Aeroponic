@@ -93,6 +93,7 @@ typedef struct {
 | `NODE_TYPE_SENSOR` | `0x02` | Multisensor — Luft + Spektrum |
 | `NODE_TYPE_SOCKET` | `0x03` | Steckdose — allgemeine manuelle Steuerung |
 | `NODE_TYPE_LIGHT_SSR` | `0x05` | Licht-SSR — automatisch per Beleuchtungs-Scheduler (Legacy, siehe [Steckdosen](#steckdosen)) |
+| `NODE_TYPE_EC_METER` | `0x06` | EC-Handmessgerät — sendet Messungen auf Tastendruck, meist ausgeschaltet (kein Offline-Alarm), Messungen landen in `EC-Messungen.csv`, siehe [Daten-Log & Download](#daten-log--download) |
 
 > Der frühere separate ESP-NOW-Spektrum-Node (`NODE_TYPE_SPEKTRUM 0x04`, Subtyp `SUBTYPE_LICHT_SUMMARY 0x20`) wurde entfernt — PPFD/Spektrum kommen jetzt über RS485 (`0x20`, Multisensor bzw. Multimodul).
 
@@ -105,6 +106,7 @@ typedef struct {
 | `MSG_HEARTBEAT` | `0x03` | Node → Master | Keep-Alive / Online-Check |
 | `MSG_HEARTBEAT_ACK` | `0x04` | Master → Node | Heartbeat bestätigt |
 | `MSG_SENSOR_DATA` | `0x10` | Node → Master | Messdaten (Subtyp in payload[0]) |
+| `MSG_DATA_ACK` | `0x11` | Master → Node | Messdaten empfangen (seq = Sequenznummer des Datenpakets) |
 | `MSG_COMMAND` | `0x20` | Master → Node | Steuerbefehl |
 | `MSG_OTA_START` | `0x40` | Master → Node | OTA-Update (AP-Passwort in payload[0..7]) |
 | `MSG_OTA_ACK` | `0x41` | Node → Master | OTA wird gestartet |
@@ -115,9 +117,10 @@ typedef struct {
 Damit zwei Steuerungen in Funkreichweite sich nicht gegenseitig die Nodes wegnehmen, sind Nodes fest an einen Master gekoppelt:
 
 - **Node:** speichert die MAC des Masters, der ihm das erste `MSG_REGISTER_ACK` schickt, im NVS (`espnow_pair`/`master`) und nimmt danach nur noch Pakete von dieser MAC an. Ungekoppelt nimmt er ausschließlich ein `REGISTER_ACK` an — Schaltbefehle eines fremden Masters werden nie ausgeführt.
-- **Master:** führt eine Kopplungsliste im NVS (`espnow_pair`/`nodes`) und antwortet nur Nodes daraus. Unbekannte Nodes erscheinen im Webinterface (System → Node-Steuerung) unter *Neu gefunden* und werden erst per **Koppeln** angenommen. Ist die Node-ID schon an einen anderen Node vergeben, ist Koppeln gesperrt (ID am Node per `NODECLEAR` ändern).
-- **Entkoppeln:** im Webinterface an der Node-Karte (Master schickt `MSG_UNPAIR`) oder am Node selbst **BOOT-Taster 3 s im Betrieb halten** bzw. serieller Befehl `UNPAIR`. Danach koppelt sich der Node mit der ersten Steuerung, die ihn in ihrer Liste hat oder bei der man *Koppeln* drückt — vor dem Umzug an eine andere Steuerung also auch an der alten entkoppeln.
-- Es gibt kein automatisches Koppeln — auch nach dem Update auf eine Master-Firmware mit Kopplung muss jeder vorhandene Node einmal per *Koppeln* angenommen werden.
+- **Master:** führt eine Kopplungsliste im NVS (`espnow_pair`/`nodes`, Zuordnung über die MAC) und antwortet nur Nodes daraus. Unbekannte Nodes erscheinen im Webinterface (System → Node-Steuerung) unter *Neu gefunden* und werden erst per **Koppeln** angenommen.
+- **Node-ID beim Koppeln:** Beim Koppeln fragt das Webinterface nach der Node-ID und schlägt eine freie vor (die bisherige des Nodes, falls frei, sonst die kleinste freie ab 1). Der Master schickt sie im `REGISTER_ACK` mit (`payload[0]` = ID, `payload[1]` = `ACK_FLAG_ID_ASSIGN`), der Node übernimmt und speichert sie. Nodes, die das können, melden das im `REGISTER` (`payload[1]` = `NODE_CAP_ID_ASSIGN`); ein Node ohne gespeicherte ID meldet sich mit ID 0 („Node ohne ID“).
+- **Entkoppeln:** im Webinterface an der Node-Karte (Master schickt `MSG_UNPAIR`) oder am Node selbst serieller Befehl `UNPAIR` (Steckdose zusätzlich: **BOOT-Taster 3 s im Betrieb halten**). Danach koppelt sich der Node mit der ersten Steuerung, die ihn in ihrer Liste hat oder bei der man *Koppeln* drückt — vor dem Umzug an eine andere Steuerung also auch an der alten entkoppeln. Die Node-ID bleibt dabei als Vorschlag erhalten.
+- Es gibt kein automatisches Koppeln.
 
 #### Befehls-Subtypen (MSG_COMMAND · payload[0])
 
@@ -136,6 +139,7 @@ Damit zwei Steuerungen in Funkreichweite sich nicht gegenseitig die Nodes wegneh
 | `SUBTYPE_AIR` | `0x01` | [1..2] Temp×100 int16BE · [3..4] RH×100 uint16BE · [5..6] eCO₂ ppm · [7..8] TVOC ppb |
 | `SUBTYPE_LIGHT` | `0x02` | [1..2] PPFD×10 uint16BE · [3..16] Spektralkanäle 415–680 nm |
 | `SUBTYPE_RELAY_STATUS` | `0x10` | [1] Relais-Bitmaske (Bit0–3 = R1–R4) |
+| `SUBTYPE_EC_MEASUREMENT` | `0x12` | [1] Kategorie (1 Nährlösung · 2 Rücklauf · 3 Cal-Mag · 4 Rohwasser · 5 VE-Wasser) · [2..3] EC 25 °C µS/cm · [4..5] Temp×100 · [6] Flags (Bit0 Temperatur gültig, Bit1 Messbereich überschritten) · [7..8] EC roh · [9] Mess-ID (Wiederholungen derselben Messung haben dieselbe ID) · optional [10..11] pH×100 · [12] pH-Flags |
 
 ---
 
@@ -195,13 +199,32 @@ Die vier Magnetventile, die Hauptpumpe und die Umwälzpumpe sind direkte GPIO-Au
 | `VENTIL3_PIN` | MV3 | Zulauf Behälter 3 |
 | `VENTIL4_PIN` | MV4 | Zulauf Behälter 4 |
 
+#### Hydraulik
+
+```
+Ansaugfilter im Vorratsbehälter (1/2"-Kunststoff-Schalldämpfer aus der Pneumatik)
+  → Pumpe
+  → Druckspeicher 2 L
+  → Druckregler (optional)
+  → Filter (optional, erhöht die Lebensdauer der Filter in den Düsen)
+  → Magnetventile MV1–MV4
+  → Düsen mit eigenem Filter, im jeweiligen Behälter
+```
+
+Der Durchflussmesser sitzt in der gemeinsamen Zulaufleitung vor den Magnetventilen (siehe [Durchflussmesser & Düsen-Überwachung](#durchflussmesser--düsen-überwachung)). Gesprüht wird aus dem Druckspeicher: Die Pumpe füllt ihn vor jedem Sprühvorgang auf und ist aus, solange ein Düsenventil offen ist.
+
 #### Hauptpumpe & Umwälzpumpe
 
-Die Hauptpumpe (`PUMPE_GPIO`) schaltet automatisch mit, sobald irgendein Behälter gerade aktiv wässert (Ventil offen) — unabhängig davon, ob im normalen oder im Batch-Zeitmodus (siehe [Ventilsteuerung](#funktionen)).
+Die Hauptpumpe (`PUMPE_GPIO`) läuft nur im **Druckaufbau** vor jedem Sprühvorgang — unabhängig davon, ob im normalen oder im Batch-Zeitmodus (siehe [Ventilsteuerung](#funktionen)).
 
-**Druckaufbau:** Vor jedem Sprühvorgang läuft die Pumpe eine einstellbare Zeit (Standard 5 s, 0 = aus) bei noch geschlossenem Düsenventil, erst dann öffnet das Ventil. Ablauf je Behälter: Pause → Druckaufbau → Aktiv → Nachlauf. Ohne Druckaufbau sprühte jeder Zyklus mit erst steigendem Druck — Menge und Durchfluss-Impulse schwankten dann deutlich. Gilt auch im Batch-Modus vor jedem einzelnen Behälter (die Pumpe läuft dazwischen weiter) und beim manuellen Einzelzyklus. Voraussetzung: Die Pumpe muss kurz gegen geschlossene Ventile fördern dürfen (Anlage steht unter Druck / Druckschalter).
+**Ablauf je Behälter:** Pause → Druckaufbau → Aktiv → Pause.
 
-**Nachlauf:** Nach dem Schließen des Düsenventils läuft die Pumpe noch einmal dieselbe Zeit weiter (Zustand „Nachlauf“). Gedacht für einen Druckspeicher zwischen Durchflussmesser und Ventilen: Er überbrückt den Druckeinbruch beim Öffnen (die Drosseldüse im Durchflussmesser liefert nicht schnell genug nach) und wird im Nachlauf wieder aufgefüllt. Die Durchflussmessung zählt vom Öffnen bis zum Ende des Nachlaufs, damit auch das aus dem Speicher gesprühte Wasser beim richtigen Behälter landet; als Dauer gilt nur die Ventil-offen-Zeit. Im Batch-Modus öffnet der nächste Behälter direkt nach dem Nachlauf des vorigen (kein eigener Druckaufbau mehr, nur noch vor dem ersten Behälter). Ohne Druckspeicher fließt im Nachlauf praktisch nichts, die Messwerte bleiben gleich. Der manuelle Einzelzyklus hat keinen Nachlauf.
+- **Druckaufbau:** Die Pumpe läuft eine einstellbare Zeit (Einstellung „Druckaufbau (Vorlauf)“, Standard 5 s) bei geschlossenem Düsenventil und füllt den Druckspeicher.
+- **Aktiv:** Das Düsenventil öffnet, die Pumpe geht aus — gesprüht wird aus dem Speicher, bei gleichbleibendem Druck. Der Durchflussmesser zählt nur in dieser Phase.
+- Gilt genauso im Batch-Modus (jeder Behälter mit eigenem Druckaufbau) und beim manuellen Einzelzyklus.
+- **Druckaufbau = 0 s:** kein Druckaufbau, die Pumpe läuft dann während das Ventil offen ist.
+
+Voraussetzung: Die Pumpe muss gegen geschlossene Ventile fördern dürfen (Anlage steht unter Druck / Druckschalter der Pumpe).
 
 Die Umwälzpumpe (`UMWAELZPUMPE_GPIO`, Vorratsbehälter-Zirkulation) läuft in einem konfigurierbaren Lauf-/Pausenzyklus (`laufzeit_s` / `pausenzeit_min`), sobald irgendein Behälter überhaupt aktiviert ist — unabhängig davon, ob dieser Behälter gerade tatsächlich wässert oder nur zwischen zwei Zyklen pausiert. Ist kein Behälter aktiviert, bleibt sie aus.
 
@@ -211,7 +234,7 @@ Die Umwälzpumpe (`UMWAELZPUMPE_GPIO`, Vorratsbehälter-Zirkulation) läuft in e
 
 W5500 (Ethernet) und WiFi laufen gleichzeitig über das lwIP-Stack. Bei Ethernet-Verbindungsaufbau wird automatisch **NTP** abgerufen und die RTC gestellt (Schwellwert: ±60 s Abweichung, sync alle 60 min). Das Webinterface ist auf beiden IPs ohne Codeänderungen verfügbar.
 
-Ohne Router: Master startet als **AP auf Kanal 6** (`ESPNOW_DEFAULT_CHANNEL`). Nodes im "Kein-WLAN"-Modus nutzen denselben Kanal.
+Ohne Router: Master startet als **AP auf Kanal 6** (`ESPNOW_DEFAULT_CHANNEL`). Die Nodes finden den Kanal des Masters selbst (siehe [Erststart & Konfiguration](#erststart--konfiguration)).
 
 #### Ventilsteuerung
 
@@ -220,6 +243,11 @@ Vier unabhängige Bewässerungskreise (MV1–MV4) mit konfigurierbarer Öffnungs
 **Umbau FW 1.19.0 (11/2026):** MV4 war bisher das Rücklaufventil mit optionalem „Rücklauf-Vorlauf“ vor jedem Zyklus; zwei Behälter hingen an einem gemeinsamen Ventil. Die Rückleitung ist jetzt ein Handventil (Kugelhahn), MV4 versorgt Behälter 4, jeder Behälter hat damit sein eigenes Ventil und seine eigenen Durchfluss-Impulse. Der Vorlauf entfällt. Beim ersten Start mit 1.19.0 übernimmt Behälter 4 die Zeiten von Behälter 3, bleibt aber deaktiviert, bis er auf der Ventil-Seite eingeschaltet wird. Die Konfiguration von Behälter 4 liegt in einem eigenen EEPROM-Block (560–565, Sollwert der Düsen-Überwachung 566–569); der EEPROM-Bereich wächst dafür von 570 auf 600 Bytes, vorhandene Einstellungen bleiben erhalten.
 
 Nach einem Neustart wird **sofort** gewässert, statt erst die volle Pausenzeit (bis zu 60 min) abzuwarten.
+
+**Dosierung nach Zeit oder nach Menge** (Einstellung „Dosierung“ unter Druckaufbau):
+
+- **Nach Zeit:** Das Düsenventil bleibt die eingestellte Öffnungszeit offen.
+- **Nach Menge:** Das Düsenventil schließt, sobald die eingestellte Zahl an Durchfluss-Impulsen gezählt ist (je Behälter, getrennt für Licht- und Dunkelphase) — jeder Behälter bekommt so dieselbe Menge, unabhängig davon, wie stark seine Düse sprüht. Die dafür gebrauchte Laufzeit überwacht die [Düsen-Überwachung](#durchflussmesser--düsen-überwachung). Sicherheitslimit: doppelte erwartete Laufzeit (ohne gelernten Sollwert 60 s); dann schließt das Ventil und es geht eine Benachrichtigung raus.
 
 **Manueller Einzelzyklus:** Auf der Aeroponik-Seite lässt sich pro Behälter ein einzelner Gießzyklus von Hand auslösen — das Ventil öffnet einmal für die aktuell gültige Öffnungszeit (Licht- bzw. Dunkelphase) und schließt danach automatisch (`/api/ventile/dose/start`, `/status`, `/cancel`). Die normale Automatik pausiert währenddessen.
 
@@ -609,12 +637,12 @@ Durchflussmesser (YF-S401-ähnlich, Hall-Impulsgeber mit Push-Pull-Ausgang, kein
 
 #### Düsen-Überwachung (`flowmonitor.cpp`)
 
-Beobachtet den Ventilzustand (`behaelterZustand[]`) von außen: Wechselt ein Behälter in den Zustand „Aktiv“, wird der Impulszähler geleert (verwirft Reste aus dem Druckaufbau); gezählt wird bis zum Ende des Nachlaufs (ein Druckspeicher hinter dem Zähler wird erst dann wieder aufgefüllt), als Dauer zählt die Ventil-offen-Zeit. Impulse und Dauer des letzten Zyklus werden je Behälter angezeigt und ins SD-Log geschrieben.
+Beobachtet den Ventilzustand (`behaelterZustand[]`) von außen: Gezählt wird nur, solange das Düsenventil offen ist (Zustand „Aktiv“) — Impulse davor und danach gehören nicht zu dieser Düse und werden verworfen. Impulse und Ventil-offen-Zeit des letzten Zyklus werden je Behälter angezeigt und ins SD-Log geschrieben.
 
 Pro Behälter wird ein **Sollwert** (Impulse/s) geführt:
 
 - Ist noch keiner hinterlegt (0 bzw. per „Sollwerte löschen“ zurückgesetzt), übernimmt das System automatisch den **nächsten abgeschlossenen Gießzyklus** als neue Referenz — keine manuelle Berechnung nötig. Beim Update auf 1.19.0 werden die alten ml/s-Sollwerte verworfen und neu gelernt.
-- Ist einer hinterlegt und der Soll/Ist-Vergleich aktiviert, wird jeder Zyklus mit konfigurierbarer Toleranz (%) verglichen; bei Abweichung nach unten (verstopfte Düse) oder oben (Leck) geht eine [Benachrichtigung](#benachrichtigungen) über alle aktiven Kanäle raus.
+- Ist einer hinterlegt und der Soll/Ist-Vergleich aktiviert, wird jeder Zyklus mit konfigurierbarer Toleranz (%) verglichen; bei Abweichung nach unten (verstopfte Düse) oder oben (Leck) geht eine [Benachrichtigung](#benachrichtigungen) über alle aktiven Kanäle raus. Bei **Dosierung nach Menge** ist die Impulszahl fest — verglichen wird dann die Laufzeit mit der erwarteten (Impulse ÷ Sollwert): länger = Düse setzt zu, kürzer = Leck.
 - „Sollwerte löschen“ setzt alle Werte auf 0 zurück — praktisch nach dem Düsenreinigen oder einem Umbau der Leitungen, damit nicht die alten Werte fälschlich als Abweichung gewertet werden.
 
 SD-Log-Spalten: siehe [Daten-Log & Download](#daten-log--download).
@@ -675,8 +703,16 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `HeapMin_kB` | Kleinster freier Arbeitsspeicher seit dem Start |
 | `MS2_Abfragen` / `MS2_Timeouts` | RS485-Abfragen an den Zelt-Sensor (Adresse 0x20, alle 15 s) seit der vorigen Zeile und wie viele davon unbeantwortet blieben. Eine einzige ausbleibende Antwort genügt, damit der Master den Sensor bis zur nächsten erfolgreichen Abfrage als offline führt (leere Zelt-Spalten) — die Zähler zeigen solche Aussetzer auch zwischen zwei Log-Zeilen (seit FW 1.20.2) |
 | `VPD_Blatt_kPa`, `VPD_Soll_min`, `VPD_Soll_max` | [VPD-Regelung](#vpd-regelung): geregelter Blatt-VPD und aktueller (ggf. gerade wandernder) Zielbereich; leer, wenn die Regelung aus ist (seit FW 1.21.0) |
+| `EC_Naehr_uS`, `EC_Rueck_uS`, `EC_CalMag_uS`, `EC_Roh_uS`, `EC_VE_uS` (je mit `…_Temp_C`) | Messungen vom EC-Handmessgerät je Kategorie (EC bei 25 °C und Messtemperatur), nur in der Zeile direkt nach der Messung |
 
 > **Automatische Migration:** Trifft die Firmware beim Schreiben auf eine bereits vorhandene Tagesdatei mit dem alten, kürzeren Spaltenformat (vor dieser Erweiterung), wird diese zu `_alt.csv` umbenannt (Daten bleiben erhalten) und eine neue Datei mit vollständigem Header begonnen — kein Vermischen unterschiedlicher Spaltenzahlen in einer Datei.
+
+#### Weitere Dateien auf der SD-Karte
+
+| Datei | Inhalt |
+|---|---|
+| `EC-Messungen.csv` | alle Messungen vom EC-Handmessgerät, tagesübergreifend: `Datum,Zeit,Kategorie,EC25_uS,EC25_mS,Temp_C,EC_roh_uS,Hinweis` |
+| `Ruecklauf.csv` | ein abgeschlossener Pumpzyklus des Füllstand-Moduls je Zeile: `Datum,Zeit,Dauer_s,BisMIN_s,Art,Volumen_ml` |
 
 #### Download & Löschen (Konfiguration → Daten-Log)
 
@@ -686,6 +722,8 @@ Eine CSV-Datei pro Tag (`/JJJJ-MM-TT.csv`) auf der MicroSD-Karte, Schreibinterva
 | `/api/logs/download?file=NAME` | GET | Streamt die Datei mit `Content-Disposition: attachment` |
 | `/api/logs/delete` | POST (JSON `{"file":"NAME"}`) | Löscht die Datei (UI fragt vorher per Bestätigungsdialog nach) |
 | `/api/logs/delete-all` | POST | Löscht alle `*.csv`/`*.txt`-Dateien auf der SD-Karte, Antwort enthält die Anzahl (UI fragt vorher nach) |
+| `/api/logs/upload-ec` | POST (multipart) | Ersetzt `EC-Messungen.csv` durch eine bearbeitete Fassung (max. 2 MB; Kopfzeile muss `Datum`, `Kategorie`, `EC25_uS` enthalten). Die bisherige Datei bleibt als `EC-Messungen_vorher.csv` erhalten |
+| `/api/ruecklauf` | POST (JSON) | Meldung eines Pumpzyklus vom Füllstand-Modul: `{"start":"JJJJ-MM-TT hh:mm:ss","dauer_s","bis_min_s","art":"auto\|manuell\|stopp\|alarm","volumen_ml"}` → Zeile in `Ruecklauf.csv`; Wiederholungen mit derselben Startzeit werden ignoriert |
 
 Dateinamen werden serverseitig gegen Pfad-Traversal geprüft (kein `/` oder `..` zulässig).
 
@@ -698,7 +736,9 @@ Diagramme direkt aus den Tageslogs, komplett im Browser berechnet (`page_charts.
 - **Markierungen:** grau hinterlegt = Licht aus (`LichtMaske` = 0), rot gestrichelt ↻ = Neustart (aus `Laufzeit_min`), orange ⚡ = Netzaussetzer, graues ▲ = Zelt-Sensor nicht erreichbar (Zelt-Temperatur und -Feuchte leer). Kurze Messlücken (unter 16 min) werden in den Linien überbrückt, längere unterbrechen sie; Sensor-Aussetzer werden zusätzlich in der Ereignis-Karte und der Tagesübersicht gezählt.
 - **Kennzahlen** für den sichtbaren Ausschnitt: ⌀/min/max je Kurve, getrennt nach Licht an/aus, Anteil VPD im Zielbereich bei Licht, Lichtsumme, Zahl der Neustarts/Netzaussetzer.
 - **Tagesübersicht:** je Tag DLI (mol/m²·d aus PPFD), Lichtstunden, Zelt-Temperatur und -Feuchte Tag/Nacht, VPD bei Licht und Anteil im Zielbereich, Zahl der Gießzyklen, Neustarts. Klick auf eine Zeile springt zu diesem Tag.
-- **Düsen-Auswertung:** jeder Gießzyklus als Punkt, je Behälter ein gleitender Median über 9 Zyklen, Ausreißer (>15 % vom Median) rot umringt. Anzeige als Impulse pro Sekunde (bleibt vergleichbar, wenn die Öffnungszeit geändert wurde) oder Impulse je Zyklus. Je Behälter eine Karte mit Median, Streuung, Trend (letztes gegen erstes Drittel der Zyklen im Ausschnitt), Ausreißern, Abweichung zum Durchschnitt aller Behälter und einer Ampel: 🟢 stabil · 🟠 Trend ≤ −10 % (Düse/Filter setzt sich zu) bzw. ≥ +10 % (Leck, lose Düse) · 🟡 Streuung > 15 % (Luft, Schmutz) · ⚪ weniger als 6 Zyklen.
+- **Düsen-Auswertung:** jeder Gießzyklus als Punkt, je Behälter ein gleitender Median über 9 Zyklen, Ausreißer (>15 % vom Median) rot umringt. Anzeige als **Laufzeit je Zyklus** (Standard, passend zur Dosierung nach Menge), Impulse pro Sekunde (bleibt vergleichbar, wenn Öffnungszeit oder Menge geändert wurden) oder Impulse je Zyklus. Je Behälter eine Karte mit Median, Streuung, Trend (letztes gegen erstes Drittel der Zyklen im Ausschnitt), Ausreißern, Abweichung zum Durchschnitt aller Behälter und einer Ampel: 🟢 stabil · 🟠 Düse/Filter setzt sich zu (Impulse fallen bzw. Laufzeit steigt um ≥ 10 %) oder Leck/lose Düse (umgekehrt) · 🟡 Streuung > 15 % (Luft, Schmutz) · ⚪ weniger als 6 Zyklen.
+- **EC-Messungen** (`EC-Messungen.csv`): Verlauf je Kategorie, Karten mit letzter Messung und Änderung zur vorigen (Rücklauf zusätzlich gegen die letzte Nährlösung), Tabelle der letzten 50 Messungen. „CSV hochladen“ ersetzt die Datei durch eine bearbeitete Fassung — Excel-Format (Semikolon, Dezimalkomma, deutsches Datum) und frei geschriebene Kategorien („Nährlösung“, „VE Wasser“) werden vorher automatisch umgesetzt.
+- **Rücklauf** (`Ruecklauf.csv`): Liter pro Tag als Balken, Karten für heute, gestern, Ø pro Tag (letzte 7 Tage) und den letzten Zyklus mit Abstand zum vorigen; Tagestabelle (Zyklen, Liter, Pumpzeit, Ø Zeit bis MIN, Ø Abstand) und die letzten 30 Zyklen.
 
 Der laufende Tag wird bei „Neu laden“ jedes Mal frisch geholt, ältere Tage nur einmal pro Seitenaufruf.
 
@@ -706,7 +746,7 @@ Der laufende Tag wird bei „Neu laden“ jedes Mal frisch geholt, ältere Tage 
 
 ### Multisensor
 
-**MCU:** ESP32-C3 · Node-ID: `0x02` (compile-time) · wahlweise `ESP-NOW · NODE_TYPE_SENSOR 0x02` oder `RS485 · Adr. 0x20`
+**MCU:** ESP32-C3 · Node-ID: Standard `0x02`, beim Koppeln änderbar · wahlweise `ESP-NOW · NODE_TYPE_SENSOR 0x02` oder `RS485 · Adr. 0x20`
 
 Dieselbe Firmware unterstützt beide Übertragungswege; welcher aktiv ist, wird beim Start festgelegt. Im aktuellen Zelt-Deployment läuft der Node im **RS485-Modus** — Registerbelegung und Poll-Verhalten dazu: [RS485-Multisensor](#rs485-multisensor-zelt).
 
@@ -757,40 +797,12 @@ payload[1] = 0b00000101  // = 0x05
 
 ### Erststart & Konfiguration
 
-#### Steckdosen — Node-ID
+Die ESP-NOW-Nodes (Steckdosen, Multisensor im ESP-NOW-Modus, EC-Handmessgerät) brauchen **kein serielles Setup**:
 
-Beim allerersten Start (NVS-Namespace `"nodecfg"` leer) erscheint im Serial-Monitor:
+1. **Funkkanal:** Der Node meldet sich auf dem zuletzt erfolgreichen Kanal an. Antwortet der Master dort nicht (erster Start, Router hat den Kanal gewechselt, …), geht der Node die Kanäle 1–13 durch (gut 1 s je Kanal) und merkt sich den gefundenen. Der Master funkt auf dem Kanal seines WLAN-Routers, ohne Router auf Kanal 6.
+2. **Koppeln:** Der Node erscheint im Webinterface unter *Neu gefunden*; beim **Koppeln** wird die Node-ID vergeben (siehe [Feste Kopplung](#feste-kopplung-node--steuerung)).
 
-```
-=== ERSTSTART: Node-Konfiguration ===
-Node-ID eingeben (1-254) + Enter (60s Timeout, sonst 3):
-> 10
-[NODE] Gespeichert: Steckdose  ID=0x0A
-```
-
-Gespeichert in NVS `"nodecfg"`: Key `id` (uint8). Mit `NODECLEAR` löschen → Dialog erscheint beim nächsten Boot.
-
-#### WiFi-Kanal / Kein-WLAN-Modus (alle Nodes)
-
-Beim ersten Start ohne gespeicherten Kanal (NVS `"wificfg"` leer):
-
-```
-[WIFI] 3 Netzwerke gefunden
-  [ 1] MeinRouter           Kanal  6  -62 dBm
-  [ 2] Nachbar-AP           Kanal 11  -78 dBm
-  [ 0] Kein WLAN (fester Kanal 6)
-Nummer (0-3) + Enter (60s Timeout):
-> 0
-[WIFI] Kein WLAN, Kanal 6 gespeichert
-```
-
-> **Kanal-Konsistenz:** Alle Nodes und der Master-AP müssen auf demselben Kanal laufen. Der feste Kanal ist als `ESPNOW_DEFAULT_CHANNEL = 6` in allen `espnow_protocol.h`-Dateien definiert. Der Master-AP verwendet diesen Kanal automatisch wenn `USE_ACCESS_POINT = true`.
-
-> **Selbstheilung bei Router-Kanalwechsel:** Ändert der Router nachträglich seinen WLAN-Kanal (Auto-Channel, Neustart nach Stromausfall, …), würde ein Node mit nur einmalig gespeichertem Kanal dauerhaft auf dem alten (jetzt falschen) Kanal hängen bleiben und den Master nie wiederfinden — der Master selbst merkt das automatisch, da er sich bei jedem Boot per `WiFi.begin(ssid, password)` frisch verbindet und so immer den aktuellen Kanal übernimmt. Steckdosen und Multisensor prüfen deshalb bei **jedem Boot** die bekannte SSID per Scan still im Hintergrund nach (kein erneuter Serial-Dialog nötig) und aktualisieren den gespeicherten Kanal bei Abweichung. Zusätzlich läuft alle 12 Stunden im laufenden Betrieb derselbe Scan erneut; ändert sich der Kanal während des Betriebs (ohne Node-Neustart), startet sich der Node selbst neu, um den neuen Kanal zu übernehmen.
-
-#### 60-Sekunden-Timeout
-
-Wenn bei allen Setup-Dialogen (Node-ID, Kanal) innerhalb von 60 Sekunden keine Eingabe erfolgt, wird ein Standardwert verwendet: ID=3 / Kanal 6.
+Gespeichert wird im NVS-Namespace `nodecfg` (`id`, `chan`, beim EC-Handmessgerät zusätzlich die Sendeleistungsstufe `txlvl`). Bricht die Verbindung im Betrieb ab (30 s keine Antwort), meldet sich der Node neu an und sucht nach etwa 6 s erneut den Kanal.
 
 ---
 
@@ -805,18 +817,15 @@ Baudrate **115200** · Zeilenende **LF** oder **CR+LF**
 | `STATUS` | Aktuelle Relais-Bitmaske und Einzelstatus R1–R4 |
 | `MASK <0–15>` | Alle Relais per Dezimalwert setzen (z. B. `MASK 5` → R1+R3 ein) |
 | `R<1–4> <0\|1>` | Einzelrelais schalten (z. B. `R2 1`) |
-| `NODEINFO` | Node-ID und Kopplungsstatus anzeigen |
-| `NODECLEAR` | Node-ID löschen → Erststart-Dialog beim nächsten Neustart |
+| `NODEINFO` | Node-ID, Kanal, Kopplungs- und Verbindungsstatus anzeigen |
 | `UNPAIR` | Kopplung mit dem Master lösen (wie BOOT-Taster 3 s) |
-| `WIFIINFO` | Gespeicherte SSID und Kanal anzeigen |
-| `WIFICLEAR` | WiFi-Konfiguration löschen → Kanal-Scan beim nächsten Neustart |
 
 #### Multisensor
 
 | Kommando | Wirkung |
 |---|---|
-| `WIFIINFO` | Gespeicherte SSID und Kanal anzeigen |
-| `WIFICLEAR` | WiFi-Konfiguration löschen → Kanal-Scan beim nächsten Neustart |
+| `NODEINFO` | Node-ID, Kanal, Kopplungs- und Verbindungsstatus anzeigen (im RS485-Betrieb: Hinweis) |
+| `UNPAIR` | Kopplung mit dem Master lösen (nur ESP-NOW-Betrieb) |
 
 ---
 
@@ -909,6 +918,7 @@ typedef struct {
 | `NODE_TYPE_SENSOR` | `0x02` | Multisensor — air + spectrum |
 | `NODE_TYPE_SOCKET` | `0x03` | Socket — general manual control |
 | `NODE_TYPE_LIGHT_SSR` | `0x05` | Light SSR — automatic via lighting scheduler (legacy, see [Sockets](#sockets)) |
+| `NODE_TYPE_EC_METER` | `0x06` | EC handheld meter — sends measurements on button press, usually switched off (no offline alarm) |
 
 > The former separate ESP-NOW spectrum node (`NODE_TYPE_SPEKTRUM 0x04`, subtype `SUBTYPE_LICHT_SUMMARY 0x20`) has been removed — PPFD/spectrum now come via RS485 (`0x20`, Multisensor or Multimodul).
 
@@ -921,6 +931,7 @@ typedef struct {
 | `MSG_HEARTBEAT` | `0x03` | Node → master | Keep-alive / online check |
 | `MSG_HEARTBEAT_ACK` | `0x04` | Master → node | Heartbeat confirmed |
 | `MSG_SENSOR_DATA` | `0x10` | Node → master | Measurement data (subtype in payload[0]) |
+| `MSG_DATA_ACK` | `0x11` | Master → node | Measurement data received (seq = sequence number of the data packet) |
 | `MSG_COMMAND` | `0x20` | Master → node | Control command |
 | `MSG_OTA_START` | `0x40` | Master → node | OTA update (AP password in payload[0..7]) |
 | `MSG_OTA_ACK` | `0x41` | Node → master | OTA is starting |
@@ -931,9 +942,10 @@ typedef struct {
 So that two controllers within radio range do not take each other's nodes, nodes are paired to one master:
 
 - **Node:** stores the MAC of the master that sends it the first `MSG_REGISTER_ACK` in NVS (`espnow_pair`/`master`) and from then on only accepts packets from that MAC. While unpaired it accepts nothing but a `REGISTER_ACK` — switching commands from a foreign master are never executed.
-- **Master:** keeps a pairing list in NVS (`espnow_pair`/`nodes`) and only answers nodes on it. Unknown nodes appear in the web interface (System → Node Control) under *Newly found* and are only accepted via **Pair**. If the node ID is already used by another node, pairing is blocked (change the ID on the node with `NODECLEAR`).
-- **Unpairing:** in the web interface on the node card (master sends `MSG_UNPAIR`) or on the node itself by **holding the BOOT button for 3 s while running** or the serial command `UNPAIR`. The node then pairs with the first controller that has it on its list or where *Pair* is pressed — so before moving it to another controller, also unpair it on the old one.
-- There is no automatic pairing — even after updating to a master firmware with pairing, each existing node has to be accepted once via *Pair*.
+- **Master:** keeps a pairing list in NVS (`espnow_pair`/`nodes`, matched by MAC) and only answers nodes on it. Unknown nodes appear in the web interface (System → Node Control) under *Newly found* and are only accepted via **Pair**.
+- **Node ID on pairing:** when pairing, the web interface asks for the node ID and suggests a free one (the node's previous ID if free, otherwise the lowest free one from 1). The master sends it in the `REGISTER_ACK` (`payload[0]` = ID, `payload[1]` = `ACK_FLAG_ID_ASSIGN`); the node adopts and stores it. Nodes that support this say so in their `REGISTER` (`payload[1]` = `NODE_CAP_ID_ASSIGN`); a node without a stored ID registers with ID 0 ("node without ID").
+- **Unpairing:** in the web interface on the node card (master sends `MSG_UNPAIR`) or on the node itself with the serial command `UNPAIR` (socket additionally: **hold the BOOT button for 3 s while running**). The node then pairs with the first controller that has it on its list or where *Pair* is pressed — so before moving it to another controller, also unpair it on the old one. The node ID is kept as a suggestion.
+- There is no automatic pairing.
 
 #### Command Subtypes (MSG_COMMAND · payload[0])
 
@@ -952,6 +964,7 @@ So that two controllers within radio range do not take each other's nodes, nodes
 | `SUBTYPE_AIR` | `0x01` | [1..2] temp×100 int16BE · [3..4] RH×100 uint16BE · [5..6] eCO₂ ppm · [7..8] TVOC ppb |
 | `SUBTYPE_LIGHT` | `0x02` | [1..2] PPFD×10 uint16BE · [3..16] spectral channels 415–680 nm |
 | `SUBTYPE_RELAY_STATUS` | `0x10` | [1] relay bitmask (bit0–3 = R1–R4) |
+| `SUBTYPE_EC_MEASUREMENT` | `0x12` | [1] category (1 nutrient solution · 2 return · 3 Cal-Mag · 4 tap water · 5 demineralized water) · [2..3] EC at 25 °C µS/cm · [4..5] temp×100 · [6] flags (bit0 temperature valid, bit1 over range) · [7..8] raw EC · [9] measurement ID (repeats of the same measurement share the ID) · optional [10..11] pH×100 · [12] pH flags |
 
 ---
 
@@ -1011,13 +1024,32 @@ The four solenoid valves, the main pump, and the circulation pump are direct GPI
 | `VENTIL3_PIN` | MV3 | Inlet reservoir 3 |
 | `VENTIL4_PIN` | MV4 | Supply reservoir 4 |
 
+#### Hydraulics
+
+```
+Suction filter in the supply tank (1/2" plastic silencer from pneumatics)
+  → pump
+  → 2 L pressure accumulator
+  → pressure regulator (optional)
+  → filter (optional, extends the life of the filters in the nozzles)
+  → solenoid valves MV1–MV4
+  → nozzles with their own filter, in each reservoir
+```
+
+The flow meter sits in the shared supply line in front of the solenoid valves (see [Flow Sensor & Nozzle Monitoring](#flow-sensor--nozzle-monitoring)). Spraying comes from the accumulator: the pump fills it before every spray cycle and is off while a nozzle valve is open.
+
 #### Main Pump & Circulation Pump
 
-The main pump (`PUMPE_GPIO`) switches on automatically whenever any reservoir is actively watering (valve open) — regardless of whether the normal or batch timing mode is active (see [Valve Control](#features)).
+The main pump (`PUMPE_GPIO`) only runs during the **pressure build-up** before each spray cycle — regardless of whether the normal or batch timing mode is active (see [Valve Control](#features)).
 
-**Pressure build-up:** Before every spray cycle the pump runs for a configurable time (default 5 s, 0 = off) with the nozzle valve still closed; only then does the valve open. Sequence per reservoir: pause → pressure build-up → active → refill. Without it, every cycle sprayed at a still-rising pressure — volume and flow pulses varied noticeably. Also applies in batch mode before each individual reservoir (the pump keeps running in between) and to the manual single cycle. Requirement: the pump must be allowed to run briefly against closed valves (system under pressure / pressure switch).
+**Sequence per reservoir:** pause → pressure build-up → active → pause.
 
-**Refill (Nachlauf):** After the nozzle valve closes, the pump keeps running for the same time again (state "Nachlauf"). Intended for a pressure accumulator between flow meter and valves: it bridges the pressure drop when a valve opens (the restrictor nozzle in the flow meter cannot supply fast enough) and is refilled during this phase. Flow measurement counts from valve opening until the end of the refill, so water sprayed from the accumulator is attributed to the right reservoir; only the valve-open time counts as duration. In batch mode the next reservoir opens directly after the previous one's refill (no separate build-up any more, only before the first reservoir). Without an accumulator practically nothing flows during the refill, so readings stay the same. The manual single cycle has no refill phase.
+- **Pressure build-up:** the pump runs for a configurable time (setting "Pressure build-up", default 5 s) with the nozzle valve closed and fills the accumulator.
+- **Active:** the nozzle valve opens and the pump switches off — spraying comes from the accumulator at constant pressure. The flow meter only counts during this phase.
+- The same applies in batch mode (each reservoir with its own build-up) and to the manual single cycle.
+- **Build-up = 0 s:** no build-up; the pump then runs while the valve is open.
+
+Requirement: the pump must be allowed to run against closed valves (system under pressure / the pump's pressure switch).
 
 The circulation pump (`UMWAELZPUMPE_GPIO`, reservoir recirculation) runs a configurable run/pause cycle (`laufzeit_s` / `pausenzeit_min`) whenever any reservoir is enabled at all — regardless of whether that reservoir is currently watering or just pausing between cycles. If no reservoir is enabled, it stays off.
 
@@ -1027,7 +1059,7 @@ The circulation pump (`UMWAELZPUMPE_GPIO`, reservoir recirculation) runs a confi
 
 W5500 (Ethernet) and WiFi run simultaneously via the lwIP stack. On Ethernet link-up, **NTP** is fetched automatically and the RTC is set (threshold: ±60 s deviation, resynced every 60 min). The web interface is available on both IPs with no code changes.
 
-Without a router: the master starts as an **AP on channel 6** (`ESPNOW_DEFAULT_CHANNEL`). Nodes in "no WiFi" mode use the same channel.
+Without a router: the master starts as an **AP on channel 6** (`ESPNOW_DEFAULT_CHANNEL`). The nodes find the master's channel on their own (see [First Boot & Configuration](#first-boot--configuration)).
 
 #### Valve Control
 
@@ -1036,6 +1068,11 @@ Four independent irrigation circuits (MV1–MV4) with configurable open time (se
 **Rebuild FW 1.19.0 (11/2026):** MV4 used to be the return valve with an optional "return pre-flush" before each cycle; two reservoirs shared one valve. The return line is now a manual ball valve, MV4 supplies reservoir 4, so every reservoir has its own valve and its own flow pulses. The pre-flush is gone. On the first start with 1.19.0, reservoir 4 takes over the times of reservoir 3 but stays disabled until it is switched on on the valve page. Reservoir 4's configuration lives in its own EEPROM block (560–565, nozzle-monitoring target 566–569); the EEPROM area grows from 570 to 600 bytes for this, existing settings are kept.
 
 After a restart, watering starts **immediately** instead of first waiting out the full pause time (up to 60 min).
+
+**Dosing by time or by amount** (setting "Dosing" below the pressure build-up):
+
+- **By time:** the nozzle valve stays open for the configured open time.
+- **By amount:** the nozzle valve closes as soon as the configured number of flow pulses has been counted (per reservoir, separately for light and dark phase) — every reservoir gets the same amount regardless of how strongly its nozzle sprays. The nozzle monitoring watches the run time this takes. Safety limit: twice the expected run time (60 s without a learned target); then the valve closes and a notification is sent.
 
 **Manual single cycle:** On the Aeroponik page, a single watering cycle can be triggered manually per reservoir — the valve opens once for the currently valid open time (light or dark phase) and closes again automatically (`/api/ventile/dose/start`, `/status`, `/cancel`). Normal automation is paused meanwhile.
 
@@ -1425,12 +1462,12 @@ Flow meter (YF-S401-like, Hall pulse output with a push-pull driver, no pull-up 
 
 #### Nozzle Monitoring (`flowmonitor.cpp`)
 
-Observes the valve state (`behaelterZustand[]`) from the outside: when a reservoir switches to the "active" state, the pulse counter is cleared (discarding leftovers from the pressure build-up); counting runs until the end of the refill phase (a pressure accumulator behind the meter is only refilled then), the duration is the valve-open time. Pulses and duration of the last cycle are shown per reservoir and written to the SD log.
+Observes the valve state (`behaelterZustand[]`) from the outside: pulses are only counted while the nozzle valve is open ("active" state) — pulses before and after that do not belong to this nozzle and are discarded. Pulses and valve-open time of the last cycle are shown per reservoir and written to the SD log.
 
 Each reservoir keeps a **target value** (pulses/s):
 
 - If none is set yet (0, or reset via "Clear targets"), the system automatically adopts the **next completed watering cycle** as the new reference — no manual calculation needed. When updating to 1.19.0 the old ml/s targets are discarded and learned again.
-- If one is set and the target/actual comparison is enabled, every cycle is compared with a configurable tolerance (%); on deviation below (clogged nozzle) or above (leak), a [notification](#notifications) goes out over all active channels.
+- If one is set and the target/actual comparison is enabled, every cycle is compared with a configurable tolerance (%); on deviation below (clogged nozzle) or above (leak), a [notification](#notifications) goes out over all active channels. With **dosing by amount** the pulse count is fixed — the run time is compared with the expected one (pulses ÷ target) instead: longer = nozzle clogging, shorter = leak.
 - "Clear targets" resets all values to 0 — handy after cleaning the nozzles or reworking the plumbing, so the old values aren't wrongly flagged as a deviation.
 
 SD log columns: see [Data Log & Download](#data-log--download).
@@ -1491,8 +1528,16 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **1
 | `HeapMin_kB` | Lowest free memory since startup |
 | `MS2_Abfragen` / `MS2_Timeouts` | RS485 polls of the tent sensor (address 0x20, every 15 s) since the previous row and how many of them went unanswered. A single missing reply is enough for the master to treat the sensor as offline until the next successful poll (empty tent columns) — the counters show such dropouts even between two log rows (since FW 1.20.2) |
 | `VPD_Blatt_kPa`, `VPD_Soll_min`, `VPD_Soll_max` | [VPD control](#vpd-control): controlled leaf VPD and current (possibly moving) target range; empty when the control is off (since FW 1.21.0) |
+| `EC_Naehr_uS`, `EC_Rueck_uS`, `EC_CalMag_uS`, `EC_Roh_uS`, `EC_VE_uS` (each with `…_Temp_C`) | Measurements from the EC handheld meter per category (EC at 25 °C and measuring temperature), only in the row right after the measurement |
 
 > **Automatic migration:** If the firmware encounters an existing daily file with the old, shorter column format (prior to this extension) when writing, it renames it to `_alt.csv` (data is preserved) and starts a new file with the full header — no mixing of different column counts within one file.
+
+#### Further Files on the SD Card
+
+| File | Content |
+|---|---|
+| `EC-Messungen.csv` | all measurements from the EC handheld meter, across days: `Datum,Zeit,Kategorie,EC25_uS,EC25_mS,Temp_C,EC_roh_uS,Hinweis` |
+| `Ruecklauf.csv` | one completed pump cycle of the level module per row: `Datum,Zeit,Dauer_s,BisMIN_s,Art,Volumen_ml` |
 
 #### Download & Delete (Configuration → Data Log)
 
@@ -1502,6 +1547,8 @@ One CSV file per day (`/YYYY-MM-DD.csv`) on the MicroSD card, write interval **1
 | `/api/logs/download?file=NAME` | GET | Streams the file with `Content-Disposition: attachment` |
 | `/api/logs/delete` | POST (JSON `{"file":"NAME"}`) | Deletes the file (UI asks for confirmation first) |
 | `/api/logs/delete-all` | POST | Deletes all `*.csv`/`*.txt` files on the SD card, response contains the count (UI asks for confirmation first) |
+| `/api/logs/upload-ec` | POST (multipart) | Replaces `EC-Messungen.csv` with an edited version (max. 2 MB; header must contain `Datum`, `Kategorie`, `EC25_uS`). The previous file is kept as `EC-Messungen_vorher.csv` |
+| `/api/ruecklauf` | POST (JSON) | Pump cycle report from the level module: `{"start":"YYYY-MM-DD hh:mm:ss","dauer_s","bis_min_s","art":"auto\|manuell\|stopp\|alarm","volumen_ml"}` → row in `Ruecklauf.csv`; repeats with the same start time are ignored |
 
 Filenames are checked server-side against path traversal (no `/` or `..` allowed).
 
@@ -1514,7 +1561,9 @@ Charts straight from the daily logs, computed entirely in the browser (`page_cha
 - **Markers:** grey background = lights off (`LichtMaske` = 0), red dashed ↻ = restart (from `Laufzeit_min`), orange ⚡ = mains dropout, grey ▲ = tent sensor unreachable (tent temperature and humidity empty). Short gaps (under 16 min) are bridged in the lines, longer ones break them; sensor dropouts are also counted in the events card and the daily summary.
 - **Key figures** for the visible window: ⌀/min/max per curve, split by lights on/off, share of VPD in the target range with lights on, light sum, number of restarts/mains dropouts.
 - **Daily summary:** per day DLI (mol/m²·d from PPFD), light hours, tent temperature and humidity day/night, VPD with lights on and share on target, number of watering cycles, restarts. Clicking a row jumps to that day.
-- **Nozzle analysis:** every watering cycle as a dot, a rolling median over 9 cycles per reservoir, outliers (>15 % from the median) circled in red. Shown as pulses per second (stays comparable when the open time was changed) or pulses per cycle. One card per reservoir with median, spread, trend (last vs. first third of the cycles in the window), outliers, deviation from the average of all reservoirs and a traffic light: 🟢 stable · 🟠 trend ≤ −10 % (nozzle/filter clogging) or ≥ +10 % (leak, loose nozzle) · 🟡 spread > 15 % (air, dirt) · ⚪ fewer than 6 cycles.
+- **Nozzle analysis:** every watering cycle as a dot, a rolling median over 9 cycles per reservoir, outliers (>15 % from the median) circled in red. Shown as **run time per cycle** (default, matches dosing by amount), pulses per second (stays comparable when open time or amount were changed) or pulses per cycle. One card per reservoir with median, spread, trend (last vs. first third of the cycles in the window), outliers, deviation from the average of all reservoirs and a traffic light: 🟢 stable · 🟠 nozzle/filter clogging (pulses dropping or run time rising by ≥ 10 %) or leak/loose nozzle (the other way round) · 🟡 spread > 15 % (air, dirt) · ⚪ fewer than 6 cycles.
+- **EC measurements** (`EC-Messungen.csv`): history per category, cards with the latest measurement and the change from the previous one (return additionally against the latest nutrient solution), table of the last 50 measurements. "Upload CSV" replaces the file with an edited version — Excel format (semicolon, decimal comma, German date) and freely written categories ("Nährlösung", "VE Wasser") are converted automatically first.
+- **Return flow** (`Ruecklauf.csv`): litres per day as bars, cards for today, yesterday, average per day (last 7 days) and the last cycle with its gap to the previous one; day table (cycles, litres, pump time, average time to MIN, average gap) and the last 30 cycles.
 
 The current day is fetched fresh on every "Reload", older days only once per page load.
 
@@ -1522,7 +1571,7 @@ The current day is fetched fresh on every "Reload", older days only once per pag
 
 ### Multisensor
 
-**MCU:** ESP32-C3 · Node ID: `0x02` (compile-time) · either `ESP-NOW · NODE_TYPE_SENSOR 0x02` or `RS485 · addr. 0x20`
+**MCU:** ESP32-C3 · Node ID: default `0x02`, can be changed when pairing · either `ESP-NOW · NODE_TYPE_SENSOR 0x02` or `RS485 · addr. 0x20`
 
 The same firmware supports both transport modes; which one is active is set at startup. In the current tent deployment the node runs in **RS485 mode** — register layout and polling behavior: [RS485 Multisensor](#rs485-multisensor-tent).
 
@@ -1573,40 +1622,12 @@ payload[1] = 0b00000101  // = 0x05
 
 ### First Boot & Configuration
 
-#### Sockets — Node ID
+The ESP-NOW nodes (sockets, Multisensor in ESP-NOW mode, EC handheld meter) need **no serial setup**:
 
-On the very first boot (NVS namespace `"nodecfg"` empty), the serial monitor shows:
+1. **Radio channel:** the node registers on the last successful channel. If the master does not answer there (first start, router changed its channel, …), the node steps through channels 1–13 (just over 1 s per channel) and remembers the one it finds. The master transmits on its WiFi router's channel, without a router on channel 6.
+2. **Pairing:** the node appears in the web interface under *Newly found*; the node ID is assigned when **pairing** (see [Fixed Pairing](#fixed-pairing-node--controller)).
 
-```
-=== ERSTSTART: Node-Konfiguration ===
-Node-ID eingeben (1-254) + Enter (60s Timeout, sonst 3):
-> 10
-[NODE] Gespeichert: Steckdose  ID=0x0A
-```
-
-Stored in NVS `"nodecfg"`: key `id` (uint8). Clear with `NODECLEAR` → dialog reappears on next boot.
-
-#### WiFi Channel / No-WiFi Mode (all nodes)
-
-On first boot without a saved channel (NVS `"wificfg"` empty):
-
-```
-[WIFI] 3 networks found
-  [ 1] MeinRouter           Channel  6  -62 dBm
-  [ 2] Nachbar-AP           Channel 11  -78 dBm
-  [ 0] No WiFi (fixed channel 6)
-Number (0-3) + Enter (60s timeout):
-> 0
-[WIFI] No WiFi, channel 6 saved
-```
-
-> **Channel consistency:** All nodes and the master AP must run on the same channel. The fixed channel is defined as `ESPNOW_DEFAULT_CHANNEL = 6` in all `espnow_protocol.h` files. The master AP uses this channel automatically when `USE_ACCESS_POINT = true`.
-
-> **Self-healing on router channel change:** If the router later changes its WiFi channel (auto-channel, reboot after a power outage, …), a node that only stores the channel once would stay stuck on the old (now wrong) channel forever and never find the master again — the master itself handles this automatically, since it reconnects fresh via `WiFi.begin(ssid, password)` on every boot and thus always picks up the current channel. Sockets and Multisensor therefore silently re-verify the known SSID via a scan on **every boot** (no serial dialog needed) and update the stored channel if it differs. The same scan additionally runs every 12 hours during normal operation; if the channel changes while running (without a node restart), the node restarts itself to pick up the new channel.
-
-#### 60-Second Timeout
-
-If no input is given within 60 seconds at any setup dialog (node ID, channel), a default value is used: ID=3 / channel 6.
+Stored in the NVS namespace `nodecfg` (`id`, `chan`, for the EC handheld meter also the transmit power level `txlvl`). If the connection is lost during operation (30 s without an answer), the node registers again and starts searching the channel after about 6 s.
 
 ---
 
@@ -1621,15 +1642,13 @@ Baud rate **115200** · line ending **LF** or **CR+LF**
 | `STATUS` | Current relay bitmask and individual status R1–R4 |
 | `MASK <0–15>` | Set all relays via decimal value (e.g. `MASK 5` → R1+R3 on) |
 | `R<1–4> <0\|1>` | Switch a single relay (e.g. `R2 1`) |
-| `NODEINFO` | Show node ID and pairing status |
-| `NODECLEAR` | Clear node ID → first-boot dialog on next restart |
-| `UNPAIR` | Release pairing with the master (same as BOOT button 3 s) |
-| `WIFIINFO` | Show stored SSID and channel |
-| `WIFICLEAR` | Clear WiFi configuration → channel scan on next restart |
+| `NODEINFO` | Show node ID, channel, pairing and connection status |
+| `UNPAIR` | Release the pairing with the master (like holding BOOT for 3 s) |
 
 #### Multisensor
 
 | Command | Effect |
 |---|---|
-| `WIFIINFO` | Show stored SSID and channel |
-| `WIFICLEAR` | Clear WiFi configuration → channel scan on next restart |
+| `NODEINFO` | Show node ID, channel, pairing and connection status (in RS485 mode: a notice) |
+| `UNPAIR` | Release the pairing with the master (ESP-NOW mode only) |
+

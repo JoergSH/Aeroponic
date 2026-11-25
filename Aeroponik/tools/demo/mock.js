@@ -44,10 +44,11 @@
         output: { fan_output: 0, light_output: 0 },
         tank: { hoehe_mm: 400, radius_unten_mm: 170, radius_oben_mm: 190, leer_abstand_mm: 430, min_mm: 60, max_mm: 360,
                 offset_mm: 0, sensor_type: 0, druck_null_raw: 0, druck_counts_pro_mm: 0 },
-        flowmon: { enabled: true, toleranz_prozent: 30, erwartet_impulse_s: [41.5, 40.8, 42.1, 39.7] },
-        ventile: { druckaufbau_s: 8, gleiche_zeiten: true,
-                   behaelter: [0, 1, 2, 3].map(() => ({ aktiv: true, oeffnungszeit_s: 5, pausenzeit_min: 5,
-                                                        oeffnungszeit_s_dunkel: 4, pausenzeit_min_dunkel: 10 })) },
+        flowmon: { enabled: true, toleranz_prozent: 10, erwartet_impulse_s: [3.5, 3.1, 3.9, 3.2] },
+        ventile: { druckaufbau_s: 8, gleiche_zeiten: true, nach_menge: true,
+                   behaelter: [0, 1, 2, 3].map(i => ({ aktiv: true, oeffnungszeit_s: 12, pausenzeit_min: 5,
+                                                        oeffnungszeit_s_dunkel: 10, pausenzeit_min_dunkel: 10,
+                                                        menge_imp: i === 1 ? 50 : 40, menge_imp_dunkel: i === 1 ? 50 : 40 })) },
         notify: { global_enabled: true, phone: '', has_apikey: false, netzausfall_enabled: true, sensorausfall_enabled: true,
                   feuchte_enabled: true, feuchte_min: 40, feuchte_max: 80, temperatur_enabled: true, temperatur_min: 16,
                   temperatur_max: 30, tank_enabled: true, tank_min_prozent: 20, lueftmodul_enabled: true,
@@ -137,7 +138,7 @@
     function ventilState(ts, lightOn) {
         const v = cfg.ventile, sec = Math.floor(ts / 1000);
         return v.behaelter.map((b, i) => {
-            const open = lightOn ? b.oeffnungszeit_s : b.oeffnungszeit_s_dunkel;
+            const open = openSec(b, i, lightOn);
             const per = (lightOn ? b.pausenzeit_min : b.pausenzeit_min_dunkel) * 60 + open + v.druckaufbau_s;
             const ph = (sec + i * Math.floor(per / 4)) % per;
             let z = 'Pause', timer = ph - open - v.druckaufbau_s;
@@ -148,6 +149,12 @@
     }
 
     // ---------------- Log-Dateien (CSV wie storage.cpp) ----------------
+    // Ventil-offen-Zeit in s: nach Zeit = Oeffnungszeit, nach Menge = Impulse / gelernte Rate
+    function openSec(b, i, lightOn) {
+        if (!cfg.ventile.nach_menge) return lightOn ? b.oeffnungszeit_s : b.oeffnungszeit_s_dunkel;
+        const imp = lightOn ? b.menge_imp : b.menge_imp_dunkel;
+        return Math.round(imp / (cfg.flowmon.erwartet_impulse_s[i] || 3.5));
+    }
     const CSV_HEAD = 'Zeit,TempVorrat_C,TempPflanze_C,Druck_bar,Fuellstand_%,Volumen_L,' +
         'RaumTemp_C,RaumFeuchte_%,ZeltTemp_C,ZeltFeuchte_%,ZeltCO2_ppm,ZeltVPD_kPa,ZeltPPFD_umol,' +
         'LichtMaske,LuefterLeistung_%,LuefterRPM,CO2Ausgang,HumidAusgang,' +
@@ -163,10 +170,48 @@
             const d = new Date(today.getTime() - k * 86400000);
             out.push({ name: '/' + dayName(d) + '.csv', size: k === 0 ? Math.round(410 * (Date.now() - d) / 60000) : 590000 });
         }
+        out.push({ name: '/EC-Messungen.csv', size: 1900 }, { name: '/Ruecklauf.csv', size: 4100 });
         return out;
     }
     const csvCache = {};
+    // Rücklauf (Füllstand-Modul): etwa alle 2,5 h ein Abpump-Zyklus mit 2,4 l, nachts seltener
+    function ruecklaufCsv() {
+        const rows = ['Datum,Zeit,Dauer_s,BisMIN_s,Art,Volumen_ml'];
+        const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+        for (let t = t0.getTime() - (LOG_DAYS - 1) * 86400000; t < Date.now(); ) {
+            const d = new Date(t), h = d.getHours(), night = h < 6;
+            t += (night ? 3.4 : 2.3) * 3600000 * (0.85 + 0.3 * hash(t));
+            if (t >= Date.now()) break;
+            const e = new Date(t), dur = Math.round(105 + 15 * hash(t + 1));
+            rows.push(dayName(e) + ',' + pad(e.getHours()) + ':' + pad(e.getMinutes()) + ':' + pad(e.getSeconds()) +
+                      ',' + dur + ',' + (dur - 34) + ',auto,2400');
+        }
+        return rows.join('\n') + '\n';
+    }
+    // EC-Messungen (EC-Handmessgerät): täglich Nährlösung + Rücklauf, gelegentlich Roh-/VE-Wasser
+    function ecCsv() {
+        const rows = ['Datum,Zeit,Kategorie,EC25_uS,EC25_mS,Temp_C,EC_roh_uS,Hinweis'];
+        const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+        for (let k = LOG_DAYS - 1; k >= 0; k--) {
+            const day = new Date(t0.getTime() - k * 86400000), dn = dayName(day);
+            const add = (hh, mm, kat, ec) => {
+                if (day.getTime() + (hh * 60 + mm) * 60000 > Date.now()) return;
+                const temp = r1(19.5 + 1.5 * hash(day.getTime() + hh));
+                rows.push(dn + ',' + pad(hh) + ':' + pad(mm) + ':00,' + kat + ',' + ec + ',' + (ec / 1000).toFixed(2) + ',' +
+                          temp + ',' + Math.round(ec * (1 + 0.027 * (temp - 25))) + ',');
+            };
+            const n = Math.round(1350 + 120 * Math.sin(k / 2) + 40 * hash(k));
+            add(9, 12, 'Naehrloesung', n);
+            add(9, 15, 'Ruecklauf', Math.round(n * (1.08 + 0.05 * hash(k + 7))));
+            if (k % 4 === 0) add(9, 20, 'Rohwasser', Math.round(480 + 30 * hash(k + 3)));
+            if (k % 7 === 2) add(9, 22, 'VE-Wasser', Math.round(8 + 6 * hash(k + 5)));
+            if (k % 5 === 1) add(9, 25, 'Cal-Mag', Math.round(420 + 40 * hash(k + 9)));
+        }
+        return rows.join('\n') + '\n';
+    }
     function csvFor(name) {
+        if (/Ruecklauf\.csv$/.test(name)) return ruecklaufCsv();
+        if (/EC-Messungen\.csv$/.test(name)) return ecCsv();
         const m = /(\d{4})-(\d{2})-(\d{2})/.exec(name);
         if (!m) return null;
         const start = new Date(+m[1], +m[2] - 1, +m[3]).getTime();
@@ -179,11 +224,15 @@
             const s = sim(ts), d = new Date(ts), sec0 = Math.floor(ts / 1000);
             // Ein Eintrag je Behaelter, wenn in dieser Minute ein Giesszyklus begann (Takt wie ventilState)
             const fl = cfg.ventile.behaelter.map((b, i) => {
-                const open = s.lightOn ? b.oeffnungszeit_s : b.oeffnungszeit_s_dunkel;
+                const open = openSec(b, i, s.lightOn);
                 const per = (s.lightOn ? b.pausenzeit_min : b.pausenzeit_min_dunkel) * 60 + open + cfg.ventile.druckaufbau_s;
                 const off = i * Math.floor(per / 4), k = sec0 + ((per - (sec0 + off) % per) % per);
                 if (!b.aktiv || k >= sec0 + 60) return ['', ''];
                 const ips = cfg.flowmon.erwartet_impulse_s[i] * (1 + 0.03 * (hash(k + i) - 0.5));
+                if (cfg.ventile.nach_menge) {
+                    const imp = s.lightOn ? b.menge_imp : b.menge_imp_dunkel;
+                    return [imp, (imp / ips).toFixed(1)];
+                }
                 return [Math.round(ips * open), open.toFixed(1)];
             });
             rows.push([pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()),
@@ -245,7 +294,8 @@
             return {
                 behaelter: cfg.ventile.behaelter.map((b, i) => Object.assign({}, b, vs[i])),
                 druckaufbau_s: cfg.ventile.druckaufbau_s, gleiche_zeiten: cfg.ventile.gleiche_zeiten,
-                pumpe_aktiv: vs.some(v => v.zustand !== 'Pause'), umwaelzpumpe_aktiv: umwaelzOn(), licht_an: s.lightOn,
+                nach_menge: cfg.ventile.nach_menge,
+                pumpe_aktiv: vs.some(v => v.zustand === 'Druckaufbau'), umwaelzpumpe_aktiv: umwaelzOn(), licht_an: s.lightOn,
             };
         },
         '/api/output/test': () => ({ state: testState, testmode: testMode, pending: false,
@@ -332,7 +382,7 @@
         }
         switch (path) {
             case '/api/ventile/config':
-                for (const k of ['druckaufbau_s', 'gleiche_zeiten']) if (k in b) cfg.ventile[k] = b[k];
+                for (const k of ['druckaufbau_s', 'gleiche_zeiten', 'nach_menge']) if (k in b) cfg.ventile[k] = b[k];
                 if (Array.isArray(b.behaelter)) b.behaelter.forEach((x, i) => Object.assign(cfg.ventile.behaelter[i], x));
                 return { success: true };
             case '/api/espnow/relay': { const n = nodes.find(x => x.id === b.node_id); if (n) n.relay_mask = b.mask; return { success: true }; }

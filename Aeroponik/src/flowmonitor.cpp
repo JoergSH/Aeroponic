@@ -62,6 +62,25 @@ static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
 
     dbgPrintf("[FLOWMON] Behaelter %u: %u Impulse in %.1fs\n", idx + 1, pulses, dauer_s);
 
+    // Mengendosierung: Sollmenge nicht erreicht, Ventil am Sicherheitslimit geschlossen. Immer
+    // melden (auch bei ausgeschaltetem Alarm -- der Behaelter hat dann zu wenig bekommen), aber
+    // nur einmal pro Abbruch-Serie, damit nicht jeder Zyklus eine Nachricht schickt.
+    static bool abbruchGemeldet[BEHAELTER_ANZAHL] = {};
+    bool abbruch = ventilConfig.nach_menge && ventilMengeAbgebrochen(idx);
+    if (abbruch) {
+        if (!abbruchGemeldet[idx]) {
+            char m[200];
+            snprintf(m, sizeof(m),
+                     "⚠️ Behälter %u: Sollmenge nicht erreicht – Ventil nach %.0f s geschlossen (%u Impulse). Düse oder Durchflussmesser prüfen!",
+                     idx + 1, dauer_s, pulses);
+            sendNotification(m);
+            abbruchGemeldet[idx] = true;
+        }
+    } else if (abbruchGemeldet[idx]) {
+        abbruchGemeldet[idx] = false;
+        dbgPrintf("[FLOWMON] Behaelter %u: Sollmenge wieder erreicht\n", idx + 1);
+    }
+
     if (dauer_s < 0.5f) return;   // zu kurzer Zyklus fuer eine belastbare Aussage
     float rate = pulses / dauer_s;
 
@@ -78,10 +97,30 @@ static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
     }
 
     if (!flowMonitorConfig.enabled) return;
+    if (abbruch) return;   // schon gemeldet (s.o.), kein zweiter Alarm fuer denselben Zyklus
+
+    float tolFactor = flowMonitorConfig.toleranz_prozent / 100.0f;
+    char  msg[200];
+
+    // Mengendosierung: die Impulszahl ist fest vorgegeben -- ueberwacht wird die Laufzeit, die
+    // fuer diese Menge gebraucht wurde (laenger = Duese setzt zu, kuerzer = Leck).
+    if (ventilConfig.nach_menge) {
+        float sollDauer = pulses / flowMonitorConfig.erwartet_impulse_s[idx];
+        if (dauer_s > sollDauer * (1.0f + tolFactor)) {
+            snprintf(msg, sizeof(msg),
+                     "⚠️ Behälter %u: Düse evtl. verstopft (Laufzeit %.1f s statt ~%.1f s für %u Impulse)",
+                     idx + 1, dauer_s, sollDauer, pulses);
+            sendNotification(msg);
+        } else if (dauer_s < sollDauer * (1.0f - tolFactor)) {
+            snprintf(msg, sizeof(msg),
+                     "⚠️ Behälter %u: Zu viel Durchfluss, evtl. Leck (Laufzeit %.1f s statt ~%.1f s für %u Impulse)",
+                     idx + 1, dauer_s, sollDauer, pulses);
+            sendNotification(msg);
+        }
+        return;
+    }
 
     float erwartet  = flowMonitorConfig.erwartet_impulse_s[idx] * dauer_s;
-    float tolFactor = flowMonitorConfig.toleranz_prozent / 100.0f;
-    char  msg[160];
 
     if (pulses < erwartet * (1.0f - tolFactor)) {
         snprintf(msg, sizeof(msg),
@@ -96,25 +135,52 @@ static void handleCycleEnd(uint8_t idx, uint32_t pulses, float dauer_s) {
     }
 }
 
-// Messfenster: Ventil auf bis Ende Nachlauf. Ein Druckspeicher hinter dem Durchflussmesser liefert
-// beim Oeffnen einen Teil des Spruehwassers selbst und wird erst im Nachlauf (Ventil zu, Pumpe an)
-// wieder aufgefuellt -- erst dann ist die gesamte gespruehte Menge durch den Zaehler gelaufen.
-// Als Dauer (Sollwert Impulse/s) zaehlt nur die Ventil-offen-Zeit.
+// Messfenster: nur solange das Duesenventil offen ist (V_AKTIV). Impulse ausserhalb davon gehoeren
+// nicht zu dieser Duese und werden verworfen. Gleiches Fenster wie bei der Mengendosierung
+// (valves.cpp: Impulse ab Ventil-auf bis Sollmenge).
+// Diagnose-Spur: jede Sekunde, in der Impulse kamen oder Pumpe/Ventile aktiv sind, eine Zeile
+// "[FLOW] +n Imp | Pumpe an/aus | B2 Aktiv" -- zeigt, in welcher Phase der Durchfluss wirklich
+// auftritt (auch Impulse in der Pause oder im verworfenen Druckaufbau werden so sichtbar).
+static void flowTrace() {
+    static uint32_t lastMs = 0, lastTotal = 0;
+    uint32_t now = millis();
+    if (now - lastMs < 1000) return;
+    lastMs = now;
+    uint32_t total = flowsensor_total_pulses();
+    uint32_t delta = total - lastTotal;
+    lastTotal = total;
+
+    char phase[64] = "";
+    size_t len = 0;
+    for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
+        VentilZustand z = behaelterZustand[i].zustand;
+        if (z == V_PAUSE) continue;
+        len += snprintf(phase + len, sizeof(phase) - len, " B%u %s", i + 1, ventilZustandText(z));
+        if (len >= sizeof(phase)) break;
+    }
+    if (delta == 0 && !pumpeAktiv() && phase[0] == 0) return;
+    dbgPrintf("[FLOW] +%u Imp | Pumpe %s |%s\n", delta, pumpeAktiv() ? "an" : "aus",
+              phase[0] ? phase : " Pause");
+}
+
 void loopFlowMonitor() {
+    flowTrace();
     for (uint8_t i = 0; i < BEHAELTER_ANZAHL; i++) {
         VentilZustand z = behaelterZustand[i].zustand;
         VentilZustand l = lastZustand[i];
 
         if (z == V_AKTIV && l != V_AKTIV) {
-            // Zyklus beginnt -- Zaehler leeren (verwirft Reste aus dem Druckaufbau, die in den
-            // Druckspeicher bzw. ueber den Ruecklauf-Kugelhahn liefen, nicht ueber diese Duese).
-            flowsensor_take_pulses();
+            // Zyklus beginnt -- Zaehler leeren (alles vor Ventil-auf gehoert nicht zu dieser Duese).
+            uint32_t verworfen = flowsensor_take_pulses();
+            if (verworfen) dbgPrintf("[FLOWMON] Behaelter %u: %u Impulse vor Ventil-auf verworfen\n", i + 1, verworfen);
             cycleStartMs[i] = millis();
         } else if (l == V_AKTIV && z != V_AKTIV) {
+            // Ventil zu: Zyklus sofort auswerten, nur die Impulse der Ventil-offen-Zeit
             aktivDauerS[i] = (millis() - cycleStartMs[i]) / 1000.0f;
-            if (z != V_NACHLAUF) handleCycleEnd(i, flowsensor_take_pulses(), aktivDauerS[i]);
-        } else if (l == V_NACHLAUF && z != V_NACHLAUF) {
             handleCycleEnd(i, flowsensor_take_pulses(), aktivDauerS[i]);
+        } else if (l == V_NACHLAUF && z != V_NACHLAUF) {
+            uint32_t nach = flowsensor_take_pulses();   // Nachlauf: nur protokollieren, nicht zaehlen
+            if (nach) dbgPrintf("[FLOWMON] Behaelter %u: %u Impulse im Nachlauf verworfen\n", i + 1, nach);
         }
 
         lastZustand[i] = z;

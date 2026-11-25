@@ -80,6 +80,7 @@ R"rawliteral(
                 <span id="chNozToggles" style="display:flex;flex-wrap:wrap;gap:4px 14px;"></span>
                 <label><span class="de">Anzeige</span><span class="en">Show</span>
                     <select id="chNozMode">
+                        <option class="i18n-opt" value="dur" data-de="Laufzeit je Zyklus (s)" data-en="Run time per cycle (s)">Laufzeit je Zyklus (s)</option>
                         <option class="i18n-opt" value="rate" data-de="Impulse pro Sekunde" data-en="Pulses per second">Impulse pro Sekunde</option>
                         <option class="i18n-opt" value="cyc" data-de="Impulse je Zyklus" data-en="Pulses per cycle">Impulse je Zyklus</option>
                     </select></label>
@@ -87,8 +88,8 @@ R"rawliteral(
             <div id="chNozzleWrap"></div>
             <div id="chNozCards" class="ch-cards"></div>
             <div class="ch-hint">
-                <span class="de">Punkte = einzelne Gießzyklen, Linie = gleitender Median über 9 Zyklen, roter Ring = Ausreißer (&gt;15 % vom Median). „Impulse pro Sekunde“ bleibt vergleichbar, auch wenn die Öffnungszeit geändert wurde. Die Bewertung bezieht sich auf den Ausschnitt oben: Trend = letztes gegen erstes Drittel der Zyklen, Streuung = Standardabweichung in %.</span>
-                <span class="en">Dots = single watering cycles, line = rolling median over 9 cycles, red ring = outlier (&gt;15 % from the median). "Pulses per second" stays comparable even if the open time was changed. The rating refers to the window above: trend = last vs. first third of cycles, spread = standard deviation in %.</span>
+                <span class="de">Punkte = einzelne Gießzyklen, Linie = gleitender Median über 9 Zyklen, roter Ring = Ausreißer (&gt;15 % vom Median). „Laufzeit je Zyklus“ passt zur Dosierung nach Menge: Das Ventil schließt nach der eingestellten Impulszahl, eine Düse, die zusetzt, braucht dafür länger (Trend steigt). „Impulse pro Sekunde“ bleibt vergleichbar, auch wenn Öffnungszeit oder Menge geändert wurden. Die Bewertung bezieht sich auf den Ausschnitt oben: Trend = letztes gegen erstes Drittel der Zyklen, Streuung = Standardabweichung in %.</span>
+                <span class="en">Dots = single watering cycles, line = rolling median over 9 cycles, red ring = outlier (&gt;15 % from the median). "Run time per cycle" fits dosing by amount: the valve closes after the set pulse count, a clogging nozzle needs longer (trend rising). "Pulses per second" stays comparable even if the open time or amount was changed. The rating refers to the window above: trend = last vs. first third of cycles, spread = standard deviation in %.</span>
             </div>
 
             <script>
@@ -136,7 +137,7 @@ R"rawliteral(
                 const S = {
                     inited: false, files: [], cache: {}, t: [], cols: {}, marks: [], nights: [], noz: [],
                     d0: 0, d1: 0, v0: 0, v1: 0, hoverT: null, range: 1, on: {},
-                    nozOn: [true, true, true, true], nozMode: 'rate',
+                    nozOn: [true, true, true, true], nozMode: 'dur',
                     loading: false, statsKey: '', drag: null, pinch: null, raf: false
                 };
 
@@ -161,12 +162,13 @@ R"rawliteral(
                         const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
                         if (p.on) Object.keys(p.on).forEach(k => { if (k in S.on) S.on[k] = !!p.on[k]; });
                         if (Array.isArray(p.nozOn)) for (let k = 0; k < 4; k++) if (typeof p.nozOn[k] === 'boolean') S.nozOn[k] = p.nozOn[k];
-                        if (p.nozMode === 'cyc' || p.nozMode === 'rate') S.nozMode = p.nozMode;
+                        // nozV 2: "Laufzeit je Zyklus" ist neu und Standard -- aeltere gespeicherte Auswahl nicht uebernehmen
+                        if (p.nozV === 2 && (p.nozMode === 'cyc' || p.nozMode === 'rate' || p.nozMode === 'dur')) S.nozMode = p.nozMode;
                         if (p.range === 7) S.range = 7;
                     } catch (e) {}
                 }
                 function savePrefs() {
-                    try { localStorage.setItem(PREF_KEY, JSON.stringify({ on: S.on, nozOn: S.nozOn, nozMode: S.nozMode, range: S.range })); } catch (e) {}
+                    try { localStorage.setItem(PREF_KEY, JSON.stringify({ on: S.on, nozOn: S.nozOn, nozMode: S.nozMode, nozV: 2, range: S.range })); } catch (e) {}
                 }
 
                 // ---------- DOM ----------
@@ -458,6 +460,7 @@ R"rawliteral(
                             const w = a.slice(Math.max(0, i - 4), Math.min(a.length, i + 5));
                             a[i].mr = median(w.map(x => x.r));
                             a[i].mp = median(w.map(x => x.p));
+                            a[i].md = median(w.map(x => x.d));
                         }
                         S.noz.push(a);
                     }
@@ -704,8 +707,11 @@ R"rawliteral(
                     }).join('');
                 }
 
-                const nozVal = c => S.nozMode === 'rate' ? c.r : c.p;
-                const nozMed = c => S.nozMode === 'rate' ? c.mr : c.mp;
+                const nozVal = c => S.nozMode === 'rate' ? c.r : S.nozMode === 'dur' ? c.d : c.p;
+                const nozMed = c => S.nozMode === 'rate' ? c.mr : S.nozMode === 'dur' ? c.md : c.mp;
+                const nozDec = () => S.nozMode === 'cyc' ? 0 : 1;
+                const nozUnitLong = () => S.nozMode === 'rate' ? L('Impulse/s', 'pulses/s') : S.nozMode === 'dur' ? L('Laufzeit je Zyklus (s)', 'run time per cycle (s)') : L('Impulse je Zyklus', 'pulses per cycle');
+                const nozUnit = () => S.nozMode === 'rate' ? L('Imp/s', 'p/s') : S.nozMode === 'dur' ? L('s/Zyklus', 's/cycle') : L('Imp/Zyklus', 'p/cycle');
                 function nearestCycle(a, t) {
                     if (!a.length) return -1;
                     let i = lowerBoundT(a, t); if (i >= a.length) i = a.length - 1;
@@ -726,7 +732,7 @@ R"rawliteral(
                         vis.push({ k, a, i0, i1 });
                         for (let i = i0; i <= i1; i++) { const v = nozVal(a[i]); if (v < lo) lo = v; if (v > hi) hi = v; }
                     });
-                    const dec = S.nozMode === 'rate' ? 1 : 0;
+                    const dec = nozDec();
                     if (lo === Infinity) {
                         ctx.fillStyle = '#aaa'; ctx.textAlign = 'center'; ctx.font = '12px Arial';
                         ctx.fillText(L('Keine Gießzyklen im Ausschnitt', 'No watering cycles in this window'), PL + pw / 2, (PT + bottom) / 2);
@@ -766,7 +772,7 @@ R"rawliteral(
                     }
                     drawMarks(g, X); drawHover(g, X);
 
-                    p.leg.innerHTML = '<span class="ch-li" style="color:#888;">' + (S.nozMode === 'rate' ? L('Impulse/s', 'pulses/s') : L('Impulse je Zyklus', 'pulses per cycle')) + '</span>' +
+                    p.leg.innerHTML = '<span class="ch-li" style="color:#888;">' + nozUnitLong() + '</span>' +
                         vis.map(({ k, a }) => {
                             const i = S.hoverT !== null ? nearestCycle(a, S.hoverT) : lowerBoundT(a, S.v1) - 1;
                             const c = i >= 0 ? a[i] : null;
@@ -912,8 +918,10 @@ R"rawliteral(
                     });
                     const allMean = meds.length ? meds.reduce((x, y) => x + y, 0) / meds.length : NaN;
                     const maxMed = Math.max(0, ...meds);
-                    const dec = S.nozMode === 'rate' ? 1 : 0;
-                    const unit = S.nozMode === 'rate' ? L('Imp/s', 'p/s') : L('Imp/Zyklus', 'p/cycle');
+                    const dec = nozDec();
+                    const unit = nozUnit();
+                    // Bei der Laufzeit bedeutet "steigt" weniger Durchfluss (Duese setzt zu), sonst umgekehrt
+                    const inv = S.nozMode === 'dur';
                     box.innerHTML = data.map(({ k, vs, outl }) => {
                         const col = NOZ_COLORS[k], n = vs.length;
                         const head = '<div class="ch-c-title">' + L('Behälter ', 'Reservoir ') + (k + 1);
@@ -926,8 +934,8 @@ R"rawliteral(
                         const dev = allMean > 0 ? (med - allMean) / allMean * 100 : NaN;
                         let amp = '🟢', txt = L('stabil', 'stable');
                         if (n < 6) { amp = '⚪'; txt = L('zu wenige Zyklen für eine Bewertung', 'too few cycles to rate'); }
-                        else if (trend <= -10) { amp = '🟠'; txt = L('fällt – Düse/Filter prüfen', 'dropping – check nozzle/filter'); }
-                        else if (trend >= 10) { amp = '🟠'; txt = L('steigt – Leck oder lose Düse?', 'rising – leak or loose nozzle?'); }
+                        else if (inv ? trend >= 10 : trend <= -10) { amp = '🟠'; txt = inv ? L('steigt – Düse/Filter prüfen', 'rising – check nozzle/filter') : L('fällt – Düse/Filter prüfen', 'dropping – check nozzle/filter'); }
+                        else if (inv ? trend <= -10 : trend >= 10) { amp = '🟠'; txt = inv ? L('fällt – Leck oder lose Düse?', 'dropping – leak or loose nozzle?') : L('steigt – Leck oder lose Düse?', 'rising – leak or loose nozzle?'); }
                         else if (cv > 15) { amp = '🟡'; txt = L('unruhig – Luft oder Schmutz?', 'erratic – air or dirt?'); }
                         return '<div class="ch-card" style="border-left-color:' + col + ';">' + head + ' <span style="float:right;">' + amp + '</span></div>' +
                                '<div class="ch-c-main">' + fmt(med, dec) + ' <small>' + unit + ' (Median)</small></div>' +
@@ -952,6 +960,509 @@ R"rawliteral(
                 window.chartsOnLangChange = function () {
                     if (!S.inited) return;
                     buildToggles(); buildWindowSelect(); renderDays(); S.statsKey = ''; redraw();
+                };
+            })();
+            </script>
+
+            <!-- ============ EC-Messungen (EC-Meter, Datei EC-Messungen.csv) ============ -->
+            <h3 class="section-heading">🧪 <span class="de">EC-Messungen</span><span class="en">EC measurements</span></h3>
+            <div class="status-box-info ch-toolbar">
+                <label><span class="de">Zeitraum</span><span class="en">Period</span>
+                    <select id="ecRange">
+                        <option class="i18n-opt" value="30" data-de="30 Tage" data-en="30 days">30 Tage</option>
+                        <option class="i18n-opt" value="90" data-de="90 Tage" data-en="90 days">90 Tage</option>
+                        <option class="i18n-opt" value="0" data-de="Alles" data-en="All">Alles</option>
+                    </select></label>
+                <button id="ecReloadBtn" class="ch-btn">🔄 <span class="de">Neu laden</span><span class="en">Reload</span></button>
+                <a class="ch-btn" style="text-decoration:none;" href="/api/logs/download?file=EC-Messungen.csv">⬇ CSV</a>
+                <button id="ecUploadBtn" class="ch-btn">⬆ <span class="de">CSV hochladen</span><span class="en">Upload CSV</span></button>
+                <input type="file" id="ecUploadFile" accept=".csv,text/csv" style="display:none;">
+                <span id="ecStatus" class="ch-status"></span>
+            </div>
+            <div class="ch-panel">
+                <div class="ch-head" id="ecLegend"></div>
+                <canvas id="ecCanvas" class="ch-cv" style="height:220px;"></canvas>
+            </div>
+            <div class="ch-hoverbar"><span id="ecHover"></span></div>
+            <div id="ecCards" class="ch-cards"></div>
+            <div style="overflow-x:auto;margin-top:10px;"><table id="ecTable" class="ch-days"></table></div>
+            <div class="ch-hint">
+                <span class="de">Werte vom EC-Meter (LOG 2 s halten, dann Kategorie wählen), auf 25 °C kompensiert. Die Datei EC-Messungen.csv auf der SD-Karte sammelt alle Messungen tagesübergreifend; zusätzlich stehen sie in den Tageslogs (Spalten EC_…). Roter Ring = über Messbereich, hohler Punkt = ohne Temperaturfühler gemessen.</span>
+                <span class="en">Values from the EC meter (hold LOG for 2 s, then pick a category), compensated to 25 °C. The file EC-Messungen.csv on the SD card collects all measurements across days; they are also in the daily logs (EC_… columns). Red ring = over range, hollow dot = measured without temperature probe.</span>
+            </div>
+
+            <script>
+            (function () {
+                'use strict';
+                const FILE = 'EC-Messungen.csv', DAY = 86400000;
+                const KAT = [
+                    { key: 'Naehrloesung', de: 'Nährlösung', en: 'Nutrient solution', color: '#27ae60' },
+                    { key: 'Ruecklauf',    de: 'Rücklauf',   en: 'Return',            color: '#2e86de' },
+                    { key: 'Cal-Mag',      de: 'Cal-Mag',    en: 'Cal-Mag',           color: '#e67e22' },
+                    { key: 'Rohwasser',    de: 'Rohwasser',  en: 'Tap water',         color: '#8e44ad' },
+                    { key: 'VE-Wasser',    de: 'VE-Wasser',  en: 'Demineralized water', color: '#7f8c8d' },
+                ];
+                const E = { rows: [], loaded: false, wired: false, pts: [] };
+                const $ = id => document.getElementById(id);
+                function L(de, en) { return (typeof currentLang !== 'undefined' && currentLang === 'en') ? en : de; }
+                const p2 = n => String(n).padStart(2, '0');
+                const fDate = t => { const d = new Date(t); return p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + '.' + d.getFullYear(); };
+                const fTime = t => { const d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+                const fMs = v => (v / 1000).toFixed(2);
+                const sgn = v => (v >= 0 ? '+' : '') + v;
+
+                function parse(txt) {
+                    const lines = txt.split(/\r?\n/), h = (lines[0] || '').split(',');
+                    const di = h.indexOf('Datum'), zi = h.indexOf('Zeit'), ki = h.indexOf('Kategorie'),
+                          ei = h.indexOf('EC25_uS'), ti = h.indexOf('Temp_C'), hi = h.indexOf('Hinweis');
+                    if (di < 0 || ki < 0 || ei < 0) return [];
+                    const out = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        if (!lines[i]) continue;
+                        const c = lines[i].split(','), d = (c[di] || '').split('-').map(Number), z = (c[zi] || '').split(':').map(Number);
+                        if (d.length < 3 || !d[0]) continue;
+                        const k = KAT.findIndex(x => x.key === c[ki]); if (k < 0) continue;
+                        const ec = parseFloat(c[ei]); if (!isFinite(ec)) continue;
+                        const tp = parseFloat(c[ti]), note = hi >= 0 ? (c[hi] || '') : '';
+                        out.push({ t: new Date(d[0], d[1] - 1, d[2], z[0] || 0, z[1] || 0, z[2] || 0).getTime(), k, ec,
+                                   temp: isFinite(tp) ? tp : NaN, over: /Messbereich/.test(note), noTemp: /Temperatur/.test(note) });
+                    }
+                    return out.sort((a, b) => a.t - b.t);
+                }
+
+                // Bearbeitete EC-Messungen.csv wieder auf die Steuerung laden. Vorher normalisieren:
+                // Excel speichert oft mit Semikolon + Dezimalkomma und deutschem Datum, Kategorien
+                // werden ggf. frei geschrieben ("Nährlösung", "VE Wasser") -> auf die festen Namen.
+                function katKey(s) {
+                    const n = s.trim().toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/[\s_\-]/g, '');
+                    const map = { naehrloesung: 'Naehrloesung', ruecklauf: 'Ruecklauf', calmag: 'Cal-Mag', nurcalmag: 'Cal-Mag',
+                                  rohwasser: 'Rohwasser', vewasser: 'VE-Wasser' };
+                    return map[n] || s.trim();
+                }
+                function normalize(txt) {
+                    txt = txt.replace(/^\uFEFF/, '');
+                    let lines = txt.split(/\r?\n/).filter(l => l.trim() !== '');
+                    if ((lines[0] || '').indexOf(';') >= 0)   // Excel: ; als Trenner, , als Dezimalzeichen
+                        lines = lines.map(l => l.replace(/,/g, '.').replace(/;/g, ','));
+                    const h = (lines[0] || '').split(',').map(x => x.trim().replace(/^"|"$/g, ''));
+                    const ki = h.indexOf('Kategorie'), di = h.indexOf('Datum'), zi = h.indexOf('Zeit');
+                    const out = [h.join(',')];
+                    for (let i = 1; i < lines.length; i++) {
+                        const c = lines[i].split(',').map(x => x.trim().replace(/^"|"$/g, ''));
+                        if (ki >= 0 && c[ki] !== undefined) c[ki] = katKey(c[ki]);
+                        if (di >= 0 && /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(c[di] || '')) {
+                            const [d, mo, y] = c[di].split('.');
+                            c[di] = y + '-' + p2(+mo) + '-' + p2(+d);
+                        }
+                        if (zi >= 0 && /^\d{1,2}:\d{2}$/.test(c[zi] || '')) c[zi] += ':00';
+                        if (zi >= 0 && /^\d:/.test(c[zi] || '')) c[zi] = '0' + c[zi];
+                        out.push(c.join(','));
+                    }
+                    return out.join('\n') + '\n';
+                }
+                async function upload(file) {
+                    const txt = normalize(await file.text());
+                    const lines = txt.split('\n').filter(l => l);
+                    const rows = parse(txt);
+                    if (!rows.length) {
+                        alert(L('Keine gültigen Messungen erkannt – Kopfzeile muss Datum, Zeit, Kategorie, EC25_uS enthalten.',
+                                'No valid measurements found – header must contain Datum, Zeit, Kategorie, EC25_uS.'));
+                        return;
+                    }
+                    const ki = lines[0].split(',').indexOf('Kategorie');
+                    const unbekannt = [...new Set(lines.slice(1).map(l => l.split(',')[ki])
+                                       .filter(k => k && !KAT.some(x => x.key === k)))];
+                    const skip = lines.length - 1 - rows.length;
+                    let msg = L(rows.length + ' Messungen erkannt', rows.length + ' measurements recognized');
+                    if (skip > 0) msg += L(', ' + skip + ' Zeilen werden in der Auswertung ignoriert', ', ' + skip + ' rows will be ignored');
+                    if (unbekannt.length) msg += L(' (unbekannte Kategorie: ', ' (unknown category: ') + unbekannt.join(', ') + ')';
+                    msg += L('.\n\nEC-Messungen.csv auf der Steuerung ersetzen? Die bisherige Datei bleibt als EC-Messungen_vorher.csv erhalten.',
+                             '.\n\nReplace EC-Messungen.csv on the controller? The previous file is kept as EC-Messungen_vorher.csv.');
+                    if (!confirm(msg)) return;
+                    $('ecStatus').textContent = L('Lade hoch …', 'Uploading …');
+                    const fd = new FormData();
+                    fd.append('file', new Blob([txt], { type: 'text/csv' }), FILE);
+                    try {
+                        const r = await fetch('/api/logs/upload-ec', { method: 'POST', body: fd });
+                        const d = await r.json().catch(() => ({}));
+                        if (!r.ok || !d.ok) { $('ecStatus').textContent = L('Upload fehlgeschlagen: ', 'Upload failed: ') + (d.error || r.status); return; }
+                        await load();
+                    } catch (e) {
+                        $('ecStatus').textContent = L('Upload fehlgeschlagen: ', 'Upload failed: ') + e;
+                    }
+                }
+
+                async function load() {
+                    $('ecStatus').textContent = L('Lade …', 'Loading …');
+                    try {
+                        const r = await fetch('/api/logs/download?file=' + encodeURIComponent(FILE));
+                        E.rows = r.ok ? parse(await r.text()) : [];
+                        E.loaded = true;
+                        render();
+                    } catch (e) {
+                        $('ecStatus').textContent = L('Fehler beim Laden: ', 'Load error: ') + e;
+                    }
+                }
+
+                function visible() {
+                    const days = parseInt($('ecRange').value) || 0;
+                    if (!days) return E.rows;
+                    const from = Date.now() - days * DAY;
+                    return E.rows.filter(r => r.t >= from);
+                }
+
+                function render() {
+                    const rows = visible();
+                    $('ecStatus').textContent = E.rows.length
+                        ? rows.length + L(' von ', ' of ') + E.rows.length + L(' Messungen', ' measurements')
+                        : L('Noch keine EC-Messungen gespeichert.', 'No EC measurements stored yet.');
+                    $('ecLegend').innerHTML = '<span class="ch-title">EC 25 °C (mS/cm)</span>' + KAT.map((k, i) =>
+                        '<span class="ch-li"><span class="ch-sw" style="background:' + k.color + ';"></span>' + L(k.de, k.en) +
+                        ' (' + rows.filter(r => r.k === i).length + ')</span>').join('');
+                    drawChart(rows);
+                    renderCards();
+                    renderTable(rows);
+                }
+
+                function drawChart(rows) {
+                    const cv = $('ecCanvas'), dpr = window.devicePixelRatio || 1;
+                    const W = cv.clientWidth || 600, H = cv.clientHeight || 220;
+                    cv.width = W * dpr; cv.height = H * dpr;
+                    const ctx = cv.getContext('2d');
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    ctx.clearRect(0, 0, W, H);
+                    E.pts = [];
+                    const PL = 46, PR = 14, PT = 10, PB = 24, pw = W - PL - PR, ph = H - PT - PB;
+                    ctx.font = '11px sans-serif'; ctx.fillStyle = '#888';
+                    if (!rows.length) { ctx.fillText(L('Keine Messungen im Zeitraum', 'No measurements in this period'), PL, PT + ph / 2); return; }
+                    let t0 = rows[0].t, t1 = rows[rows.length - 1].t;
+                    if (t1 - t0 < DAY) { t0 -= DAY / 2; t1 += DAY / 2; }
+                    const pad = (t1 - t0) * 0.03; t0 -= pad; t1 += pad;
+                    const yMax = Math.max(0.5, Math.ceil(Math.max(...rows.map(r => r.ec / 1000)) * 1.1 * 4) / 4);
+                    const X = t => PL + (t - t0) / (t1 - t0) * pw, Y = v => PT + ph - v / yMax * ph;
+                    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1; ctx.textAlign = 'right';
+                    for (let i = 0; i <= 5; i++) {
+                        const v = yMax * i / 5, y = Y(v);
+                        ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + pw, y); ctx.stroke();
+                        ctx.fillText(v.toFixed(2), PL - 5, y + 4);
+                    }
+                    ctx.textAlign = 'center';
+                    const nx = Math.max(2, Math.min(7, Math.floor(pw / 90)));
+                    for (let i = 0; i <= nx; i++) {
+                        const t = t0 + (t1 - t0) * i / nx, d = new Date(t);
+                        ctx.fillText(p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + '.', X(t), H - 6);
+                    }
+                    KAT.forEach((kat, k) => {
+                        const rs = rows.filter(r => r.k === k); if (!rs.length) return;
+                        ctx.strokeStyle = kat.color; ctx.lineWidth = 1.5; ctx.beginPath();
+                        rs.forEach((r, i) => { const x = X(r.t), y = Y(r.ec / 1000); if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y); });
+                        ctx.stroke();
+                        rs.forEach(r => {
+                            const x = X(r.t), y = Y(r.ec / 1000);
+                            ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI);
+                            if (r.noTemp) { ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = kat.color; ctx.lineWidth = 1.5; ctx.stroke(); }
+                            else { ctx.fillStyle = kat.color; ctx.fill(); }
+                            if (r.over) { ctx.beginPath(); ctx.arc(x, y, 7, 0, 2 * Math.PI); ctx.strokeStyle = '#e74c3c'; ctx.lineWidth = 1.5; ctx.stroke(); }
+                            E.pts.push({ x, y, r });
+                        });
+                    });
+                }
+
+                function hoverText(r) {
+                    return fDate(r.t) + ' ' + fTime(r.t) + ' · ' + L(KAT[r.k].de, KAT[r.k].en) + ' · ' + fMs(r.ec) + ' mS/cm' +
+                           (isFinite(r.temp) ? ' · ' + r.temp.toFixed(1) + ' °C' : '') +
+                           (r.over ? L(' · über Messbereich', ' · over range') : '') + (r.noTemp ? L(' · ohne Temperaturfühler', ' · no temperature probe') : '');
+                }
+
+                function renderCards() {
+                    const lastOf = k => { for (let i = E.rows.length - 1; i >= 0; i--) if (E.rows[i].k === k) return i; return -1; };
+                    const prevOf = (k, before) => { for (let i = before - 1; i >= 0; i--) if (E.rows[i].k === k) return E.rows[i]; return null; };
+                    $('ecCards').innerHTML = KAT.map((kat, k) => {
+                        const head = '<div class="ch-c-title">' + L(kat.de, kat.en) + '</div>';
+                        const li = lastOf(k);
+                        if (li < 0) return '<div class="ch-card" style="border-left-color:' + kat.color + ';">' + head + '<div class="ch-c-sub">' + L('Noch keine Messung', 'No measurement yet') + '</div></div>';
+                        const r = E.rows[li], p = prevOf(k, li);
+                        const sub = fDate(r.t) + ' ' + fTime(r.t) + (isFinite(r.temp) ? ' · ' + r.temp.toFixed(1) + ' °C' : '');
+                        let delta = '';
+                        if (p) {
+                            const d = (r.ec - p.ec) / 1000, pc = p.ec > 0 ? (r.ec - p.ec) / p.ec * 100 : 0;
+                            delta = L('zur vorigen', 'vs. previous') + ' (' + fDate(p.t) + '): ' + sgn(d.toFixed(2)) + ' mS/cm (' + sgn(pc.toFixed(0)) + ' %)';
+                        }
+                        let extra = '';
+                        if (k === 1) {   // Ruecklauf: Unterschied zur letzten Naehrloesung -- zeigt, was die Pflanzen aufnehmen
+                            const ni = lastOf(0);
+                            if (ni >= 0) {
+                                const n = E.rows[ni], d = (r.ec - n.ec) / 1000;
+                                extra = '<div class="ch-c-sub">' + L('zur Nährlösung', 'vs. nutrient solution') + ' (' + fDate(n.t) + '): ' + sgn(d.toFixed(2)) + ' mS/cm</div>';
+                            }
+                        }
+                        return '<div class="ch-card" style="border-left-color:' + kat.color + ';">' + head +
+                               '<div class="ch-c-main">' + fMs(r.ec) + ' <small>mS/cm</small></div>' +
+                               '<div class="ch-c-sub">' + sub + (r.over ? ' · <b style="color:#e74c3c;">' + L('über Messbereich', 'over range') + '</b>' : '') + '</div>' +
+                               (delta ? '<div class="ch-c-sub">' + delta + '</div>' : '') + extra + '</div>';
+                    }).join('');
+                }
+
+                function renderTable(rows) {
+                    const last = rows.slice(-50).reverse();
+                    if (!last.length) { $('ecTable').innerHTML = ''; return; }
+                    $('ecTable').innerHTML = '<tr><th>' + L('Datum', 'Date') + '</th><th>' + L('Zeit', 'Time') + '</th><th style="text-align:left;">' +
+                        L('Kategorie', 'Category') + '</th><th>mS/cm</th><th>µS/cm</th><th>°C</th><th style="text-align:left;">' + L('Hinweis', 'Note') + '</th></tr>' +
+                        last.map(r => '<tr><td>' + fDate(r.t) + '</td><td>' + fTime(r.t) + '</td><td style="text-align:left;"><span class="ch-sw" style="background:' +
+                            KAT[r.k].color + ';"></span>' + L(KAT[r.k].de, KAT[r.k].en) + '</td><td><b>' + fMs(r.ec) + '</b></td><td>' + Math.round(r.ec) +
+                            '</td><td>' + (isFinite(r.temp) ? r.temp.toFixed(1) : '–') + '</td><td style="text-align:left;">' +
+                            (r.over ? L('über Messbereich', 'over range') : r.noTemp ? L('ohne Temperaturfühler', 'no temperature probe') : '') + '</td></tr>').join('') +
+                        (rows.length > 50 ? '<tr><td colspan="7" style="text-align:left;color:#999;">' + L('… ältere Messungen in der CSV-Datei', '… older measurements in the CSV file') + '</td></tr>' : '');
+                }
+
+                function wire() {
+                    E.wired = true;
+                    $('ecReloadBtn').addEventListener('click', load);
+                    $('ecUploadBtn').addEventListener('click', () => $('ecUploadFile').click());
+                    $('ecUploadFile').addEventListener('change', ev => {
+                        const f = ev.target.files[0]; ev.target.value = '';
+                        if (f) upload(f);
+                    });
+                    $('ecRange').addEventListener('change', () => { if (E.loaded) render(); });
+                    const cv = $('ecCanvas');
+                    cv.addEventListener('mousemove', ev => {
+                        const b = cv.getBoundingClientRect(), mx = ev.clientX - b.left, my = ev.clientY - b.top;
+                        let best = null, bd = 144;
+                        E.pts.forEach(p => { const d = (p.x - mx) ** 2 + (p.y - my) ** 2; if (d < bd) { bd = d; best = p; } });
+                        $('ecHover').textContent = best ? hoverText(best.r) : '';
+                    });
+                    cv.addEventListener('mouseleave', () => { $('ecHover').textContent = ''; });
+                    window.addEventListener('resize', () => { if (E.loaded && $('chartsTab').classList.contains('active')) render(); });
+                }
+
+                const prevShow = window.chartsOnShow, prevLang = window.chartsOnLangChange;
+                window.chartsOnShow = function () {
+                    if (typeof prevShow === 'function') prevShow();
+                    if (!E.wired) wire();
+                    if (!E.loaded) load(); else render();
+                };
+                window.chartsOnLangChange = function () {
+                    if (typeof prevLang === 'function') prevLang();
+                    if (E.loaded) render();
+                };
+            })();
+            </script>
+
+            <!-- ============ Rücklauf (Füllstand-Modul, Datei Ruecklauf.csv) ============ -->
+            <h3 class="section-heading">♻️ <span class="de">Rücklauf</span><span class="en">Return flow</span></h3>
+            <div class="status-box-info ch-toolbar">
+                <label><span class="de">Zeitraum</span><span class="en">Period</span>
+                    <select id="rlRange">
+                        <option class="i18n-opt" value="14" data-de="14 Tage" data-en="14 days">14 Tage</option>
+                        <option class="i18n-opt" value="30" data-de="30 Tage" data-en="30 days">30 Tage</option>
+                        <option class="i18n-opt" value="90" data-de="90 Tage" data-en="90 days">90 Tage</option>
+                        <option class="i18n-opt" value="0" data-de="Alles" data-en="All">Alles</option>
+                    </select></label>
+                <button id="rlReloadBtn" class="ch-btn">🔄 <span class="de">Neu laden</span><span class="en">Reload</span></button>
+                <a class="ch-btn" style="text-decoration:none;" href="/api/logs/download?file=Ruecklauf.csv">⬇ CSV</a>
+                <span id="rlStatus" class="ch-status"></span>
+            </div>
+            <div class="ch-panel">
+                <div class="ch-head"><span class="ch-title"><span class="de">Rücklauf pro Tag (Liter)</span><span class="en">Return per day (litres)</span></span></div>
+                <canvas id="rlCanvas" class="ch-cv" style="height:200px;"></canvas>
+            </div>
+            <div class="ch-hoverbar"><span id="rlHover"></span></div>
+            <div id="rlCards" class="ch-cards"></div>
+            <div style="overflow-x:auto;margin-top:10px;"><table id="rlDays" class="ch-days"></table></div>
+            <div style="overflow-x:auto;margin-top:10px;"><table id="rlLast" class="ch-days"></table></div>
+            <div class="ch-hint">
+                <span class="de">Das Füllstand-Modul meldet jeden Pumpzyklus per WLAN. Liter = vollständige automatische Zyklen × Volumen zwischen den Schwimmern (am Modul eingestellt). „Bis MIN“ = Pumpzeit bis der untere Schwimmer frei ist, „Abstand“ = Zeit seit dem vorigen Zyklus (kürzer = mehr Rücklauf).</span>
+                <span class="en">The level module reports every pump cycle via WiFi. Litres = complete automatic cycles × volume between the floats (set on the module). "To MIN" = pumping time until the lower float is free, "Gap" = time since the previous cycle (shorter = more return flow).</span>
+            </div>
+
+            <script>
+            (function () {
+                'use strict';
+                const FILE = 'Ruecklauf.csv', DAY = 86400000;
+                const R = { rows: [], loaded: false, wired: false, bars: [] };
+                const $ = id => document.getElementById(id);
+                function L(de, en) { return (typeof currentLang !== 'undefined' && currentLang === 'en') ? en : de; }
+                const p2 = n => String(n).padStart(2, '0');
+                const fDate = t => { const d = new Date(t); return p2(d.getDate()) + '.' + p2(d.getMonth() + 1) + '.' + d.getFullYear(); };
+                const fTime = t => { const d = new Date(t); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+                const dayKey = t => { const d = new Date(t); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
+                function fDur(s) {
+                    s = Math.round(s);
+                    if (s >= 3600) return Math.floor(s / 3600) + ' h ' + p2(Math.floor(s / 60) % 60) + ' min';
+                    if (s >= 60) return Math.floor(s / 60) + ' min ' + p2(s % 60) + ' s';
+                    return s + ' s';
+                }
+                const ART = { auto: ['auto', 'auto'], manuell: ['manuell', 'manual'], stopp: ['abgebrochen', 'stopped'], alarm: ['Alarm', 'alarm'] };
+                const artTxt = a => ART[a] ? L(ART[a][0], ART[a][1]) : a;
+
+                function parse(txt) {
+                    const lines = txt.split(/\r?\n/), h = (lines[0] || '').split(',');
+                    const di = h.indexOf('Datum'), zi = h.indexOf('Zeit'), du = h.indexOf('Dauer_s'), bm = h.indexOf('BisMIN_s'),
+                          ai = h.indexOf('Art'), vi = h.indexOf('Volumen_ml');
+                    if (di < 0 || zi < 0 || du < 0) return [];
+                    const out = [];
+                    for (let i = 1; i < lines.length; i++) {
+                        if (!lines[i]) continue;
+                        const c = lines[i].split(','), d = (c[di] || '').split('-').map(Number), z = (c[zi] || '').split(':').map(Number);
+                        if (d.length < 3 || !d[0]) continue;
+                        out.push({ t: new Date(d[0], d[1] - 1, d[2], z[0] || 0, z[1] || 0, z[2] || 0).getTime(),
+                                   dur: +c[du] || 0, toMin: bm >= 0 ? (+c[bm] || 0) : 0, art: ai >= 0 ? c[ai] : 'auto',
+                                   ml: vi >= 0 ? (+c[vi] || 0) : 0 });
+                    }
+                    out.sort((a, b) => a.t - b.t);
+                    out.forEach((r, i) => { r.gap = i ? (r.t - out[i - 1].t) / 1000 : NaN; });
+                    return out;
+                }
+
+                async function load() {
+                    $('rlStatus').textContent = L('Lade …', 'Loading …');
+                    try {
+                        const r = await fetch('/api/logs/download?file=' + encodeURIComponent(FILE));
+                        R.rows = r.ok ? parse(await r.text()) : [];
+                        R.loaded = true;
+                        render();
+                    } catch (e) {
+                        $('rlStatus').textContent = L('Fehler beim Laden: ', 'Load error: ') + e;
+                    }
+                }
+
+                // Tage im Zeitraum (auch Tage ohne Zyklus, damit Luecken sichtbar sind)
+                function days() {
+                    const n = parseInt($('rlRange').value) || 0;
+                    const map = {};
+                    for (const r of R.rows) {
+                        const k = dayKey(r.t);
+                        const o = map[k] || (map[k] = { k, t: new Date(new Date(r.t).setHours(0, 0, 0, 0)).getTime(), n: 0, ml: 0, s: 0, toMin: 0, nAuto: 0, gS: 0, gN: 0 });
+                        if (isFinite(r.gap)) { o.gS += r.gap; o.gN++; }
+                        if (r.art === 'auto' || r.art === 'manuell') o.n++;
+                        if (r.art === 'auto') { o.nAuto++; o.toMin += r.toMin; }
+                        o.ml += r.ml; o.s += r.dur;
+                    }
+                    let first = R.rows.length ? new Date(R.rows[0].t).setHours(0, 0, 0, 0) : Date.now();
+                    const today = new Date().setHours(0, 0, 0, 0);
+                    if (n) first = Math.max(first, today - (n - 1) * DAY);
+                    const out = [];
+                    for (let t = first; t <= today; t = new Date(t + DAY * 1.5).setHours(0, 0, 0, 0)) {
+                        const k = dayKey(t);
+                        out.push(map[k] || { k, t, n: 0, ml: 0, s: 0, toMin: 0, nAuto: 0, gS: 0, gN: 0 });
+                    }
+                    return out;
+                }
+
+                function render() {
+                    const ds = days();
+                    const inRange = ds.length ? R.rows.filter(r => r.t >= ds[0].t) : [];
+                    $('rlStatus').textContent = R.rows.length ? inRange.length + L(' von ', ' of ') + R.rows.length + L(' Zyklen', ' cycles')
+                                                              : L('Noch keine Meldungen vom Füllstand-Modul.', 'No reports from the level module yet.');
+                    drawChart(ds);
+                    renderCards(ds);
+                    renderDays(ds);
+                    renderLast();
+                }
+
+                function drawChart(ds) {
+                    const cv = $('rlCanvas'), dpr = window.devicePixelRatio || 1;
+                    const W = cv.clientWidth || 600, H = cv.clientHeight || 200;
+                    cv.width = W * dpr; cv.height = H * dpr;
+                    const ctx = cv.getContext('2d');
+                    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                    ctx.clearRect(0, 0, W, H);
+                    R.bars = [];
+                    const PL = 40, PR = 10, PT = 10, PB = 24, pw = W - PL - PR, ph = H - PT - PB;
+                    ctx.font = '11px sans-serif'; ctx.fillStyle = '#888';
+                    if (!ds.length || !R.rows.length) { ctx.fillText(L('Keine Daten', 'No data'), PL, PT + ph / 2); return; }
+                    const maxL = Math.max(1, ...ds.map(d => d.ml / 1000));
+                    const yMax = Math.ceil(maxL * 1.15);
+                    const Y = v => PT + ph - v / yMax * ph;
+                    ctx.strokeStyle = '#eee'; ctx.lineWidth = 1; ctx.textAlign = 'right';
+                    for (let i = 0; i <= 4; i++) {
+                        const v = yMax * i / 4, y = Y(v);
+                        ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + pw, y); ctx.stroke();
+                        ctx.fillText(v.toFixed(v < 10 ? 1 : 0), PL - 5, y + 4);
+                    }
+                    const bw = pw / ds.length, step = Math.max(1, Math.ceil(ds.length / Math.floor(pw / 45)));
+                    ctx.textAlign = 'center';
+                    ds.forEach((d, i) => {
+                        const x = PL + i * bw, v = d.ml / 1000, y = Y(v);
+                        ctx.fillStyle = '#2e86de';
+                        if (v > 0) ctx.fillRect(x + bw * 0.15, y, bw * 0.7, PT + ph - y);
+                        R.bars.push({ x0: x, x1: x + bw, d });
+                        if (i % step === 0) {
+                            const dt = new Date(d.t);
+                            ctx.fillStyle = '#888';
+                            ctx.fillText(p2(dt.getDate()) + '.' + p2(dt.getMonth() + 1) + '.', x + bw / 2, H - 6);
+                        }
+                    });
+                }
+
+                function card(title, main, sub, color) {
+                    return '<div class="ch-card" style="border-left-color:' + (color || '#2e86de') + ';"><div class="ch-c-title">' + title +
+                           '</div><div class="ch-c-main">' + main + '</div>' + (sub ? '<div class="ch-c-sub">' + sub + '</div>' : '') + '</div>';
+                }
+
+                function renderCards(ds) {
+                    if (!R.rows.length) { $('rlCards').innerHTML = ''; return; }
+                    const today = ds[ds.length - 1], yest = ds.length > 1 ? ds[ds.length - 2] : null;
+                    // Mittel ueber die letzten 7 vollstaendigen Tage (ohne heute)
+                    const full = ds.slice(0, -1).slice(-7);
+                    const avg = full.length ? full.reduce((a, d) => a + d.ml, 0) / full.length / 1000 : NaN;
+                    const last = R.rows[R.rows.length - 1];
+                    $('rlCards').innerHTML =
+                        card(L('Heute', 'Today'), (today.ml / 1000).toFixed(1) + ' <small>l</small>', today.n + L(' Zyklen', ' cycles')) +
+                        (yest ? card(L('Gestern', 'Yesterday'), (yest.ml / 1000).toFixed(1) + ' <small>l</small>', yest.n + L(' Zyklen', ' cycles')) : '') +
+                        (isFinite(avg) ? card(L('Ø pro Tag', 'Avg per day'), avg.toFixed(1) + ' <small>l</small>', L('letzte ', 'last ') + full.length + L(' Tage (ohne heute)', ' days (excl. today)')) : '') +
+                        card(L('Letzter Zyklus', 'Last cycle'), fTime(last.t), fDate(last.t) + ' · ' + artTxt(last.art) +
+                             (isFinite(last.gap) ? ' · ' + L('Abstand ', 'gap ') + fDur(last.gap) : ''),
+                             last.art === 'alarm' ? '#e74c3c' : '#2e86de');
+                }
+
+                function renderDays(ds) {
+                    const rows = ds.slice().reverse();
+                    if (!R.rows.length) { $('rlDays').innerHTML = ''; return; }
+                    $('rlDays').innerHTML = '<tr><th style="text-align:left;">' + L('Tag', 'Day') + '</th><th>' + L('Zyklen', 'Cycles') + '</th><th>' +
+                        L('Liter', 'Litres') + '</th><th>' + L('Pumpzeit', 'Pump time') + '</th><th>' + L('Ø bis MIN', 'Avg to MIN') + '</th><th>' +
+                        L('Ø Abstand', 'Avg gap') + '</th></tr>' +
+                        rows.map(d => {
+                            const gap = d.gN ? fDur(d.gS / d.gN) : '–';
+                            return '<tr><td style="text-align:left;">' + fDate(d.t) + '</td><td>' + d.n + '</td><td><b>' + (d.ml / 1000).toFixed(1) +
+                                   '</b></td><td>' + (d.s ? fDur(d.s) : '–') + '</td><td>' + (d.nAuto ? fDur(d.toMin / d.nAuto) : '–') + '</td><td>' + gap + '</td></tr>';
+                        }).join('');
+                }
+
+                function renderLast() {
+                    const last = R.rows.slice(-30).reverse();
+                    if (!last.length) { $('rlLast').innerHTML = ''; return; }
+                    $('rlLast').innerHTML = '<tr><th style="text-align:left;">' + L('Start', 'Start') + '</th><th>' + L('Abstand', 'Gap') + '</th><th>' +
+                        L('Bis MIN', 'To MIN') + '</th><th>' + L('Dauer', 'Duration') + '</th><th>' + L('Liter', 'Litres') + '</th><th style="text-align:left;">' +
+                        L('Art', 'Type') + '</th></tr>' +
+                        last.map(r => '<tr><td style="text-align:left;">' + fDate(r.t) + ' ' + fTime(r.t) + '</td><td>' + (isFinite(r.gap) ? fDur(r.gap) : '–') +
+                            '</td><td>' + fDur(r.toMin) + '</td><td>' + fDur(r.dur) + '</td><td>' + (r.ml ? (r.ml / 1000).toFixed(1) : '–') +
+                            '</td><td style="text-align:left;' + (r.art === 'alarm' ? 'color:#e74c3c;' : '') + '">' + artTxt(r.art) + '</td></tr>').join('');
+                }
+
+                function wire() {
+                    R.wired = true;
+                    $('rlReloadBtn').addEventListener('click', load);
+                    $('rlRange').addEventListener('change', () => { if (R.loaded) render(); });
+                    const cv = $('rlCanvas');
+                    cv.addEventListener('mousemove', ev => {
+                        const b = cv.getBoundingClientRect(), mx = ev.clientX - b.left;
+                        const hit = R.bars.find(p => mx >= p.x0 && mx < p.x1);
+                        $('rlHover').textContent = hit ? fDate(hit.d.t) + ' · ' + (hit.d.ml / 1000).toFixed(1) + ' l · ' + hit.d.n + L(' Zyklen', ' cycles') : '';
+                    });
+                    cv.addEventListener('mouseleave', () => { $('rlHover').textContent = ''; });
+                    window.addEventListener('resize', () => { if (R.loaded && $('chartsTab').classList.contains('active')) render(); });
+                }
+
+                const prevShow = window.chartsOnShow, prevLang = window.chartsOnLangChange;
+                window.chartsOnShow = function () {
+                    if (typeof prevShow === 'function') prevShow();
+                    if (!R.wired) wire();
+                    if (!R.loaded) load(); else render();
+                };
+                window.chartsOnLangChange = function () {
+                    if (typeof prevLang === 'function') prevLang();
+                    if (R.loaded) render();
                 };
             })();
             </script>
