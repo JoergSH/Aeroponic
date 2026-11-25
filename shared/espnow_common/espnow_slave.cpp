@@ -28,6 +28,34 @@ static uint32_t      last_register_ms  = 0;
 static uint32_t      last_heartbeat_ms = 0;
 static uint32_t      last_master_rx_ms = 0;   // letzte gueltige Antwort des Masters
 
+// ========== Automatik (espnow_slave_begin): Kanalsuche, ID-Vergabe, Sendestufe ==========
+
+#define NODE_NVS_NS          "nodecfg"   // id/chan/txlvl -- dieselben Keys wie zuvor im EC-Meter
+#define HUNT_START_DELAY_MS  6500        // so lange auf dem gemerkten Kanal anmelden (~3 REGISTER)
+#define HUNT_DWELL_MS        1200        // je Kanal: ein REGISTER, Master antwortet in ms
+
+static bool          auto_mode        = false;
+static uint8_t       saved_channel    = 0;      // zuletzt erfolgreicher Kanal (NVS)
+static uint32_t      offline_since_ms = 0;      // seit wann REGISTERING
+static uint32_t      last_hop_ms      = 0;
+static bool          hunting          = false;
+static const int8_t* tx_levels        = nullptr;
+static uint8_t       tx_level_count   = 0;
+static uint8_t       tx_level_idx     = 0;
+static uint8_t       saved_tx_idx     = 0xFF;
+
+static void enter_registering(uint32_t now) {
+    state            = SLAVE_STATE_REGISTERING;
+    reg_retries      = 0;
+    last_register_ms = now - REGISTER_RETRY_MS;   // sofort ersten REGISTER senden
+    offline_since_ms = now;
+    hunting          = false;
+}
+
+static void apply_tx_level() {
+    if (tx_levels && tx_level_count) esp_wifi_set_max_tx_power(tx_levels[tx_level_idx]);
+}
+
 // ========== recv_queue — einfaches Flag statt FreeRTOS-Queue ==========
 // Wir speichern nur das letzte empfangene Paket; reicht für Register-ACK
 
@@ -37,6 +65,7 @@ static espnow_packet_t recv_pkt;
 
 static slave_command_cb_t command_cb  = nullptr;
 static slave_config_cb_t  config_cb   = nullptr;
+static slave_data_ack_cb_t data_ack_cb = nullptr;
 static volatile bool      ota_pending = false;
 static char               ota_ap_pass[9] = {};
 
@@ -160,7 +189,24 @@ static void handle_register_ack(const espnow_packet_t& pkt) {
         Serial.println("[SLAVE] REGISTER_ACK: payload_len=0, ignoriert");
         return;
     }
-    if (pkt.payload[0] != my_node_id) {
+    uint8_t flags = pkt.payload_len >= 2 ? pkt.payload[1] : 0;
+    if (auto_mode && (flags & ACK_FLAG_ID_ASSIGN)) {
+        // Master vergibt die ID (beim Koppeln im Webinterface gewaehlt). Nur vom gekoppelten
+        // Master oder -- noch ungekoppelt -- von dem, der uns gerade koppelt (process_recv).
+        uint8_t id = pkt.payload[0];
+        if (id == NODE_ID_UNASSIGNED || id == 0xFF) {
+            Serial.printf("[SLAVE] REGISTER_ACK: ungueltige ID %u, ignoriert\n", id);
+            return;
+        }
+        if (id != my_node_id) {
+            Serial.printf("[SLAVE] Node-ID vom Master: %u (bisher %u) -- gespeichert\n", id, my_node_id);
+            my_node_id = id;
+            Preferences p;
+            p.begin(NODE_NVS_NS, false);
+            p.putUChar("id", id);
+            p.end();
+        }
+    } else if (pkt.payload[0] != my_node_id) {
         Serial.printf("[SLAVE] REGISTER_ACK: fuer node_id=0x%02X (meins=0x%02X), ignoriert\n",
                       pkt.payload[0], my_node_id);
         return;
@@ -230,7 +276,8 @@ static void process_recv() {
         case MSG_HEARTBEAT_ACK:
             break;
         case MSG_DATA_ACK:
-            break;  // Master-ACK auf send_data
+            if (data_ack_cb) data_ack_cb(pkt.seq);   // Master-ACK auf send_data
+            break;
         case MSG_UNPAIR:
             Serial.println("[SLAVE] Master hat die Kopplung geloest");
             espnow_slave_unpair();
@@ -255,17 +302,101 @@ static void process_recv() {
     }
 }
 
+// Kanalsuche: der Master funkt auf dem Kanal seines WLAN-Routers. Erst den gemerkten Kanal
+// probieren, dann reihum 1..13 je ein Anmeldeversuch. Nach jedem vollen Durchlauf ohne
+// Antwort ggf. die naechste Sendestufe. Gefundenen Kanal/Stufe merken.
+static void auto_loop(uint32_t now) {
+    if (state == SLAVE_STATE_ONLINE) {
+        if (hunting) {
+            hunting = false;
+            Serial.printf("[SLAVE] Master gefunden auf Kanal %u\n", my_channel);
+        }
+        if (my_channel != saved_channel || (tx_level_count && tx_level_idx != saved_tx_idx)) {
+            saved_channel = my_channel;
+            saved_tx_idx  = tx_level_idx;
+            Preferences p;
+            p.begin(NODE_NVS_NS, false);
+            p.putUChar("chan", my_channel);
+            if (tx_level_count) p.putUChar("txlvl", tx_level_idx);
+            p.end();
+        }
+        return;
+    }
+    if (state != SLAVE_STATE_REGISTERING) return;
+    if (now - offline_since_ms < HUNT_START_DELAY_MS) return;
+    if (hunting && now - last_hop_ms < HUNT_DWELL_MS) return;
+    hunting     = true;
+    last_hop_ms = now;
+    uint8_t ch = my_channel % 13 + 1;
+    if (ch == saved_channel && tx_level_count) {   // ein Durchlauf ohne Antwort -> naechste Stufe
+        tx_level_idx = (tx_level_idx + 1) % tx_level_count;
+        apply_tx_level();
+    }
+    espnow_slave_set_channel(ch);
+    if (tx_level_count)
+        Serial.printf("[SLAVE] Suche Master: Kanal %u, %.1f dBm%s\n", ch, tx_levels[tx_level_idx] / 4.0f,
+                      master_known ? "" : " (nicht gekoppelt -- an der Steuerung unter 'Neu gefunden' koppeln)");
+    else
+        Serial.printf("[SLAVE] Suche Master: Kanal %u%s\n", ch,
+                      master_known ? "" : " (nicht gekoppelt -- an der Steuerung unter 'Neu gefunden' koppeln)");
+}
+
 // ========== Oeffentliche API ==========
+
+void espnow_slave_set_tx_levels(const int8_t* levels_qdbm, uint8_t count, uint8_t default_idx) {
+    tx_levels      = levels_qdbm;
+    tx_level_count = levels_qdbm ? count : 0;
+    tx_level_idx   = default_idx < count ? default_idx : 0;
+}
+
+float espnow_slave_get_tx_dbm() {
+    return tx_level_count ? tx_levels[tx_level_idx] / 4.0f : 0.0f;
+}
+
+bool espnow_slave_is_hunting() { return hunting; }
+
+uint8_t espnow_slave_get_node_id() { return my_node_id; }
+
+void espnow_slave_begin(uint8_t node_type, uint8_t fallback_id) {
+    Preferences p;
+    p.begin(NODE_NVS_NS, true);
+    uint8_t id = p.getUChar("id", 0xFF);
+    uint8_t ch = p.getUChar("chan", 0);
+    uint8_t tx = p.getUChar("txlvl", 0xFF);
+    p.end();
+    if (id == 0xFF) id = fallback_id;   // 0xFF = nie gespeichert (frueher auch "kein Setup")
+    if (ch < 1 || ch > 13) {
+        // Uebernahme aus dem frueheren seriellen WLAN-Setup (Steckdosen, Multisensor)
+        p.begin("wificfg", true);
+        ch = p.getUChar("channel", 0);
+        p.end();
+        saved_channel = 0;               // nach erster Verbindung im neuen Key speichern
+        if (ch < 1 || ch > 13) ch = ESPNOW_DEFAULT_CHANNEL;
+    } else {
+        saved_channel = ch;
+    }
+    if (tx_level_count) {
+        if (tx < tx_level_count) tx_level_idx = tx;
+        saved_tx_idx = tx;
+    }
+
+    auto_mode = true;
+    espnow_slave_init(id, node_type, ch);
+    apply_tx_level();
+    if (tx_level_count)
+        Serial.printf("[SLAVE] Automatik: ID %u, Kanal %u, %.1f dBm\n", id, ch, espnow_slave_get_tx_dbm());
+    else
+        Serial.printf("[SLAVE] Automatik: ID %u, Kanal %u\n", id, ch);
+}
 
 void espnow_slave_init(uint8_t node_id, uint8_t node_type, uint8_t channel) {
     my_node_id   = node_id;
     my_node_type = node_type;
     my_channel   = channel;
-    state        = SLAVE_STATE_REGISTERING;
-    reg_retries  = 0;
     master_known = false;
     slave_seq    = 0;
     recv_pending = false;
+    enter_registering(millis());
 
     Serial.printf("[SLAVE] Init: node_id=0x%02X type=0x%02X channel=%d\n",
                   node_id, node_type, channel);
@@ -333,6 +464,7 @@ void espnow_slave_loop() {
     }
 
     uint32_t now = millis();
+    if (auto_mode) auto_loop(now);
 
     if (state == SLAVE_STATE_REGISTERING) {
         // Nach REGISTER_MAX_RETRIES schnellen Versuchen nicht aufgeben (sonst bleibt der Node
@@ -346,7 +478,7 @@ void espnow_slave_loop() {
                 Serial.println("[SLAVE] Master antwortet nicht -- versuche weiter alle 30 s");
             if (reg_retries < 255) reg_retries++;
 
-            Serial.printf("[SLAVE] REGISTER Versuch %d\n", reg_retries);
+            if (!hunting) Serial.printf("[SLAVE] REGISTER Versuch %d (Kanal %u)\n", reg_retries, my_channel);
 
 #ifdef ESPNOW_DEBUG
             uint8_t my_mac[6];
@@ -364,16 +496,15 @@ void espnow_slave_loop() {
             pkt.node_id     = my_node_id;
             pkt.msg_type    = MSG_REGISTER;
             pkt.seq         = slave_seq++;
-            pkt.payload_len = 1;
+            pkt.payload_len = auto_mode ? 2 : 1;
             pkt.payload[0]  = my_node_type;
+            pkt.payload[1]  = auto_mode ? NODE_CAP_ID_ASSIGN : 0;
             send_pkt_to(BROADCAST_MAC, &pkt);
         }
     } else if (state == SLAVE_STATE_ONLINE) {
         if (now - last_master_rx_ms > MASTER_LOST_MS) {
             Serial.println("[SLAVE] Keine Antwort vom Master seit 30 s -- melde neu an");
-            state            = SLAVE_STATE_REGISTERING;
-            reg_retries      = 0;
-            last_register_ms = now - REGISTER_RETRY_MS;   // sofort ersten REGISTER senden
+            enter_registering(now);
             return;
         }
         if (now - last_heartbeat_ms >= HEARTBEAT_INTERVAL_MS) {
@@ -404,9 +535,7 @@ void espnow_slave_unpair() {
         print_mac("[SLAVE] Kopplung geloest, vergessen:", master_mac);
     }
     master_known     = false;
-    state            = SLAVE_STATE_REGISTERING;
-    reg_retries      = 0;
-    last_register_ms = millis() - REGISTER_RETRY_MS;   // sofort neu anmelden
+    enter_registering(millis());   // sofort neu anmelden (ID bleibt als Vorschlag erhalten)
 }
 
 bool espnow_slave_send_data(const uint8_t* payload, uint8_t len) {
@@ -434,3 +563,29 @@ bool espnow_slave_send_error(uint8_t error_code) {
 
 void espnow_slave_set_command_cb(slave_command_cb_t cb) { command_cb = cb; }
 void espnow_slave_set_config_cb(slave_config_cb_t cb)   { config_cb  = cb; }
+void espnow_slave_set_data_ack_cb(slave_data_ack_cb_t cb) { data_ack_cb = cb; }
+uint8_t espnow_slave_last_seq() { return (uint8_t)(slave_seq - 1); }
+
+void espnow_slave_set_channel(uint8_t channel) {
+    if (channel == my_channel) return;
+    my_channel = channel;
+    // Waehrend der Suche sofort auf dem neuen Kanal anmelden und im schnellen Takt bleiben --
+    // sonst laeuft nach REGISTER_MAX_RETRIES nur noch alle 30 s ein Versuch, waehrend der
+    // Aufrufer laengst weitergesprungen ist.
+    if (state == SLAVE_STATE_REGISTERING) {
+        reg_retries      = 0;
+        last_register_ms = millis() - REGISTER_RETRY_MS;
+    }
+    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, BROADCAST_MAC, 6);
+    peer.channel = channel;
+    peer.encrypt = false;
+    esp_now_mod_peer(&peer);
+    if (master_known) {
+        memcpy(peer.peer_addr, master_mac, 6);
+        esp_now_mod_peer(&peer);
+    }
+}
+
+uint8_t espnow_slave_get_channel() { return my_channel; }

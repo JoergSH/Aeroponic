@@ -36,145 +36,10 @@ static bool           error_sent     = false;
 static bool           use_espnow     = false;
 static Preferences    prefs;
 
-// ========== WiFi-Kanal (inline) ==========
-
-static uint8_t channel_setup() {
-    prefs.begin("wificfg", true);
-    String ssid = prefs.getString("ssid", "");
-    uint8_t ch  = prefs.getUChar("channel", 0);
-    prefs.end();
-
-    if (ch > 0 && !ssid.isEmpty()) {
-        // Router kann seinen Kanal jederzeit wechseln (Auto-Channel, Neustart nach
-        // Stromausfall, ...) -- der gespeicherte Wert waere dann dauerhaft falsch, ohne dass
-        // das je auffaellt (der Node haette einfach keine Verbindung zum Master mehr). Deshalb
-        // bei jedem Boot still im Hintergrund pruefen statt dem gespeicherten Kanal blind zu
-        // vertrauen -- kein Serial-Prompt noetig, die SSID ist ja schon bekannt.
-        Serial.printf("[WIFI] Gespeichert: Kanal %d (SSID: '%s') -- verifiziere...\n", ch, ssid.c_str());
-        int n = WiFi.scanNetworks();
-        uint8_t found_ch = 0;
-        for (int i = 0; i < n; i++) {
-            if (ssid.equals(WiFi.SSID(i))) { found_ch = (uint8_t)WiFi.channel(i); break; }
-        }
-        WiFi.scanDelete();
-        if (found_ch > 0 && found_ch != ch) {
-            Serial.printf("[WIFI] Router-Kanal geaendert: %d -> %d, aktualisiere\n", ch, found_ch);
-            prefs.begin("wificfg", false);
-            prefs.putUChar("channel", found_ch);
-            prefs.end();
-            return found_ch;
-        }
-        if (found_ch == 0) {
-            Serial.println("[WIFI] SSID im Scan nicht gefunden, nutze gespeicherten Kanal weiter");
-        } else {
-            Serial.println("[WIFI] Kanal stimmt noch");
-        }
-        return ch;
-    }
-    if (ch > 0 && ssid.isEmpty()) {
-        Serial.printf("[WIFI] Kein WLAN, fester Kanal %d\n", ch);
-        return ch;
-    }
-
-    Serial.println("[WIFI] Kein Kanal gespeichert, scanne...");
-    int n = WiFi.scanNetworks();
-    Serial.printf("[WIFI] %d Netzwerke gefunden\n", n);
-
-    if (n <= 0) {
-        Serial.printf("[WIFI] Keine Netzwerke, Fallback Kanal %d\n", ESPNOW_DEFAULT_CHANNEL);
-        WiFi.scanDelete();
-        return ESPNOW_DEFAULT_CHANNEL;
-    }
-
-    for (int i = 0; i < n; i++)
-        Serial.printf("  [%2d] %-32s  Kanal %2d  %d dBm\n",
-                      i + 1, WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
-    Serial.printf("  [ 0] Kein WLAN (fester Kanal %d)\n", ESPNOW_DEFAULT_CHANNEL);
-    Serial.printf("Nummer (0-%d) + Enter (60s Timeout):\n", n);
-    while (Serial.available()) Serial.read();
-
-    uint32_t t0 = millis();
-    while (!Serial.available()) {
-        if (millis() - t0 > 60000) {
-            Serial.printf("[WIFI] Timeout, Fallback Kanal %d\n", ESPNOW_DEFAULT_CHANNEL);
-            WiFi.scanDelete();
-            return ESPNOW_DEFAULT_CHANNEL;
-        }
-        delay(50);
-    }
-
-    int choice = Serial.readStringUntil('\n').toInt();
-
-    if (choice == 0) {
-        WiFi.scanDelete();
-        prefs.begin("wificfg", false);
-        prefs.putString("ssid", "");
-        prefs.putUChar("channel", ESPNOW_DEFAULT_CHANNEL);
-        prefs.end();
-        Serial.printf("[WIFI] Kein WLAN, Kanal %d gespeichert\n", ESPNOW_DEFAULT_CHANNEL);
-        return ESPNOW_DEFAULT_CHANNEL;
-    }
-
-    if (choice < 1 || choice > n) {
-        Serial.printf("[WIFI] Ungueltige Auswahl, Fallback Kanal %d\n", ESPNOW_DEFAULT_CHANNEL);
-        WiFi.scanDelete();
-        return ESPNOW_DEFAULT_CHANNEL;
-    }
-
-    String  chosen_ssid = WiFi.SSID(choice - 1);
-    uint8_t chosen_ch   = (uint8_t)WiFi.channel(choice - 1);
-    WiFi.scanDelete();
-
-    prefs.begin("wificfg", false);
-    prefs.putString("ssid", chosen_ssid);
-    prefs.putUChar("channel", chosen_ch);
-    prefs.end();
-
-    Serial.printf("[WIFI] Gespeichert: '%s' Kanal %d\n", chosen_ssid.c_str(), chosen_ch);
-    return chosen_ch;
-}
-
-#define CHANNEL_RECHECK_INTERVAL_MS (12UL * 3600000UL)  // 12h
-
-// Ergaenzt die Boot-Pruefung in channel_setup(): falls der Router den Kanal waehrend des
-// laufenden Betriebs wechselt (Node selbst laeuft ja oft monatelang durch, ohne neu zu
-// starten), wuerde das sonst erst beim naechsten Reboot auffallen. Scan stoert ESP-NOW kurz
-// (Kanal-Hopping), daher nur selten pruefen.
-static void recheck_channel_if_needed() {
-    static uint32_t last_check_ms = 0;
-    uint32_t now = millis();
-    if (now - last_check_ms < CHANNEL_RECHECK_INTERVAL_MS) return;
-    last_check_ms = now;
-
-    prefs.begin("wificfg", true);
-    String  ssid      = prefs.getString("ssid", "");
-    uint8_t stored_ch = prefs.getUChar("channel", 0);
-    prefs.end();
-    if (ssid.isEmpty()) return;  // kein WLAN konfiguriert (fester Kanal) -- nichts zu pruefen
-
-    Serial.println("[WIFI] Periodische Kanal-Pruefung...");
-    int n = WiFi.scanNetworks();
-    uint8_t found_ch = 0;
-    for (int i = 0; i < n; i++) {
-        if (ssid.equals(WiFi.SSID(i))) { found_ch = (uint8_t)WiFi.channel(i); break; }
-    }
-    WiFi.scanDelete();
-
-    if (found_ch > 0 && found_ch != stored_ch) {
-        Serial.printf("[WIFI] Router-Kanal hat sich waehrend des Betriebs geaendert (%d -> %d) -- starte neu\n",
-                      stored_ch, found_ch);
-        prefs.begin("wificfg", false);
-        prefs.putUChar("channel", found_ch);
-        prefs.end();
-        delay(300);
-        ESP.restart();
-    }
-
-    // Der Scan selbst hat den Funkkanal verstellt, auch wenn sich nichts geaendert hat --
-    // zurueck auf den ESP-NOW-Betriebskanal, sonst bleibt der Node bis zum naechsten Reboot
-    // auf dem zuletzt gescannten Kanal haengen und faellt scheinbar grundlos offline.
-    esp_wifi_set_channel(stored_ch, WIFI_SECOND_CHAN_NONE);
-}
+// ========== Funkkanal / Node-ID ==========
+// Kein serielles WLAN-Setup mehr: den Kanal sucht espnow_slave_begin() selbst (Kanal des
+// Masters), ein frueher gespeicherter (wificfg/channel) wird uebernommen. Die Node-ID ist
+// MY_NODE_ID, bis der Master beim Koppeln eine andere vergibt.
 
 // ========== Sensordaten senden ==========
 
@@ -299,9 +164,8 @@ void setup() {
         Serial.println("[MAIN] Kein RS485 Master — starte ESP-NOW...");
         use_espnow = true;
         WiFi.mode(WIFI_STA);
-        uint8_t channel = channel_setup();
         espnow_slave_set_command_cb(on_command);
-        espnow_slave_init(MY_NODE_ID, MY_NODE_TYPE, channel);
+        espnow_slave_begin(MY_NODE_TYPE, MY_NODE_ID);
         dev_state = DEV_REGISTERING;
     }
 }
@@ -310,19 +174,14 @@ void loop() {
     if (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
-        if (cmd == "WIFICLEAR") {
-            prefs.begin("wificfg", false);
-            prefs.clear();
-            prefs.end();
-            Serial.println("[WIFI] Geloescht, starte neu...");
-            delay(300);
-            ESP.restart();
-        } else if (cmd == "WIFIINFO") {
-            prefs.begin("wificfg", true);
-            Serial.printf("[WIFI] SSID: '%s'  Kanal: %d\n",
-                          prefs.getString("ssid", "").c_str(),
-                          prefs.getUChar("channel", 0));
-            prefs.end();
+        if (cmd == "NODEINFO") {
+            if (!use_espnow) Serial.println("[NODE] RS485-Betrieb, ESP-NOW aus");
+            else Serial.printf("[NODE] Multisensor  ID=%u  Kanal %u  gekoppelt=%s  %s\n",
+                               espnow_slave_get_node_id(), espnow_slave_get_channel(),
+                               espnow_slave_is_paired() ? "ja" : "nein",
+                               espnow_slave_is_online() ? "online" : (espnow_slave_is_hunting() ? "sucht Master" : "meldet an"));
+        } else if (cmd == "UNPAIR" && use_espnow) {
+            espnow_slave_unpair();
         }
     }
 
@@ -347,7 +206,6 @@ void loop() {
             break;
 
         case DEV_ONLINE:
-            if (use_espnow) recheck_channel_if_needed();
             sensor_manager_loop();
             if (sensor_manager_data_ready()) {
                 sensor_data_t d;
